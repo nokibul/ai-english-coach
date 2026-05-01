@@ -1,0 +1,231 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>AI English Learner</title>
+    <link rel="stylesheet" href="/static/styles.css">
+  </head>
+  <body>
+    <div class="noise-layer"></div>
+    <div class="ambient ambient-one"></div>
+    <div class="ambient ambient-two"></div>
+
+    <header class="app-topbar">
+      <div class="app-topbar-inner">
+        <div class="topbar-brand">
+          <div class="brand-mark">AE</div>
+          <div class="brand-copy">
+            <p class="eyebrow">AI English Learner</p>
+            <h1 class="topbar-title">Learn</h1>
+          </div>
+        </div>
+
+        <div class="topbar-actions">
+          <div class="compact-progress">
+            <div class="compact-pill">
+              <span class="compact-label">XP</span>
+              <strong id="xpValue" class="compact-value">0</strong>
+            </div>
+            <div class="compact-pill">
+              <span class="compact-label">Streak</span>
+              <strong id="streakValue" class="compact-value">0</strong>
+            </div>
+          </div>
+
+          <button id="newSessionButton" class="new-session-button hidden" type="button" aria-label="Start a new session">
+            <span class="new-session-icon">+</span>
+          </button>
+          <button id="dashboardButton" class="ghost-button" type="button">Dashboard</button>
+        </div>
+      </div>
+    </header>
+
+    <main class="learn-page">
+      <div class="learn-shell">
+        <section id="learnIntro" class="learn-intro">
+          <p class="eyebrow">Step By Step</p>
+          <h2 class="learn-title">Upload an image, explain it yourself, then improve with feedback.</h2>
+          <p class="learn-copy">
+            The page keeps the core activity simple: write, rewrite, and start the quiz when you are ready.
+          </p>
+        </section>
+
+        <section id="composePanel" class="compose-card upload-stage-card">
+          <div class="section-head upload-stage-head">
+            <div>
+              <p class="eyebrow">Step 1</p>
+              <h3>Upload an image</h3>
+            </div>
+            <div id="userBadge" class="user-badge">Guest mode</div>
+          </div>
+
+          <form id="analyzeForm" class="upload-form">
+            <label class="upload-dropzone learn-dropzone" for="imageInput">
+              <input id="imageInput" name="image" type="file" accept="image/*" capture="environment" required>
+
+              <div id="uploadPlaceholder" class="upload-placeholder">
+                <span class="dropzone-kicker">Image Input</span>
+                <span class="dropzone-title">Tap to upload or drag a photo here</span>
+                <span id="fileNameLabel" class="dropzone-subtitle">
+                  JPG, PNG, WEBP, or GIF up to 8 MB
+                </span>
+              </div>
+
+              <div id="imagePreviewShell" class="image-preview-shell hidden">
+                <img id="imagePreview" src="" alt="Selected upload preview">
+              </div>
+            </label>
+
+            <button id="analyzeButton" class="primary-button generate-button" type="submit" disabled>
+              Generate Explanation
+            </button>
+          </form>
+        </section>
+
+        <section id="sessionWorkspace" class="session-workspace hidden">
+          <aside id="sessionLibrarySection" class="compose-card session-library-section hidden">
+            <div class="section-head">
+              <div>
+                <p class="eyebrow">Past Lessons</p>
+                <h3>Continue learning</h3>
+              </div>
+            </div>
+
+            <div id="sessionList" class="learn-session-list"></div>
+            <div id="sessionLoadSentinel" class="session-load-sentinel hidden">Loading more lessons...</div>
+          </aside>
+
+          <section id="sessionDetailPanel" class="lesson-panel hidden"></section>
+        </section>
+      </div>
+    </main>
+
+    <button id="quizLauncherButton" class="floating-quiz-button" type="button" disabled>
+      <span class="floating-quiz-label">Start Quiz</span>
+      <span id="quizDueBadge" class="badge">0</span>
+    </button>
+
+    <div id="dashboardModal" class="modal hidden">
+      <div class="modal-card dashboard-modal-card">
+        <div class="modal-header">
+          <div>
+            <p class="eyebrow">Dashboard</p>
+            <h3>Your learning space</h3>
+          </div>
+          <button id="closeDashboardButton" class="ghost-button" type="button">Close</button>
+        </div>
+
+        <div id="dashboardContent" class="dashboard-content">
+          <p class="muted">Sign in to see your progress, review queue, and daily challenge.</p>
+        </div>
+      </div>
+    </div>
+
+    <div id="authOverlay" class="auth-overlay">
+      <div class="auth-card">
+        <div class="auth-intro">
+          <p class="eyebrow">Sign Up Or Log In</p>
+          <h2>Build English from real scenes, then review it at the right time.</h2>
+          <p class="muted">
+            Register with your phone number and password, verify with an email OTP, then start building saved image lessons, quizzes, and daily challenges.
+          </p>
+        </div>
+
+        <div class="auth-tabs">
+          <button id="signupTab" class="auth-tab active" type="button">Sign up</button>
+          <button id="loginTab" class="auth-tab" type="button">Log in</button>
+        </div>
+
+        <form id="signupForm" class="auth-form">
+          <div class="field-row">
+            <label class="field-block">
+              <span class="field-label">Full name</span>
+              <input name="full_name" type="text" required placeholder="Learner name">
+            </label>
+            <label class="field-block">
+              <span class="field-label">Phone number</span>
+              <input name="phone" type="tel" required placeholder="+8801XXXXXXXXX">
+            </label>
+          </div>
+
+          <div class="field-row">
+            <label class="field-block">
+              <span class="field-label">Email</span>
+              <input name="email" type="email" required placeholder="you@example.com">
+            </label>
+            <label class="field-block">
+              <span class="field-label">Password</span>
+              <input name="password" type="password" required minlength="8" placeholder="At least 8 characters">
+            </label>
+          </div>
+
+          <div id="assessmentQuestions" class="assessment-grid"></div>
+
+          <button id="signupButton" class="primary-button" type="submit">Create account</button>
+        </form>
+
+        <form id="loginForm" class="auth-form hidden">
+          <label class="field-block">
+            <span class="field-label">Phone number</span>
+            <input name="phone" type="tel" required placeholder="+8801XXXXXXXXX">
+          </label>
+          <label class="field-block">
+            <span class="field-label">Password</span>
+            <input name="password" type="password" required placeholder="Your password">
+          </label>
+          <button id="loginButton" class="primary-button" type="submit">Log in</button>
+        </form>
+
+        <form id="verifyForm" class="auth-form hidden">
+          <p class="verify-copy">
+            We sent a six-digit OTP to <strong id="verificationEmailLabel"></strong>.
+          </p>
+          <input id="verificationEmailInput" type="hidden" name="email">
+          <label class="field-block">
+            <span class="field-label">Email OTP</span>
+            <input name="otp" type="text" inputmode="numeric" maxlength="6" required placeholder="123456">
+          </label>
+          <button class="primary-button" type="submit">Verify and continue</button>
+          <button id="resendOtpButton" class="text-button" type="button">Resend OTP</button>
+        </form>
+      </div>
+    </div>
+
+    <div id="quizModal" class="modal hidden">
+      <div class="modal-card quiz-modal-card">
+        <div class="modal-header">
+          <div>
+            <p id="quizModalLabel" class="eyebrow">Quiz Mode</p>
+            <h3 id="quizModalTitle">Quick review</h3>
+          </div>
+          <button id="closeQuizButton" class="ghost-button" type="button">Close</button>
+        </div>
+
+        <div id="quizContent" class="review-content">
+          <p class="muted">Your next quiz question will appear here.</p>
+        </div>
+      </div>
+    </div>
+
+    <div id="languageModal" class="modal hidden">
+      <div class="modal-card language-modal-card">
+        <div class="modal-header">
+          <div>
+            <p id="languageModalLabel" class="eyebrow">Reusable Language</p>
+            <h3 id="languageModalTitle">More examples</h3>
+          </div>
+          <button id="closeLanguageModalButton" class="ghost-button" type="button">Close</button>
+        </div>
+
+        <div id="languageModalContent" class="language-modal-content">
+          <p class="muted">Tap a reusable word or phrase to see more examples.</p>
+        </div>
+      </div>
+    </div>
+
+    <div id="toast" class="toast hidden"></div>
+
+    <script src="/static/app.js?v=20260501-answer-validation" defer></script>
+  </body>
+</html>

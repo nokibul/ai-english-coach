@@ -1,0 +1,17 @@
+__pycache__/
+*.py[cod]
+.venv/
+.env
+
+# Runtime app state: SQLite databases and uploaded user images.
+app_data/
+
+# Local model weights/cache live outside runtime app state.
+models/
+
+# Legacy runtime/model location from older local setups.
+data/
+
+# Local tool or accidental install artifacts.
+.codex
+=4.0
