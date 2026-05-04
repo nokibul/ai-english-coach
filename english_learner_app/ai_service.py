@@ -392,14 +392,20 @@ class AIAnalyzer:
             "You are an English writing coach for image description practice.\n"
             f"Learner level: {level_label(canonical_level(learner_level))}.\n"
             "The reference description is only visual context, not the perfect answer and not a text to copy.\n"
-            "Evaluate the learner's answer on its own quality: accuracy to the image, clarity, vocabulary, sentence structure, depth of observation, important missing visible details, and how well the learner expresses their own version.\n"
+            "Evaluate the learner's answer like a realistic human English coach.\n"
+            "Score in this order: validity/relevance, main subject, setting/background, important visible details, mood/atmosphere or interpretation, English clarity/naturalness, then reusable language.\n"
+            "Judge coverage of the whole image before language quality: main subject, setting/background, important objects/details, mood/atmosphere, and relationships/positions between things.\n"
+            "The main subject of the image is mandatory for high scores. Good English must not compensate for missing the main subject.\n"
+            "Then judge accuracy, clarity, vocabulary, sentence structure, depth of observation, important missing major parts, and how well the learner expresses their own version.\n"
             "Before normal feedback, validate that the answer is understandable English, long enough to evaluate, related to the uploaded image, and mentions visible image elements.\n"
             "If the answer is nonsense, random text, too short, or off-topic, return a low score, empty improvedVersion, and fixes that ask the learner to try again.\n"
             "Do not reward, polish, or preserve unrelated text.\n"
             "The feedback should feel like a personal coach: short, clear, specific, encouraging, and action-oriented.\n"
             "Return valid JSON only with this exact structured shape:\n"
             '{ "score": 0, "scores": {"vocabulary": 0, "structure": 0, "depth": 0, "clarity": 0}, '
+            '"languageQuality": {"score": 0, "clarity": 0, "vocabulary": 0, "structure": 0, "grammar": 0, "naturalness": 0, "reusableLanguage": 0}, '
             '"answerValidation": {"valid": true, "reason": "", "retryMessage": ""}, '
+            '"coverage": {"level": "low", "mainSubjectMentioned": false, "mainActionMentioned": false, "imageParts": [{"name": "", "description": "", "type": "main_subject", "required": true, "weight": 0, "coverageStatus": "missing", "covered": false, "evidence": ""}], "missingMajorParts": [], "coverageScore": 0, "coveragePercent": 0, "accuracyPenalty": 0, "scoreCapApplied": 0, "reason": ""}, '
             '"mainIssue": "", "whatWentWell": ["", ""], "fixes": ["", "", ""], '
             '"reusableLanguage": {"usedWell": [""], "tryNext": [""], "misused": [{"phrase": "", "note": ""}], "message": ""}, '
             '"missingDetails": ["", "", ""], '
@@ -409,12 +415,40 @@ class AIAnalyzer:
             "- First set answerValidation.valid to false if the answer is not understandable English, not relevant to the image, does not mention at least one visible element, is too short, random, or nonsense.\n"
             "- If answerValidation.valid is false: score must be 0-15, improvedVersion must be empty, inlineImprovements must be empty, whatWentWell must be empty, and fixes must tell the learner to mention the main subject, describe the setting, and add 1-2 visible details.\n"
             "- If answerValidation.valid is false: mainIssue should be a short justification such as 'Your answer does not clearly describe the image yet.'\n"
+            "- For valid answers, first divide the image into major required parts before scoring: foreground, main subject, main action, setting/background, important objects, and mood/overall meaning.\n"
+            "- In coverage.imageParts, list each required part with its weight, coverageStatus, whether the learner covered it, and short evidence from the learner answer. Omit a part only when it truly does not exist in the image, such as main action in a still object photo.\n"
+            "- For every required part, classify coverageStatus strictly as covered, partially_covered, missing, or inaccurate. Do not assume coverage unless it is clearly stated in the learner answer.\n"
+            "- Scoring by status: covered = full weight; partially_covered = 50% of weight; missing = 0; inaccurate = 0 and apply an accuracy penalty if the inaccuracy is serious.\n"
+            "- Explicitly set coverage.mainSubjectMentioned and coverage.mainActionMentioned.\n"
+            "- Calculate coverage.coverageScore as the sum of covered and partially covered weights, where partial coverage earns 50% of that part's weight. If the learner only mentions background and mood, coverageScore should be low, such as around 30/100.\n"
+            "- Use weighted coverage as the base of the final score. Typical weights are: main subject 25%, main action 20%, setting/background 15%, important objects 15%, foreground/details 10%, mood/overall meaning 15%.\n"
+            "- Total image-part weights must equal 100. Main subject and main action must have higher weight than background or mood.\n"
+            "- Adjust weights based on the image. If there is no clear action, redistribute the main_action weight into main subject, important objects, and setting/background.\n"
+            "- If mood is not important, reduce mood weight and redistribute that weight mostly to main subject and foreground/details.\n"
+            "- The final score should feel proportional to image coverage. If 6 parts are required and the learner covers only 2, they should usually be around 30-45, depending on which parts they covered.\n"
+            "- For valid answers, assign coverage.coveragePercent from coverageScore, then assign coverage.level: low, partial, overall, or strong.\n"
+            "- Apply strict hard score caps AFTER coverage detection, and these caps override everything: nonsense/off-topic/too short = max 15; only one image part covered = max 30; only background described = max 25; only foreground described = max 25; main subject missing = max 40; main action missing when action is important = max 50; main subject mentioned only with no setting/context = max 55; main subject plus small context but missing major parts = max 70; overall image briefly covered = max 80; most parts covered clearly = max 90; complete answer with strong language = max 95.\n"
+            "- If the learner does not mention the main subject, the score must not exceed 40 even if the writing is fluent or advanced.\n"
+            "- If the main action is important and the learner misses it, the score usually must not exceed 50.\n"
+            "- Put the actual cap you applied in coverage.scoreCapApplied. If no limiting cap is needed, use 95.\n"
+            "- Only after coverage and hard caps, evaluate languageQuality. Use this weighting: clarity 25, vocabulary 20, structure 20, grammar 15, naturalness 10, reusableLanguage 10.\n"
+            "- Good language can add only a small bonus inside the cap, but it can never override missing coverage or any hard cap.\n"
+            "- Calculate languageBonus as 0-10 points from clarity, vocabulary, grammar, structure, naturalness, and reusable language.\n"
+            "- Calculate final score mechanically as finalScore = min(round(coverageScore + languageBonus - accuracyPenalty), hard cap).\n"
+            "- Do not give 90+ unless the answer covers the overall image clearly.\n"
+            "- Do not let good English override poor coverage. Beautiful writing about only one part of the image must stay under the relevant cap.\n"
+            "- Do not make scoring too harsh. If the learner mentions the main subject, setting/background, at least one important detail, and writes clearly, a score around 70-80 is appropriate even when the English is simple.\n"
+            "- A complete but simple answer should beat an advanced but incomplete answer. Strong English plus partial coverage should not receive 80-90. Simple English plus good overall coverage can receive 70-80.\n"
+            "- mainIssue or fixes must clearly explain score limits when coverage caps the score, for example: 'Your English is clear, but you only described the foreground and missed the background and overall setting, so your score is limited.'\n"
+            "- Feedback must explain what image parts the learner covered, what major parts were missing, whether a score cap was applied, and why the score is limited.\n"
+            "- Missing details must prioritize in this order: main subject, main action, setting/background, important objects, foreground, mood.\n"
+            "- If the answer only covers background, say something like: 'Your English is clear, but you only described the background and missed the main subject and action.'\n"
             "- Only generate improvedVersion and inlineImprovements when answerValidation.valid is true.\n"
             "- For valid answers, the score is 1-100. Category scores are integers from 1 to 10.\n"
             "- main_issue must be one short sentence naming the biggest improvement area.\n"
             "- what_did_well must contain 1-2 specific positive points.\n"
             "- fix_this_to_improve must contain 2-3 concrete actions, not vague advice.\n"
-            "- missing_details must contain up to 3 important visible details the learner missed.\n"
+            "- missing_details must contain up to 3 major missing parts the learner missed, not tiny details.\n"
             "- inlineImprovements must contain 1-3 direct upgrades from the learner's exact wording.\n"
             "- For each inlineImprovements item, old must be an exact word or phrase copied from the current learner explanation, so the UI can show it inline.\n"
             "- Good inlineImprovements examples: {'old':'busy','new':'heavily congested'} or {'old':'many cars','new':'dense traffic'}.\n"
@@ -422,15 +456,17 @@ class AIAnalyzer:
             "- Every array must contain strings only, except misused and inlineImprovements which must contain objects with the requested keys.\n"
             "- Never put JSON text, markdown, or code inside string fields.\n"
             "- Do not penalize the learner for using different wording from the reference description.\n"
-            "- Reward accurate, clear, natural, well-structured, and reasonably detailed writing even if it does not match the reference wording.\n"
+            "- Reward accurate, clear, natural, well-structured, and reasonably detailed writing even if it does not match the reference wording, but only within the coverage cap.\n"
             "- Use the learner's current answer as the foundation for the improved version.\n"
             "- Preserve the learner's original idea and wording where possible; make it more natural, articulate, and complete.\n"
             "- Do not replace the learner's answer with a totally different model answer.\n"
             "- The improved version must be achievable for this learner and must stay close to the learner's meaning.\n"
-            "- Mention important missing visible details, such as objects, setting, mood, background, positions, or relationships.\n"
+            "- The improved version must fix the learner's coverage problem: if the learner missed the main subject, include it; if the learner missed the setting/background, include it; remove or correct inaccurate details.\n"
+            "- The improved version must include missing major parts, especially subject and action when missing, stay close to the learner level, and include 1-3 reusable phrases naturally when they fit.\n"
+            "- Mention important missing major parts, such as main subject, setting, mood, background, positions, or relationships.\n"
             "- If a detail is not supported by the visual context, mark it as an accuracy issue gently.\n"
             "- For repeated improvements, focus on remaining issues and what improved instead of repeating all feedback.\n"
-            "- Scores are integers from 1 to 10.\n"
+            "- Category scores are integers from 1 to 10.\n"
             "- Show words, phrases, and sentence structures the learner could use instead.\n"
             "- Always include a short phrase_usage section.\n"
             "- Detect whether the learner used any reusable phrases from reusable_phrase_texts.\n"
@@ -439,9 +475,10 @@ class AIAnalyzer:
             "- If the learner partially used a phrase, name the partial attempt and show the full stronger phrase.\n"
             "- If the learner misused a phrase, explain the issue and give a correct short example.\n"
             "- The improved version should include 1-3 reusable phrases only when they fit the learner's idea naturally.\n"
-            "- Phrase usage should influence vocabulary slightly, but never dominate the score.\n"
+            "- Keep reusable language scoring small. It is only 10% of languageQuality and must never dominate the score.\n"
             "- Prefer language from the lesson when it fits.\n"
             "- Do not invent image details not supported by the lesson.\n"
+            "- Final principle: a high score requires describing the whole image.\n"
             f"Visual context JSON:\n{json.dumps(visual_reference, ensure_ascii=True)}\n"
             f"First learner explanation, if any:\n{self._short_text(original_text, limit=360)}\n"
             f"Current learner explanation:\n{self._short_text(learner_text, limit=520)}"
@@ -468,13 +505,21 @@ class AIAnalyzer:
         reusable_payload = payload.get("reusableLanguage")
         if reusable_payload is None:
             reusable_payload = payload.get("phrase_usage")
+        language_quality = self._normalize_language_quality(payload.get("languageQuality"))
         validation_payload = (
             payload.get("answerValidation")
             if isinstance(payload.get("answerValidation"), dict)
             else {}
         )
+        fallback_coverage = (
+            fallback.get("coverage") if isinstance(fallback.get("coverage"), dict) else {}
+        )
+        has_fresh_coverage = bool(fallback_coverage.get("imageParts"))
         validation_valid = validation_payload.get("valid")
-        if validation_valid is False or str(validation_valid).strip().casefold() == "false":
+        if (
+            validation_valid is False
+            or str(validation_valid).strip().casefold() == "false"
+        ) and not has_fresh_coverage:
             retry_feedback = self._retry_feedback(
                 score=self._normalize_retry_score(payload.get("score")),
                 main_issue=self._clean_text_value(
@@ -497,11 +542,48 @@ class AIAnalyzer:
             if retry_message:
                 retry_feedback["retry_message"] = retry_message
             return retry_feedback
+        coverage = (
+            self._normalize_coverage(fallback_coverage)
+            if has_fresh_coverage
+            else self._normalize_coverage(payload.get("coverage"))
+        )
+        score = (
+            self._normalize_feedback_score(fallback.get("score"), fallback=fallback)
+            if has_fresh_coverage
+            else self._normalize_feedback_score(payload.get("score"), fallback=fallback)
+        )
+        if has_fresh_coverage and isinstance(fallback.get("scores"), dict):
+            scores = {
+                key: max(1, min(10, int(fallback["scores"].get(key, scores[key]))))
+                for key in ("vocabulary", "structure", "depth", "clarity")
+            }
+        if has_fresh_coverage and isinstance(fallback.get("language_quality"), dict):
+            language_quality = self._normalize_language_quality(fallback.get("language_quality"))
+        score_cap = self._normalized_coverage_hard_cap(coverage)
+        coverage["scoreCapApplied"] = score_cap
+        if isinstance(score_cap, int) and score_cap > 0:
+            score = min(score, score_cap)
+        fresh_missing_details = (
+            self._clean_string_list(coverage.get("missingMajorParts"), limit=3)
+            if has_fresh_coverage
+            else []
+        )
+        missing_details_source = (
+            fresh_missing_details
+            or ["No major visual detail is missing; focus on making the wording stronger."]
+            if has_fresh_coverage
+            else payload.get("missingDetails") or payload.get("missing_details") or fallback["missing_details"]
+        )
+
         normalized = {
-            "score": self._normalize_feedback_score(payload.get("score"), fallback=fallback),
+            "score": score,
             "scores": scores,
-            "main_issue": self._clean_text_value(
-                payload.get("mainIssue") or payload.get("main_issue")
+            "language_quality": language_quality,
+            "coverage": coverage,
+            "main_issue": (
+                self._clean_text_value(fallback.get("main_issue"))
+                if has_fresh_coverage
+                else self._clean_text_value(payload.get("mainIssue") or payload.get("main_issue"))
             )
             or self._clean_text_value(fallback["main_issue"])
             or "Focus on one clearer detail and stronger wording.",
@@ -511,7 +593,7 @@ class AIAnalyzer:
             )
             or fallback["what_did_well"],
             "missing_details": self._clean_string_list(
-                payload.get("missingDetails") or payload.get("missing_details") or fallback["missing_details"],
+                missing_details_source,
                 limit=3,
             ),
             "phrase_usage": self._normalize_phrase_usage(
@@ -584,6 +666,205 @@ class AIAnalyzer:
                 ]
                 score = round((sum(values) / len(values)) * 10)
         return max(1, min(100, score))
+
+    def _normalize_language_quality(self, value: Any) -> dict[str, int]:
+        payload = value if isinstance(value, dict) else {}
+        fields = ("clarity", "vocabulary", "structure", "grammar", "naturalness", "reusableLanguage")
+        normalized: dict[str, int] = {}
+        for field in fields:
+            try:
+                raw_score = int(payload.get(field) or payload.get(self._snake_case(field)) or 0)
+            except (TypeError, ValueError):
+                raw_score = 0
+            normalized[field] = max(0, min(100, raw_score))
+        try:
+            total = int(payload.get("score") or 0)
+        except (TypeError, ValueError):
+            total = 0
+        if total <= 0 and any(normalized.values()):
+            total = self._weighted_language_quality_score(normalized)
+        normalized["score"] = max(0, min(100, total))
+        return normalized
+
+    def _snake_case(self, value: str) -> str:
+        return re.sub(r"(?<!^)([A-Z])", r"_\1", value).lower()
+
+    def _weighted_language_quality_score(self, scores: dict[str, int]) -> int:
+        weights = {
+            "clarity": 25,
+            "vocabulary": 20,
+            "structure": 20,
+            "grammar": 15,
+            "naturalness": 10,
+            "reusableLanguage": 10,
+        }
+        return round(sum(scores.get(key, 0) * weight for key, weight in weights.items()) / 100)
+
+    def _normalize_coverage(self, value: Any) -> dict[str, Any]:
+        payload = value if isinstance(value, dict) else {}
+        level = self._clean_text_value(payload.get("level")).lower()
+        if level not in {"low", "partial", "overall", "strong"}:
+            level = ""
+        try:
+            score_cap = int(payload.get("scoreCapApplied") or payload.get("score_cap_applied") or 0)
+        except (TypeError, ValueError):
+            score_cap = 0
+        image_parts = self._normalize_coverage_parts(payload.get("imageParts") or payload.get("image_parts"))
+        main_subject_value = payload.get("mainSubjectMentioned")
+        if main_subject_value is None:
+            main_subject_value = payload.get("main_subject_mentioned")
+        main_action_value = payload.get("mainActionMentioned")
+        if main_action_value is None:
+            main_action_value = payload.get("main_action_mentioned")
+        main_subject_mentioned = (
+            self._env_bool_from_any(main_subject_value)
+            if main_subject_value is not None
+            else self._part_type_has_credit(image_parts, "main_subject")
+        )
+        main_action_mentioned = (
+            self._env_bool_from_any(main_action_value)
+            if main_action_value is not None
+            else self._part_type_has_credit(image_parts, "main_action")
+        )
+        return {
+            "level": level,
+            "mainSubjectMentioned": main_subject_mentioned,
+            "mainActionMentioned": main_action_mentioned,
+            "imageParts": image_parts,
+            "missingMajorParts": self._clean_string_list(
+                payload.get("missingMajorParts") or payload.get("missing_major_parts"),
+                limit=5,
+            ),
+            "coveragePercent": self._normalize_percent(
+                payload.get("coveragePercent") or payload.get("coverage_percent")
+            ),
+            "coverageScore": self._normalize_percent(
+                payload.get("coverageScore") or payload.get("coverage_score")
+            ),
+            "accuracyPenalty": self._normalize_percent(
+                payload.get("accuracyPenalty") or payload.get("accuracy_penalty")
+            ),
+            "scoreCapApplied": max(0, min(100, score_cap)),
+            "reason": self._clean_text_value(payload.get("reason")),
+        }
+
+    def _normalize_coverage_parts(self, value: Any) -> list[dict[str, Any]]:
+        if not isinstance(value, list):
+            return []
+        parts: list[dict[str, Any]] = []
+        for item in value:
+            if not isinstance(item, dict):
+                continue
+            part = (
+                self._clean_text_value(item.get("part"))
+                or self._clean_text_value(item.get("name"))
+                or self._clean_text_value(item.get("type"))
+            )
+            if not part:
+                continue
+            part_type = self._clean_text_value(item.get("type"))
+            name = self._clean_text_value(item.get("name")) or part
+            description = self._clean_text_value(item.get("description"))
+            try:
+                weight = float(item.get("weight") or 0)
+            except (TypeError, ValueError):
+                weight = 0.0
+            covered = item.get("covered")
+            coverage_status = self._normalize_coverage_status(
+                item.get("coverageStatus") or item.get("coverage_status"),
+                covered=covered,
+            )
+            parts.append(
+                {
+                    "part": part,
+                    "name": name,
+                    "description": description,
+                    "type": part_type,
+                    "required": bool(item.get("required", True)),
+                    "weight": max(0.0, min(100.0, weight)),
+                    "coverageStatus": coverage_status,
+                    "covered": coverage_status == "covered",
+                    "evidence": self._clean_text_value(item.get("evidence")),
+                }
+            )
+            if len(parts) >= 8:
+                break
+        return parts
+
+    def _normalize_coverage_status(self, value: Any, *, covered: Any = None) -> str:
+        status = self._clean_text_value(value).lower().replace("-", "_").replace(" ", "_")
+        if status in {"covered", "partially_covered", "missing", "inaccurate"}:
+            return status
+        if covered is True or str(covered).strip().casefold() == "true":
+            return "covered"
+        return "missing"
+
+    def _part_type_has_credit(self, parts: list[dict[str, Any]], part_type: str) -> bool:
+        return any(
+            str(part.get("type") or "") == part_type
+            and self._coverage_status_credit(str(part.get("coverageStatus") or "missing")) > 0
+            for part in parts
+        )
+
+    def _env_bool_from_any(self, value: Any) -> bool:
+        return value is True or str(value).strip().casefold() in {"1", "true", "yes", "on"}
+
+    def _normalize_percent(self, value: Any) -> int:
+        try:
+            percent = int(round(float(value)))
+        except (TypeError, ValueError):
+            percent = 0
+        return max(0, min(100, percent))
+
+    def _normalized_coverage_hard_cap(self, coverage: dict[str, Any]) -> int:
+        original_cap = int(coverage.get("scoreCapApplied") or 0)
+        parts = coverage.get("imageParts") if isinstance(coverage.get("imageParts"), list) else []
+        if not parts:
+            return original_cap
+
+        cap = original_cap if original_cap > 0 else 95
+        coverage_score = int(coverage.get("coverageScore") or coverage.get("coveragePercent") or 0)
+        credited_parts = [
+            part
+            for part in parts
+            if self._coverage_status_credit(str(part.get("coverageStatus") or "missing")) > 0
+        ]
+        credited_types = {str(part.get("type") or "") for part in credited_parts}
+        has_main_subject = any(str(part.get("type") or "") == "main_subject" for part in parts)
+        has_main_action = any(str(part.get("type") or "") == "main_action" for part in parts)
+        main_subject_mentioned = bool(coverage.get("mainSubjectMentioned"))
+        main_action_mentioned = bool(coverage.get("mainActionMentioned"))
+
+        if (
+            has_main_subject
+            and not main_subject_mentioned
+            and (not has_main_action or not main_action_mentioned)
+            and credited_types
+            and credited_types.isdisjoint({"main_subject", "main_action"})
+            and bool(credited_types & {"setting", "mood"})
+        ):
+            cap = min(cap, 25)
+        if credited_types <= {"foreground", "important_object"} and credited_types:
+            cap = min(cap, 25)
+        if len(credited_parts) <= 1:
+            cap = min(cap, 30)
+        if has_main_subject and not main_subject_mentioned:
+            cap = min(cap, 40)
+        if has_main_action and not main_action_mentioned:
+            cap = min(cap, 50)
+        if coverage_score < 45:
+            cap = min(cap, 45)
+        if has_main_subject and main_subject_mentioned and "setting" not in credited_types:
+            cap = min(cap, 55)
+        if coverage_score < 70:
+            cap = min(cap, 70)
+        elif coverage_score < 85:
+            cap = min(cap, 80)
+        elif coverage_score < 95:
+            cap = min(cap, 90)
+        else:
+            cap = min(cap, 95)
+        return max(0, min(100, cap))
 
     def _normalize_feedback_alternatives(
         self,
@@ -713,6 +994,59 @@ class AIAnalyzer:
                 f"but try using '{suggested[0]}' to strengthen your vocabulary."
             )
         return "Reusable language: Try using one learned phrase naturally in your rewrite."
+
+    def _heuristic_grammar_score(
+        self,
+        *,
+        text: str,
+        words: list[str],
+        sentences: list[str],
+    ) -> int:
+        if not words:
+            return 1
+        score = 5
+        if sentences:
+            score += 1
+        if text and text[0].isupper():
+            score += 1
+        if re.search(r"[.!?]$", text.strip()):
+            score += 1
+        if not re.search(r"\b(is|are|am|was|were|has|have|do|does|can|seems|appears)\b", text, re.I):
+            score -= 1
+        if re.search(r"\b(a|an)\s+[aeiou]", text, re.I) or re.search(r"\ban\s+[^aeiou\s]", text, re.I):
+            score -= 1
+        if re.search(r"\b(he|she|it)\s+are\b|\b(they|we|you)\s+is\b", text, re.I):
+            score -= 2
+        return max(1, min(10, score))
+
+    def _heuristic_naturalness_score(
+        self,
+        *,
+        text: str,
+        phrase_usage: dict[str, Any],
+        sentence_count: int,
+    ) -> int:
+        score = 5
+        if sentence_count >= 2:
+            score += 1
+        if re.search(r"\b(in the background|next to|near|appears to be|looks like|in front of)\b", text, re.I):
+            score += 2
+        if phrase_usage.get("used"):
+            score += 1
+        if phrase_usage.get("misused"):
+            score -= 2
+        if re.search(r"\bvery very|good good|nice picture|beautiful image\b", text, re.I):
+            score -= 1
+        return max(1, min(10, score))
+
+    def _heuristic_reusable_language_score(self, phrase_usage: dict[str, Any]) -> int:
+        used_count = len(phrase_usage.get("used") or [])
+        rewardable = int(phrase_usage.get("rewardable_count") or 0)
+        misused_count = len(phrase_usage.get("misused") or [])
+        partial_count = len(phrase_usage.get("partial") or [])
+        score = 4 + min(3, used_count) + min(2, rewardable) + min(1, partial_count)
+        score -= min(3, misused_count * 2)
+        return max(1, min(10, score))
 
     def _validate_learner_answer_for_feedback(
         self,
@@ -847,6 +1181,27 @@ class AIAnalyzer:
         return {
             "score": score,
             "scores": {"vocabulary": 1, "structure": 1, "depth": 1, "clarity": 1},
+            "language_quality": {
+                "score": 0,
+                "clarity": 0,
+                "vocabulary": 0,
+                "structure": 0,
+                "grammar": 0,
+                "naturalness": 0,
+                "reusableLanguage": 0,
+            },
+            "coverage": {
+                "level": "low",
+                "mainSubjectMentioned": False,
+                "mainActionMentioned": False,
+                "imageParts": [],
+                "missingMajorParts": [],
+                "coverageScore": 0,
+                "coveragePercent": 0,
+                "accuracyPenalty": 0,
+                "scoreCapApplied": 15,
+                "reason": main_issue,
+            },
             "main_issue": main_issue,
             "what_did_well": [],
             "missing_details": [],
@@ -887,6 +1242,7 @@ class AIAnalyzer:
         object_items = analysis.get("objects", [])[:8]
         action_items = analysis.get("actions", [])[:6]
         environment_details = analysis.get("environment_details", [])[:6]
+        required_parts = self._extract_required_image_parts(analysis)
 
         used_vocab = [
             str(item.get("word") or "").strip()
@@ -925,9 +1281,62 @@ class AIAnalyzer:
         mentioned_targets = [
             item for item in visual_targets if self._feedback_target_in_text(item["text"], text)
         ]
-        missing_details = [
-            item["label"] for item in visual_targets if item not in mentioned_targets
-        ][:4]
+        primary_subject = self._primary_subject_name(object_items)
+        main_subject_mentioned = (
+            self._feedback_subject_in_text(primary_subject, text)
+            if primary_subject
+            else True
+        )
+        setting_targets = [
+            str(analysis.get("environment") or "").strip(),
+            *[str(item or "").strip() for item in environment_details],
+        ]
+        setting_mentioned = any(
+            self._feedback_target_in_text(target, text)
+            for target in setting_targets
+            if target
+        ) or self._feedback_setting_word_in_text(text)
+        action_mentioned = any(
+            self._feedback_target_in_text(
+                str(item.get("phrase") or item.get("verb") or ""), text
+            )
+            for item in action_items
+        )
+        mentioned_detail_labels = [
+            item["label"]
+            for item in mentioned_targets
+            if normalize_answer(item["label"]) != normalize_answer(primary_subject)
+        ]
+        non_setting_detail_count = len(
+            [
+                label
+                for label in mentioned_detail_labels
+                if not any(
+                    normalize_answer(label) == normalize_answer(target)
+                    for target in setting_targets
+                    if target
+                )
+            ]
+        )
+        if action_mentioned:
+            non_setting_detail_count += 1
+        mood_mentioned = self._feedback_mood_in_text(text)
+        foreground_mentioned = self._feedback_foreground_in_text(text) or non_setting_detail_count >= 2
+        action_required = bool(action_items)
+
+        missing_details = self._coverage_missing_major_parts(
+            primary_subject=primary_subject,
+            main_subject_mentioned=main_subject_mentioned,
+            action_required=action_required,
+            action_mentioned=action_mentioned,
+            setting_mentioned=setting_mentioned,
+            foreground_mentioned=foreground_mentioned,
+            important_detail_count=non_setting_detail_count,
+            mood_mentioned=mood_mentioned,
+            fallback_details=[
+                item["label"] for item in visual_targets if item not in mentioned_targets
+            ],
+        )
 
         lexical_variety = len({word.casefold() for word in words if len(word) > 3})
         vocab_score = min(
@@ -949,12 +1358,33 @@ class AIAnalyzer:
         )
         depth_score = min(
             10,
-            max(2, 3 + min(3, len(words) // 8) + min(3, len(mentioned_targets))),
+            max(
+                2,
+                3
+                + min(3, len(words) // 8)
+                + min(3, int(main_subject_mentioned) + int(setting_mentioned) + non_setting_detail_count),
+            ),
         )
         clarity_score = min(
             10,
             max(3, 5 + (2 if len(words) >= 10 else 0) + (1 if sentences else 0) + (1 if len(text) > 0 and text[0].isupper() else 0)),
         )
+        grammar_score = self._heuristic_grammar_score(text=text, words=words, sentences=sentences)
+        naturalness_score = self._heuristic_naturalness_score(
+            text=text,
+            phrase_usage=phrase_usage,
+            sentence_count=len(sentences),
+        )
+        reusable_score = self._heuristic_reusable_language_score(phrase_usage)
+        language_quality = {
+            "clarity": clarity_score * 10,
+            "vocabulary": vocab_score * 10,
+            "structure": structure_score * 10,
+            "grammar": grammar_score * 10,
+            "naturalness": naturalness_score * 10,
+            "reusableLanguage": reusable_score * 10,
+        }
+        language_quality["score"] = self._weighted_language_quality_score(language_quality)
 
         patterns = [
             str(item.get("pattern") or "").strip()
@@ -967,13 +1397,6 @@ class AIAnalyzer:
                 "In the background, ...",
                 "The main subject is ...",
             ]
-
-        better_text = self._improve_learner_text(
-            text,
-            missing_details=missing_details,
-            missing_phrases=missing_phrases,
-            missing_vocab=missing_vocab,
-        )
 
         alternatives: list[dict[str, str]] = []
         for phrase in missing_phrases[:3]:
@@ -1017,8 +1440,44 @@ class AIAnalyzer:
         if missing_details:
             improvements.append(f"Add this missing visual detail: {missing_details[0]}.")
 
-        score = round(((vocab_score + structure_score + depth_score + clarity_score) / 4) * 10)
+        language_score = int(language_quality["score"])
+        coverage = self._heuristic_coverage(
+            required_parts=required_parts,
+            learner_text=text,
+            primary_subject=primary_subject,
+            main_subject_mentioned=main_subject_mentioned,
+            action_required=action_required,
+            action_mentioned=action_mentioned,
+            setting_mentioned=setting_mentioned,
+            foreground_mentioned=foreground_mentioned,
+            important_detail_count=non_setting_detail_count,
+            mood_mentioned=mood_mentioned,
+            word_count=len(words),
+        )
+        coverage["missingMajorParts"] = missing_details[:4]
+        coverage_score = int(coverage.get("coverageScore") or coverage.get("coveragePercent") or 0)
+        accuracy_penalty = int(coverage.get("accuracyPenalty") or 0)
+        score_cap = int(coverage["scoreCapApplied"])
+        language_bonus = self._language_quality_bonus(language_score)
+        score = max(
+            0,
+            min(score_cap, coverage_score + language_bonus - accuracy_penalty),
+        )
+        score = min(score, score_cap)
+        coverage_missing_details = self._prioritized_missing_part_labels(coverage)
+        if coverage_missing_details:
+            missing_details = coverage_missing_details
+            coverage["missingMajorParts"] = coverage_missing_details[:5]
+        better_text = self._improve_learner_text(
+            text,
+            missing_details=self._improved_version_missing_details(coverage, missing_details),
+            missing_phrases=missing_phrases,
+            missing_vocab=missing_vocab,
+        )
         what_did_well = []
+        covered_summary = self._covered_parts_summary(coverage)
+        if covered_summary:
+            what_did_well.append(f"You covered {covered_summary}.")
         if len(words) >= 10:
             what_did_well.append("You wrote enough to communicate a clear idea.")
         if clarity_score >= 7:
@@ -1028,13 +1487,16 @@ class AIAnalyzer:
         if not what_did_well:
             what_did_well.append("You started with your own observation, which is the right habit.")
 
-        main_issue = (
-            f"You missed an important visible detail: {missing_details[0]}."
-            if missing_details
-            else "Your answer is understandable; now make it more specific and natural."
+        main_issue = self._coverage_feedback_main_issue(
+            coverage=coverage,
+            fallback=(
+                f"You missed an important visible detail: {missing_details[0]}."
+                if missing_details
+                else "Your answer is understandable; now make it more specific and natural."
+            ),
         )
         fix_this = [
-            "Keep your original idea, but add one concrete visual detail.",
+            "Keep your original idea, but add the major parts of the image.",
             "Make the sentence structure smoother and more complete.",
         ]
         if missing_details:
@@ -1060,6 +1522,8 @@ class AIAnalyzer:
                 "depth": depth_score,
                 "clarity": clarity_score,
             },
+            "language_quality": language_quality,
+            "coverage": coverage,
             "main_issue": main_issue,
             "what_did_well": what_did_well[:4],
             "missing_details": missing_details or ["No major visual detail is missing; focus on making the wording stronger."],
@@ -1094,6 +1558,908 @@ class AIAnalyzer:
             "reusable_sentence_structures": patterns[:5],
             "quiz_focus": ["Reusable phrases", "Vocabulary", "Weak points", "Sentence improvement"],
         }
+
+    def _extract_required_image_parts(self, analysis: dict[str, Any]) -> list[dict[str, Any]]:
+        objects = analysis.get("objects", [])[:8]
+        actions = analysis.get("actions", [])[:4]
+        environment = self._clean_text_value(analysis.get("environment"))
+        environment_details = self._clean_string_list(
+            analysis.get("environment_details") or [],
+            limit=6,
+        )
+        explanation = self._clean_text_value(
+            analysis.get("natural_explanation")
+            or analysis.get("scene_summary_natural")
+            or analysis.get("native_explanation")
+        )
+        primary_subject = self._primary_subject_name(objects)
+        has_action = bool(actions)
+        mood = self._mood_part_description(analysis, explanation, environment)
+        weights = self._required_part_weights(
+            has_action=has_action,
+            mood_present=bool(mood),
+            mood_important=self._mood_part_is_important(analysis, explanation, mood),
+        )
+
+        parts: list[dict[str, Any]] = []
+
+        def push(part_type: str, name: str, description: str, weight: float) -> None:
+            cleaned_name = self._clean_text_value(name)
+            cleaned_description = self._clean_text_value(description)
+            if not cleaned_name and not cleaned_description:
+                return
+            if any(item["type"] == part_type for item in parts):
+                return
+            parts.append(
+                {
+                    "type": part_type,
+                    "name": cleaned_name or part_type.replace("_", " "),
+                    "description": cleaned_description or cleaned_name,
+                    "weight": float(weight),
+                }
+            )
+
+        primary_object = self._object_by_name(objects, primary_subject)
+        if primary_subject:
+            push(
+                "main_subject",
+                primary_subject,
+                str((primary_object or {}).get("description") or primary_subject),
+                weights["main_subject"],
+            )
+
+        if has_action:
+            action = actions[0]
+            action_name = str(action.get("phrase") or action.get("verb") or "main action")
+            action_description = str(action.get("description") or action.get("phrase") or action_name)
+            push("main_action", action_name, action_description, weights["main_action"])
+
+        setting_description = "; ".join([item for item in [environment, *environment_details[:3]] if item])
+        if setting_description:
+            push("setting", "setting/background", setting_description, weights["setting"])
+
+        important_objects = [
+            str(item.get("name") or "").strip()
+            for item in objects
+            if str(item.get("name") or "").strip()
+            and normalize_answer(str(item.get("name") or "")) != normalize_answer(primary_subject)
+        ][:3]
+        if important_objects:
+            push(
+                "important_object",
+                "important objects",
+                ", ".join(important_objects),
+                weights["important_object"],
+            )
+
+        foreground = self._foreground_part_description(objects, environment_details, explanation)
+        if foreground:
+            push("foreground", "foreground/details", foreground, weights["foreground"])
+
+        if mood:
+            push("mood", "mood/overall meaning", mood, weights["mood"])
+
+        self._normalize_required_part_weights(parts)
+        return parts
+
+    def _required_part_weights(
+        self,
+        *,
+        has_action: bool,
+        mood_present: bool,
+        mood_important: bool,
+    ) -> dict[str, float]:
+        weights = {
+            "main_subject": 25.0,
+            "main_action": 20.0 if has_action else 0.0,
+            "setting": 15.0,
+            "important_object": 15.0,
+            "foreground": 10.0,
+            "mood": 15.0 if mood_present else 0.0,
+        }
+        if not has_action:
+            weights["main_subject"] += 8.0
+            weights["important_object"] += 6.0
+            weights["setting"] += 6.0
+        if mood_present and not mood_important:
+            mood_shift = min(10.0, weights["mood"])
+            weights["mood"] -= mood_shift
+            weights["main_subject"] += 6.0
+            weights["foreground"] += mood_shift - 6.0
+        return weights
+
+    def _default_required_image_parts(
+        self,
+        *,
+        primary_subject: str,
+        action_required: bool,
+    ) -> list[dict[str, Any]]:
+        parts = [
+            {
+                "type": "main_subject",
+                "name": "main subject",
+                "description": primary_subject or "the main subject",
+                "weight": 25.0,
+            },
+            {
+                "type": "setting",
+                "name": "setting/background",
+                "description": "the setting or background",
+                "weight": 15.0,
+            },
+            {
+                "type": "important_object",
+                "name": "important objects",
+                "description": "important visible objects",
+                "weight": 15.0,
+            },
+            {
+                "type": "foreground",
+                "name": "foreground/details",
+                "description": "foreground or nearby visible details",
+                "weight": 10.0,
+            },
+            {
+                "type": "mood",
+                "name": "mood/overall meaning",
+                "description": "the mood or overall meaning",
+                "weight": 15.0,
+            },
+        ]
+        if action_required:
+            parts.insert(
+                1,
+                {
+                    "type": "main_action",
+                    "name": "main action",
+                    "description": "the main visible action",
+                    "weight": 20.0,
+                },
+            )
+        else:
+            parts[0]["weight"] = 33.0
+            parts[1]["weight"] = 21.0
+            parts[2]["weight"] = 21.0
+        self._normalize_required_part_weights(parts)
+        return parts
+
+    def _normalize_required_part_weights(self, parts: list[dict[str, Any]]) -> None:
+        total = sum(float(item.get("weight") or 0.0) for item in parts)
+        if total <= 0:
+            return
+        for item in parts:
+            item["weight"] = round((float(item.get("weight") or 0.0) / total) * 100, 2)
+
+    def _object_by_name(self, objects: list[dict[str, Any]], name: str) -> dict[str, Any] | None:
+        normalized_name = normalize_answer(name)
+        for item in objects:
+            if normalize_answer(str(item.get("name") or "")) == normalized_name:
+                return item
+        return None
+
+    def _foreground_part_description(
+        self,
+        objects: list[dict[str, Any]],
+        environment_details: list[Any],
+        explanation: str,
+    ) -> str:
+        foreground_markers = {
+            "foreground",
+            "front",
+            "near",
+            "nearby",
+            "close",
+            "grass",
+            "ground",
+            "floor",
+            "path",
+            "pavement",
+            "road",
+            "table",
+        }
+        for item in objects:
+            text = " ".join(
+                [
+                    str(item.get("name") or ""),
+                    str(item.get("position") or ""),
+                    str(item.get("description") or ""),
+                ]
+            )
+            if any(self._word_in_text(marker, text) for marker in foreground_markers):
+                return self._clean_text_value(str(item.get("description") or item.get("name") or ""))
+        for detail in environment_details:
+            detail_text = str(detail or "")
+            if any(self._word_in_text(marker, detail_text) for marker in foreground_markers):
+                return self._clean_text_value(detail_text)
+        if any(self._word_in_text(marker, explanation) for marker in foreground_markers):
+            return "foreground or nearest visible details"
+        return ""
+
+    def _mood_part_description(
+        self,
+        analysis: dict[str, Any],
+        explanation: str,
+        environment: str,
+    ) -> str:
+        raw_analysis = analysis.get("raw_analysis") if isinstance(analysis.get("raw_analysis"), dict) else {}
+        raw_environment = raw_analysis.get("environment")
+        raw_environment_mood = (
+            raw_environment.get("mood")
+            if isinstance(raw_environment, dict)
+            else ""
+        )
+        mood = self._clean_text_value(
+            raw_analysis.get("mood")
+            or raw_analysis.get("atmosphere")
+            or raw_environment_mood
+        )
+        if mood:
+            return mood
+        combined = f"{explanation} {environment}"
+        mood_words = [
+            "calm",
+            "peaceful",
+            "quiet",
+            "busy",
+            "crowded",
+            "relaxed",
+            "serious",
+            "happy",
+            "sad",
+            "warm",
+            "bright",
+            "dark",
+            "friendly",
+            "lonely",
+            "comfortable",
+            "tense",
+            "casual",
+            "sunny",
+            "tidy",
+        ]
+        for word in mood_words:
+            if self._word_in_text(word, combined):
+                return f"{word} atmosphere"
+        return ""
+
+    def _mood_part_is_important(
+        self,
+        analysis: dict[str, Any],
+        explanation: str,
+        mood: str,
+    ) -> bool:
+        if not mood:
+            return False
+        raw_analysis = analysis.get("raw_analysis") if isinstance(analysis.get("raw_analysis"), dict) else {}
+        raw_environment = raw_analysis.get("environment")
+        if raw_analysis.get("mood") or raw_analysis.get("atmosphere"):
+            return True
+        if isinstance(raw_environment, dict) and raw_environment.get("mood"):
+            return True
+        mood_terms = {
+            "calm",
+            "peaceful",
+            "busy",
+            "crowded",
+            "tense",
+            "lonely",
+            "dramatic",
+            "serious",
+            "cheerful",
+            "relaxed",
+        }
+        normalized_mood = normalize_answer(mood)
+        if any(term in normalized_mood for term in mood_terms):
+            return True
+        mood_mentions = sum(
+            1 for term in mood_terms if self._word_in_text(term, explanation)
+        )
+        return mood_mentions >= 2
+
+    def _feedback_subject_in_text(self, subject: str, text: str) -> bool:
+        subject = str(subject or "").strip()
+        if not subject:
+            return False
+        terms = [subject]
+        normalized = normalize_answer(subject)
+        person_terms = {"person", "people", "man", "woman", "child", "children", "boy", "girl"}
+        if set(normalized.split()) & person_terms:
+            terms.extend(["person", "people", "man", "woman", "child", "boy", "girl", "someone"])
+        vehicle_terms = {"car", "bus", "truck", "vehicle", "bike", "bicycle", "motorcycle"}
+        if set(normalized.split()) & vehicle_terms:
+            terms.extend(["car", "bus", "truck", "vehicle", "bike", "bicycle", "motorcycle"])
+        return any(self._feedback_target_in_text(term, text) for term in terms)
+
+    def _feedback_setting_word_in_text(self, text: str) -> bool:
+        setting_words = {
+            "background",
+            "setting",
+            "outside",
+            "outdoor",
+            "indoors",
+            "indoor",
+            "street",
+            "road",
+            "park",
+            "room",
+            "river",
+            "garden",
+            "sky",
+            "bridge",
+            "building",
+            "cafe",
+            "market",
+            "forest",
+            "beach",
+        }
+        return any(self._word_in_text(word, text) for word in setting_words)
+
+    def _feedback_mood_in_text(self, text: str) -> bool:
+        mood_words = {
+            "calm",
+            "peaceful",
+            "quiet",
+            "busy",
+            "crowded",
+            "relaxed",
+            "serious",
+            "happy",
+            "sad",
+            "warm",
+            "cold",
+            "bright",
+            "dark",
+            "friendly",
+            "lonely",
+            "comfortable",
+            "tense",
+            "casual",
+        }
+        return any(self._word_in_text(word, text) for word in mood_words)
+
+    def _feedback_foreground_in_text(self, text: str) -> bool:
+        foreground_words = {
+            "foreground",
+            "front",
+            "near",
+            "nearby",
+            "close",
+            "grass",
+            "ground",
+            "floor",
+            "path",
+            "pavement",
+            "road",
+            "table",
+        }
+        return any(self._word_in_text(word, text) for word in foreground_words)
+
+    def _coverage_missing_major_parts(
+        self,
+        *,
+        primary_subject: str,
+        main_subject_mentioned: bool,
+        action_required: bool,
+        action_mentioned: bool,
+        setting_mentioned: bool,
+        foreground_mentioned: bool,
+        important_detail_count: int,
+        mood_mentioned: bool,
+        fallback_details: list[str],
+    ) -> list[str]:
+        missing: list[str] = []
+        if primary_subject and not main_subject_mentioned:
+            missing.append(f"the main subject ({primary_subject})")
+        if action_required and not action_mentioned:
+            missing.append("the main action")
+        if not setting_mentioned:
+            missing.append("the setting or background")
+        if important_detail_count < 1:
+            missing.append("important objects or visible details")
+        if not foreground_mentioned:
+            missing.append("the foreground or nearest visible details")
+        if mood_mentioned is False:
+            missing.append("the mood or atmosphere")
+        for detail in fallback_details:
+            if len(missing) >= 4:
+                break
+            if detail not in missing:
+                missing.append(detail)
+        return missing[:4]
+
+    def _heuristic_coverage(
+        self,
+        *,
+        required_parts: list[dict[str, Any]],
+        learner_text: str,
+        primary_subject: str,
+        main_subject_mentioned: bool,
+        action_required: bool,
+        action_mentioned: bool,
+        setting_mentioned: bool,
+        foreground_mentioned: bool,
+        important_detail_count: int,
+        mood_mentioned: bool,
+        word_count: int,
+    ) -> dict[str, Any]:
+        parts = self._heuristic_coverage_parts(
+            required_parts=required_parts,
+            learner_text=learner_text,
+            primary_subject=primary_subject,
+            main_subject_mentioned=main_subject_mentioned,
+            action_required=action_required,
+            action_mentioned=action_mentioned,
+            setting_mentioned=setting_mentioned,
+            foreground_mentioned=foreground_mentioned,
+            important_detail_count=important_detail_count,
+            mood_mentioned=mood_mentioned,
+        )
+        total_weight = sum(float(part["weight"]) for part in parts) or 1.0
+        covered_weight = sum(
+            float(part["weight"]) * self._coverage_status_credit(str(part.get("coverageStatus") or "missing"))
+            for part in parts
+        )
+        coverage_score = round((covered_weight / total_weight) * 100)
+        coverage_percent = coverage_score
+        accuracy_penalty = min(
+            25,
+            sum(
+                12 if part.get("type") in {"main_subject", "main_action"} else 7
+                for part in parts
+                if part.get("coverageStatus") == "inaccurate"
+            ),
+        )
+        cap_result = self._hard_score_cap(
+            parts=parts,
+            coverage_score=coverage_score,
+            word_count=word_count,
+            main_subject_mentioned=main_subject_mentioned,
+            action_required=action_required,
+            action_mentioned=action_mentioned,
+            setting_mentioned=setting_mentioned,
+            important_detail_count=important_detail_count,
+            mood_mentioned=mood_mentioned,
+        )
+
+        return {
+            "level": cap_result["level"],
+            "imageParts": parts,
+            "missingMajorParts": [part["part"] for part in parts if not part["covered"]][:5],
+            "coverageScore": coverage_score,
+            "coveragePercent": coverage_percent,
+            "mainSubjectMentioned": main_subject_mentioned,
+            "mainActionMentioned": action_mentioned if action_required else False,
+            "accuracyPenalty": accuracy_penalty,
+            "scoreCapApplied": cap_result["cap"],
+            "reason": cap_result["reason"],
+        }
+
+    def _hard_score_cap(
+        self,
+        *,
+        parts: list[dict[str, Any]],
+        coverage_score: int,
+        word_count: int,
+        main_subject_mentioned: bool,
+        action_required: bool,
+        action_mentioned: bool,
+        setting_mentioned: bool,
+        important_detail_count: int,
+        mood_mentioned: bool,
+    ) -> dict[str, Any]:
+        credited_parts = [
+            part
+            for part in parts
+            if self._coverage_status_credit(str(part.get("coverageStatus") or "missing")) > 0
+        ]
+        credited_types = {str(part.get("type") or "") for part in credited_parts}
+        credited_count = len(credited_parts)
+
+        if word_count < 4:
+            return {
+                "level": "low",
+                "cap": 15,
+                "reason": "Your answer is too short to describe the image clearly.",
+            }
+        if (
+            not main_subject_mentioned
+            and (not action_required or not action_mentioned)
+            and credited_types
+            and credited_types.isdisjoint({"main_subject", "main_action"})
+            and bool(credited_types & {"setting", "mood"})
+        ):
+            return {
+                "level": "low",
+                "cap": 25,
+                "reason": (
+                    "Your English may be clear, but you only described the background "
+                    "and missed the main subject, main action, and foreground, so your score is limited."
+                ),
+            }
+        if credited_types <= {"foreground", "important_object"} and credited_types:
+            return {
+                "level": "low",
+                "cap": 25,
+                "reason": "You only described the foreground, so the overall image is missing.",
+            }
+        if credited_count <= 1:
+            return {
+                "level": "low",
+                "cap": 30,
+                "reason": "You described only one small part of the image, so the score is limited.",
+            }
+        if not main_subject_mentioned:
+            return {
+                "level": "low",
+                "cap": 40,
+                "reason": "Your answer misses the main subject of the image, so the score is limited.",
+            }
+        if action_required and not action_mentioned:
+            return {
+                "level": "partial",
+                "cap": 50,
+                "reason": (
+                    "You mentioned the main subject, but you missed the main action, "
+                    "so the score is limited."
+                ),
+            }
+        if coverage_score < 45:
+            return {
+                "level": "partial",
+                "cap": 45,
+                "reason": "You described only one portion of the image, so the score is limited.",
+            }
+        if main_subject_mentioned and not setting_mentioned:
+            return {
+                "level": "partial",
+                "cap": 55,
+                "reason": (
+                    "You mentioned the main subject, but you did not describe the setting "
+                    "or background, so the answer feels incomplete."
+                ),
+            }
+        if coverage_score < 70 or important_detail_count < 1:
+            return {
+                "level": "partial",
+                "cap": 70,
+                "reason": (
+                    "You covered part of the image, but several major parts are still missing."
+                ),
+            }
+        if coverage_score < 85 or not mood_mentioned:
+            return {
+                "level": "overall",
+                "cap": 80,
+                "reason": "You covered the overall image, but the answer is still brief or missing depth.",
+            }
+        if coverage_score < 95:
+            return {
+                "level": "strong",
+                "cap": 90,
+                "reason": "You covered most major parts clearly, but it is not fully complete yet.",
+            }
+        return {
+            "level": "strong",
+            "cap": 95,
+            "reason": "You covered most major parts of the image clearly.",
+        }
+
+    def _score_realism_adjustment(
+        self,
+        *,
+        coverage: dict[str, Any],
+        language_score: int,
+        word_count: int,
+    ) -> int:
+        coverage_score = int(coverage.get("coverageScore") or coverage.get("coveragePercent") or 0)
+        cap = int(coverage.get("scoreCapApplied") or 0)
+        main_subject_mentioned = bool(coverage.get("mainSubjectMentioned"))
+        if not main_subject_mentioned and language_score >= 75:
+            return -5
+        if coverage_score >= 80 and word_count <= 16 and language_score >= 55 and cap >= 80:
+            return 5
+        if coverage_score < 50 and language_score >= 75:
+            return -3
+        return 0
+
+    def _language_quality_bonus(self, language_score: int) -> int:
+        try:
+            score = int(language_score)
+        except (TypeError, ValueError):
+            score = 0
+        return max(0, min(10, round(score / 10)))
+
+    def _prioritized_missing_part_labels(self, coverage: dict[str, Any]) -> list[str]:
+        parts = coverage.get("imageParts") if isinstance(coverage.get("imageParts"), list) else []
+        missing = [
+            part
+            for part in parts
+            if self._coverage_status_credit(str(part.get("coverageStatus") or "missing")) <= 0
+        ]
+        priority = {
+            "main_subject": 0,
+            "main_action": 1,
+            "setting": 2,
+            "important_object": 3,
+            "foreground": 4,
+            "mood": 5,
+        }
+        missing.sort(key=lambda part: priority.get(str(part.get("type") or ""), 99))
+        labels = [self._coverage_part_label(part) for part in missing]
+        return [label for label in labels if label][:5]
+
+    def _coverage_part_label(self, part: dict[str, Any]) -> str:
+        part_type = str(part.get("type") or "")
+        name = self._clean_text_value(part.get("name"))
+        description = self._clean_text_value(part.get("description"))
+        if part_type == "main_subject":
+            return f"the main subject ({name or description or 'main subject'})"
+        if part_type == "main_action":
+            return f"the main action ({name or description or 'main action'})"
+        if part_type == "setting":
+            return "the setting or background"
+        if part_type == "important_object":
+            return f"important objects ({description or name})" if (description or name) else "important objects"
+        if part_type == "foreground":
+            return "the foreground or nearest visible details"
+        if part_type == "mood":
+            return "the mood or atmosphere"
+        return description or name
+
+    def _covered_parts_summary(self, coverage: dict[str, Any]) -> str:
+        parts = coverage.get("imageParts") if isinstance(coverage.get("imageParts"), list) else []
+        covered = [
+            self._coverage_part_label(part)
+            for part in parts
+            if self._coverage_status_credit(str(part.get("coverageStatus") or "missing")) > 0
+        ]
+        covered = [item for item in covered if item]
+        if not covered:
+            return ""
+        return self._join_natural_list(covered[:3])
+
+    def _coverage_feedback_main_issue(
+        self,
+        *,
+        coverage: dict[str, Any],
+        fallback: str,
+    ) -> str:
+        missing = self._prioritized_missing_part_labels(coverage)
+        covered = self._covered_parts_summary(coverage)
+        cap = int(coverage.get("scoreCapApplied") or 0)
+        reason = self._clean_text_value(coverage.get("reason"))
+        if missing:
+            missing_text = self._join_natural_list(missing[:3])
+            if covered:
+                message = f"You covered {covered}, but missed {missing_text}."
+            else:
+                message = f"You missed {missing_text}."
+            if cap and cap < 95:
+                message += f" Your score is capped at {cap} because the whole image is not covered."
+            elif reason:
+                message += f" {reason}"
+            return message
+        if cap and cap < 95 and reason:
+            return f"{reason} Your score is capped at {cap}."
+        return fallback
+
+    def _join_natural_list(self, items: list[str]) -> str:
+        cleaned = [item for item in items if item]
+        if not cleaned:
+            return ""
+        if len(cleaned) == 1:
+            return cleaned[0]
+        if len(cleaned) == 2:
+            return f"{cleaned[0]} and {cleaned[1]}"
+        return f"{', '.join(cleaned[:-1])}, and {cleaned[-1]}"
+
+    def _improved_version_missing_details(
+        self,
+        coverage: dict[str, Any],
+        missing_details: list[str],
+    ) -> list[str]:
+        parts = coverage.get("imageParts") if isinstance(coverage.get("imageParts"), list) else []
+        priority = {
+            "main_subject": 0,
+            "main_action": 1,
+            "setting": 2,
+            "important_object": 3,
+            "foreground": 4,
+            "mood": 5,
+        }
+        missing_parts = [
+            part
+            for part in parts
+            if self._coverage_status_credit(str(part.get("coverageStatus") or "missing")) <= 0
+        ]
+        missing_parts.sort(key=lambda part: priority.get(str(part.get("type") or ""), 99))
+        details = [
+            self._clean_text_value(part.get("description")) or self._coverage_part_label(part)
+            for part in missing_parts
+        ]
+        details.extend(missing_details)
+        cleaned: list[str] = []
+        seen: set[str] = set()
+        for detail in details:
+            key = normalize_answer(detail)
+            if detail and key and key not in seen:
+                seen.add(key)
+                cleaned.append(detail)
+            if len(cleaned) >= 3:
+                break
+        return cleaned
+
+    def _heuristic_coverage_parts(
+        self,
+        *,
+        required_parts: list[dict[str, Any]],
+        learner_text: str,
+        primary_subject: str,
+        main_subject_mentioned: bool,
+        action_required: bool,
+        action_mentioned: bool,
+        setting_mentioned: bool,
+        foreground_mentioned: bool,
+        important_detail_count: int,
+        mood_mentioned: bool,
+    ) -> list[dict[str, Any]]:
+        if not required_parts:
+            required_parts = self._default_required_image_parts(
+                primary_subject=primary_subject,
+                action_required=action_required,
+            )
+
+        type_coverage = {
+            "main_subject": (
+                "covered" if main_subject_mentioned else "missing",
+                primary_subject if main_subject_mentioned else "",
+            ),
+            "main_action": (
+                "covered" if action_mentioned else "missing",
+                "main action mentioned" if action_mentioned else "",
+            ),
+            "setting": (
+                "covered" if setting_mentioned else "missing",
+                "setting or background mentioned" if setting_mentioned else "",
+            ),
+            "important_object": (
+                "covered" if important_detail_count >= 2 else "partially_covered" if important_detail_count == 1 else "missing",
+                "important visible object mentioned" if important_detail_count >= 1 else "",
+            ),
+            "foreground": (
+                "covered" if foreground_mentioned else "missing",
+                "foreground or nearby detail mentioned" if foreground_mentioned else "",
+            ),
+            "mood": (
+                "covered" if mood_mentioned else "missing",
+                "mood or overall meaning mentioned" if mood_mentioned else "",
+            ),
+        }
+        parts: list[dict[str, Any]] = []
+        for part in required_parts:
+            part_type = str(part.get("type") or "").strip()
+            coverage_status, evidence = self._part_coverage_status(
+                part=part,
+                learner_text=learner_text,
+                fallback_status=type_coverage.get(part_type, ("missing", ""))[0],
+                fallback_evidence=type_coverage.get(part_type, ("missing", ""))[1],
+            )
+            coverage_status = self._part_accuracy_status(
+                part=part,
+                learner_text=learner_text,
+                default_status=coverage_status,
+            )
+            parts.append(
+                {
+                    "part": str(part.get("name") or part_type or "image part"),
+                    "name": str(part.get("name") or part_type or "image part"),
+                    "description": str(part.get("description") or "").strip(),
+                    "type": part_type,
+                    "required": True,
+                    "weight": float(part.get("weight") or 0.0),
+                    "coverageStatus": coverage_status,
+                    "covered": coverage_status == "covered",
+                    "evidence": evidence,
+                }
+            )
+        return parts
+
+    def _part_coverage_status(
+        self,
+        *,
+        part: dict[str, Any],
+        learner_text: str,
+        fallback_status: str,
+        fallback_evidence: str,
+    ) -> tuple[str, str]:
+        part_type = str(part.get("type") or "")
+        description = str(part.get("description") or "")
+        name = str(part.get("name") or "")
+        if part_type == "important_object":
+            candidates = [
+                item.strip()
+                for item in re.split(r",|;|\band\b", description)
+                if item.strip()
+            ]
+            candidates = candidates or [name]
+            hits = [
+                item
+                for item in candidates
+                if self._feedback_target_in_text(item, learner_text)
+            ]
+            if len(hits) >= max(1, min(2, len(candidates))):
+                return "covered", ", ".join(hits[:2])
+            if hits:
+                return "partially_covered", hits[0]
+            return "missing", ""
+        if part_type in {"foreground", "setting", "mood"}:
+            if self._feedback_target_in_text(description, learner_text) or self._feedback_target_in_text(name, learner_text):
+                return "covered", name
+            return fallback_status, fallback_evidence
+        return fallback_status, fallback_evidence
+
+    def _coverage_status_credit(self, status: str) -> float:
+        if status == "covered":
+            return 1.0
+        if status == "partially_covered":
+            return 0.5
+        return 0.0
+
+    def _part_accuracy_status(
+        self,
+        *,
+        part: dict[str, Any],
+        learner_text: str,
+        default_status: str,
+    ) -> str:
+        part_type = str(part.get("type") or "")
+        expected_text = " ".join(
+            [
+                str(part.get("name") or ""),
+                str(part.get("description") or ""),
+            ]
+        )
+        if not self._has_conflicting_visual_claim(
+            expected_text=expected_text,
+            learner_text=learner_text,
+            part_type=part_type,
+        ):
+            return default_status
+        return "inaccurate"
+
+    def _has_conflicting_visual_claim(
+        self,
+        *,
+        expected_text: str,
+        learner_text: str,
+        part_type: str,
+    ) -> bool:
+        expected = normalize_answer(expected_text)
+        learner = normalize_answer(learner_text)
+        if part_type == "main_action":
+            action_conflicts = [
+                {"sitting", "standing"},
+                {"walking", "running"},
+                {"mowing", "driving", "sitting", "standing"},
+                {"holding", "throwing"},
+            ]
+            for group in action_conflicts:
+                expected_hits = {word for word in group if word in expected}
+                learner_hits = {word for word in group if word in learner}
+                if expected_hits and learner_hits and expected_hits.isdisjoint(learner_hits):
+                    return True
+        if part_type == "setting":
+            setting_conflicts = [
+                {"indoor", "indoors", "outdoor", "outside"},
+                {"day", "night"},
+                {"city", "forest", "beach", "room"},
+            ]
+            for group in setting_conflicts:
+                expected_hits = {word for word in group if word in expected}
+                learner_hits = {word for word in group if word in learner}
+                if expected_hits and learner_hits and expected_hits.isdisjoint(learner_hits):
+                    return True
+        return False
 
     def _feedback_visual_targets(
         self,
@@ -1273,15 +2639,19 @@ class AIAnalyzer:
             cleaned = "I can see the main subject in the image."
 
         additions: list[str] = []
-        if missing_details:
-            additions.append(f"It also includes {missing_details[0]}")
+        for detail in missing_details[:2]:
+            additions.append(f"It also includes {detail}")
         if missing_phrases:
             additions.append(f"This could be described as {missing_phrases[0]}")
         elif missing_vocab:
             additions.append(f"A useful detail to mention is {missing_vocab[0]}")
 
         if additions:
-            return f"{cleaned} {self._ensure_sentence_punctuation(additions[0])}"
+            addition_text = " ".join(
+                self._ensure_sentence_punctuation(addition)
+                for addition in additions[:3]
+            )
+            return f"{cleaned} {addition_text}"
         return cleaned
 
     def build_quiz_generation_prompt(self, *, analysis: dict[str, Any], learner_level: str) -> str:

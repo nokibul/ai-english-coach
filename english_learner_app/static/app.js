@@ -354,6 +354,7 @@ function renderStepProgress(activeStep) {
     ["feedback", "Feedback"],
     ["improve", "Improve"],
     ["quiz", "Quiz"],
+    ["reward", "Reward"],
   ];
   const activeIndex = steps.findIndex(([key]) => key === activeStep);
 
@@ -390,14 +391,15 @@ function prefersReducedMotion() {
   return window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches;
 }
 
-function animateNumber(elementId, finalValue) {
+function animateNumber(elementId, finalValue, options = {}) {
   const element = document.getElementById(elementId);
   const target = Math.max(0, Math.round(Number(finalValue) || 0));
+  const suffix = options.suffix || "";
   if (!element) {
     return;
   }
   if (prefersReducedMotion()) {
-    element.textContent = target;
+    element.textContent = `${target}${suffix}`;
     return;
   }
   const duration = 520;
@@ -405,7 +407,7 @@ function animateNumber(elementId, finalValue) {
   const tick = (now) => {
     const progress = Math.min(1, (now - startTime) / duration);
     const eased = 1 - Math.pow(1 - progress, 3);
-    element.textContent = Math.round(target * eased);
+    element.textContent = `${Math.round(target * eased)}${suffix}`;
     if (progress < 1) {
       requestAnimationFrame(tick);
     }
@@ -449,6 +451,7 @@ function renderLearnStep(session) {
               <div class="language-card-head">
                 <span class="mini-pill">${escapeHtml(item.collocation_type || "phrase")}</span>
                 <strong>${escapeHtml(item.phrase)}</strong>
+                ${item.mastery_state ? `<span class="mini-pill">${escapeHtml(item.mastery_state)}</span>` : ""}
               </div>
               <p>${escapeHtml(item.meaning_simple || "")}</p>
               ${
@@ -971,7 +974,7 @@ function renderImproveStep(session) {
   const latestText = latestAttempt?.text || state.sessionFlow.explanation || "";
   const rewriteDraft = latestText;
   const rewriteCount = Math.max(0, attempts.length - 1);
-  const shouldSuggestQuiz = rewriteCount >= 2;
+  const shouldSuggestQuiz = attempts.length >= 2;
   const latestScore = latestAttempt ? latestAttempt.score : feedbackTotalScore(latestFeedback);
   const previousScore = previousAttempt ? previousAttempt.score : null;
   const scoreDelta = previousScore === null ? 0 : latestScore - previousScore;
@@ -1072,7 +1075,7 @@ function renderImproveStep(session) {
     requestImprovementFeedback(session, state.sessionFlow.explanation, improvedText);
   });
   document.getElementById("continueToQuizButton")?.addEventListener("click", () => {
-    openQuizModal({ mode: "session", session_id: session.id });
+    startPostImproveQuiz(session);
   });
   els.sessionDetailPanel.querySelectorAll("[data-insert-phrase]").forEach((button) => {
     button.addEventListener("click", () => {
@@ -1436,7 +1439,7 @@ async function onLogin(event) {
       method: "POST",
       headers: jsonHeaders(),
       body: JSON.stringify({
-        phone: form.get("phone"),
+        email: form.get("email"),
         password: form.get("password"),
       }),
     });
@@ -1658,6 +1661,43 @@ async function requestImprovementFeedback(session, explanation, improvedText) {
     renderSessionStep("improve");
   } finally {
     setButtonBusy(button, false, "Submit Improved Version");
+  }
+}
+
+async function startPostImproveQuiz(session) {
+  const button = document.getElementById("continueToQuizButton");
+  const attempts = state.sessionFlow.attempts || [];
+  const firstAttempt = attempts[0] || {};
+  const latestAttempt = attempts[attempts.length - 1] || {};
+  setButtonBusy(button, true, "Building quiz...");
+  els.quizModal.classList.remove("hidden");
+  els.quizModalLabel.textContent = "Post-Improve Quiz";
+  els.quizModalTitle.textContent = "Building targeted questions";
+  els.quizContent.innerHTML = renderAiThinkingState("Creating your quiz...", [
+    "Using your image explanation",
+    "Checking reusable phrases",
+    "Turning feedback into questions",
+  ]);
+  try {
+    const data = await api(`/api/sessions/${session.id}/post-improve-quiz`, {
+      method: "POST",
+      headers: jsonHeaders(),
+      body: JSON.stringify({
+        explanation: state.sessionFlow.explanation || firstAttempt.text || "",
+        learner_text: firstAttempt.text || state.sessionFlow.explanation || "",
+        improved_text: latestAttempt.text || "",
+        feedback: latestAttempt.feedback || state.sessionFlow.feedback || {},
+      }),
+    });
+    state.quizDashboard = data.dashboard || state.quizDashboard;
+    state.currentQuizRun = data.run;
+    renderQuizButton();
+    renderQuizRun(data.run);
+  } catch (error) {
+    showToast(error.message, true);
+    closeQuizModal();
+  } finally {
+    setButtonBusy(button, false, "Continue to Quiz");
   }
 }
 
@@ -2333,7 +2373,7 @@ function renderReviewCard() {
   els.quizModalLabel.textContent = "Today’s Review";
   els.quizModalTitle.textContent = `Card ${reviewSession.index + 1} of ${reviewSession.cards.length}`;
   els.quizContent.innerHTML = `
-    <div class="quiz-flow">
+    <div class="quiz-flow quiz-question-enter">
       <div class="quiz-progress-row">
         <div>
           <p class="eyebrow">Progress</p>
@@ -2408,35 +2448,43 @@ function renderQuizRun(run) {
   els.quizModalTitle.textContent = `Question ${question.question_index} of ${question.total_questions}`;
   els.quizContent.innerHTML = `
     <div class="quiz-flow">
-      <div class="quiz-progress-row">
-        <div>
-          <p class="eyebrow">Progress</p>
-          <strong>${run.answered_count} answered · ${run.remaining_count} left</strong>
-        </div>
-        <div class="mini-pill">${run.correct_count} right / ${run.wrong_count} wrong</div>
-      </div>
       <div class="quiz-progress-track">
         <span class="quiz-progress-bar" style="width: ${progressPercent}%"></span>
       </div>
-      <div class="quiz-type-row">
-        <span class="mini-pill">${escapeHtml(prettyQuizType(question.quiz_type))}</span>
-        <span class="mini-pill">${escapeHtml(prettyAnswerMode(question.answer_mode))}</span>
+      <div class="quiz-top-stats">
+        <span>Progress <strong>${question.question_index}/${question.total_questions}</strong></span>
+        <span>XP <strong>${state.progress?.xp_points || 0}</strong></span>
+        <span>Combo <strong>x${state.progress?.combo_streak || 0}</strong></span>
+        <span>Best <strong>x${state.progress?.best_combo || 0}</strong></span>
       </div>
-      <p class="review-question">${escapeHtml(question.prompt)}</p>
-      ${
-        question.context_note
-          ? `<div class="tip-box">Hint: ${escapeHtml(question.context_note)}</div>`
-          : ""
-      }
-      <div class="confidence-row">
-        <span class="field-label">Confidence</span>
-        <div class="confidence-options">
-          <button class="confidence-chip" type="button" data-confidence="1">Not sure</button>
-          <button class="confidence-chip active" type="button" data-confidence="2">Okay</button>
-          <button class="confidence-chip" type="button" data-confidence="3">Sure</button>
+      <section class="quiz-question-card quiz-type-${escapeHtml(question.quiz_type)}">
+        <div class="quiz-type-row">
+          <span class="mini-pill">${escapeHtml(prettyQuizType(question.quiz_type))}</span>
+          <span class="mini-pill">${escapeHtml(prettyAnswerMode(question.answer_mode))}</span>
+          ${
+            question.related_reusable_phrase
+              ? `<span class="mini-pill">Phrase: ${escapeHtml(question.related_reusable_phrase)}</span>`
+              : ""
+          }
+          ${question.xp_value ? `<span class="mini-pill">${question.xp_value} XP</span>` : ""}
         </div>
-      </div>
-      <div id="quizAnswerZone"></div>
+        ${renderQuizTypeDetail(question)}
+        <p class="review-question">${escapeHtml(question.prompt)}</p>
+        ${
+          question.context_note
+            ? `<div class="tip-box">Hint: ${escapeHtml(question.context_note)}</div>`
+            : ""
+        }
+        <div class="confidence-row">
+          <span class="field-label">Confidence</span>
+          <div class="confidence-options">
+            <button class="confidence-chip" type="button" data-confidence="1">Not sure</button>
+            <button class="confidence-chip active" type="button" data-confidence="2">Okay</button>
+            <button class="confidence-chip" type="button" data-confidence="3">Sure</button>
+          </div>
+        </div>
+        <div id="quizAnswerZone"></div>
+      </section>
     </div>
   `;
 
@@ -2466,38 +2514,67 @@ function bindConfidenceButtons() {
 }
 
 function renderMultipleChoiceAnswer(question, container) {
+  let selectedOption = "";
+  const duel = question.quiz_type === "phrase_duel";
+  const snap = question.quiz_type === "phrase_snap";
   container.innerHTML = `
-    <div class="answer-options">
+    <div class="answer-options ${duel ? "phrase-duel-options" : snap ? "phrase-snap-options" : ""}">
       ${question.options
         .map(
           (option, index) => `
-            <button class="answer-button quiz-answer-button" type="button" data-option-index="${index}">
+            <button class="answer-button quiz-answer-button ${
+              duel ? "phrase-duel-card" : snap ? "phrase-snap-option" : ""
+            }" type="button" data-option-index="${index}">
               ${escapeHtml(option)}
             </button>
           `
         )
         .join("")}
     </div>
+    <div class="quiz-submit-bar">
+      <button id="submitChoiceAnswer" class="primary-button quiz-submit-button" type="button" disabled>Submit answer</button>
+    </div>
   `;
 
   container.querySelectorAll("[data-option-index]").forEach((button) => {
     button.addEventListener("click", () => {
-      const option = question.options[Number(button.dataset.optionIndex)];
-      submitQuizAnswer(option);
+      selectedOption = question.options[Number(button.dataset.optionIndex)];
+      container.querySelectorAll("[data-option-index]").forEach((item) => {
+        item.classList.toggle("selected", item === button);
+      });
+      document.getElementById("submitChoiceAnswer").disabled = false;
     });
+  });
+  document.getElementById("submitChoiceAnswer").addEventListener("click", () => {
+    if (!selectedOption) {
+      showToast("Choose an answer first.", true);
+      return;
+    }
+    submitQuizAnswer(selectedOption);
   });
 }
 
 function renderTypingAnswer(question, container) {
+  const relatedPhrase = question.related_reusable_phrase || question.metadata?.related_reusable_phrase || "";
+  const starterText = question.quiz_type === "fix_the_mistake" ? extractBrokenSentence(question.prompt) : "";
   container.innerHTML = `
     <div class="typing-answer-shell">
-      <textarea id="typingAnswerInput" class="quiz-text-input" rows="4" placeholder="Type your answer here..."></textarea>
+      ${
+        question.quiz_type === "use_it_or_lose_it" && relatedPhrase
+          ? `<div class="phrase-focus-chip">${escapeHtml(relatedPhrase)}</div>`
+          : ""
+      }
+      <textarea id="typingAnswerInput" class="quiz-text-input" rows="4" placeholder="${escapeHtml(
+        question.quiz_type === "fix_the_mistake" ? "Edit the sentence here..." : "Type your answer here..."
+      )}">${escapeHtml(starterText)}</textarea>
       ${
         question.metadata?.keywords?.length
           ? `<p class="muted">Key ideas to aim for: ${escapeHtml(question.metadata.keywords.join(", "))}</p>`
           : ""
       }
-      <button id="submitTypingAnswer" class="primary-button" type="button">Check answer</button>
+      <div class="quiz-submit-bar">
+        <button id="submitTypingAnswer" class="primary-button quiz-submit-button" type="button">Submit answer</button>
+      </div>
     </div>
   `;
   document.getElementById("submitTypingAnswer").addEventListener("click", () => {
@@ -2546,9 +2623,9 @@ function renderReorderAnswer(question, container) {
         </div>
         <div class="utility-meta-row">
           <button id="clearReorderAnswer" class="ghost-button inline-button" type="button">Clear</button>
-          <button id="submitReorderAnswer" class="primary-button inline-button" type="button" ${
+          <button id="submitReorderAnswer" class="primary-button inline-button quiz-submit-button" type="button" ${
             builtTokens.length ? "" : "disabled"
-          }>Check answer</button>
+          }>Submit answer</button>
         </div>
       </div>
     `;
@@ -2590,9 +2667,9 @@ function renderReorderAnswer(question, container) {
 }
 
 async function submitQuizAnswer(selectedAnswer) {
-  if (!state.currentQuizRun || !state.currentQuizRun.question) {
-    return;
-  }
+    if (!state.currentQuizRun || !state.currentQuizRun.question) {
+      return;
+    }
 
   const buttons = els.quizContent.querySelectorAll("button");
   buttons.forEach((button) => {
@@ -2617,7 +2694,11 @@ async function submitQuizAnswer(selectedAnswer) {
     state.progress = data.progress || state.progress;
     state.quizDashboard = data.dashboard || state.quizDashboard;
     state.challenge = data.challenge || state.challenge;
+    const answeredQuestion = state.currentQuizRun.question;
     state.currentQuizRun = data.run;
+    if (data.result?.phrase_mastery) {
+      applyPhraseMasteryUpdate(data.result.phrase_mastery);
+    }
     renderProgressHeader();
     renderQuizButton();
     renderDashboardContent();
@@ -2629,13 +2710,18 @@ async function submitQuizAnswer(selectedAnswer) {
     }
 
     const feedback = data.result?.feedback || {};
-    els.quizModalLabel.textContent = data.result.correct ? "Correct" : "Checked";
+    els.quizModalLabel.textContent = data.result.result_type || (data.result.correct ? "Correct" : "Checked");
     els.quizModalTitle.textContent = `Answer ${data.result.question_index} checked`;
+    const resultType = data.result.result_type || (data.result.correct ? "Correct" : "Incorrect");
+    const almostCorrect = resultType === "Almost Correct";
+    const xpBreakdown = data.result.xp_breakdown || {};
+    const phraseMastery = data.result.phrase_mastery || null;
+    const resultDetail = renderQuizResultDetail(data.result, answeredQuestion);
     els.quizContent.innerHTML = `
       <div class="quiz-feedback-card">
-        <div class="feedback-box ${data.result.correct ? "feedback-success" : ""}">
-          <strong>${data.result.correct ? "Correct." : "Checked."}</strong>
-          <p>The answer is: ${escapeHtml(data.result.correct_answer)}</p>
+        <div class="quiz-result-card ${resultClassForType(resultType)} ${resultMotionClassForType(resultType)}">
+          <span class="quiz-result-label">${escapeHtml(resultType)}</span>
+          ${resultDetail}
           ${
             feedback.good
               ? `<p class="muted">${escapeHtml(feedback.good)}</p>`
@@ -2656,16 +2742,37 @@ async function submitQuizAnswer(selectedAnswer) {
               ? `<p class="muted">Next review: ${escapeHtml(formatDate(data.result.next_due_at))}</p>`
               : ""
           }
-          <p class="muted">XP earned: ${data.result.xp_awarded || 0}${
-            data.result.combo_bonus ? ` · Combo +${data.result.combo_bonus}` : ""
-          }${data.result.daily_bonus ? ` · Challenge +${data.result.daily_bonus}` : ""}</p>
+          <div class="quiz-xp-panel">
+            <div class="reward-stat-row">
+              <span class="score-pop">Score <strong id="quizScoreValue">0%</strong></span>
+              <span class="xp-pop">XP gained <strong id="quizXpGainedValue">0</strong></span>
+              <span>Current XP <strong>${state.progress?.xp_points || 0}</strong></span>
+              <span class="combo-pop">Combo <strong>x${data.result.combo_streak || 0}</strong></span>
+              <span>Max combo <strong>x${data.result.best_combo || state.progress?.best_combo || 0}</strong></span>
+            </div>
+            <p class="muted">${formatXpBreakdown(xpBreakdown)}</p>
+          </div>
+          ${
+            phraseMastery
+              ? `
+                <div class="quiz-xp-panel">
+                  <span class="field-label">Phrase mastery</span>
+                  <p><strong>${escapeHtml(phraseMastery.phrase)}</strong> — ${escapeHtml(phraseMastery.state)}</p>
+                </div>
+              `
+              : ""
+          }
         </div>
-        <button id="nextQuizButton" class="primary-button" type="button">Next question</button>
+        <div class="quiz-submit-bar">
+          <button id="nextQuizButton" class="primary-button quiz-submit-button" type="button">Next question</button>
+        </div>
       </div>
     `;
     document.getElementById("nextQuizButton").addEventListener("click", () => {
       renderQuizRun(data.run);
     });
+    animateNumber("quizXpGainedValue", data.result.xp_awarded || 0);
+    animateNumber("quizScoreValue", Math.round((Number(data.result.score) || 0) * 100), { suffix: "%" });
     await Promise.all([fetchReviewDashboard({ silent: true }), fetchProgressDashboard({ silent: true })]);
   } catch (error) {
     showToast(error.message, true);
@@ -2791,6 +2898,8 @@ function renderQuizSummary(run, lastResult = null) {
   els.quizModalLabel.textContent =
     run.run_mode === "daily_challenge"
       ? "Challenge Complete"
+      : run.run_mode === "post_improve"
+      ? "Reward"
       : run.run_mode === "session"
       ? "Quick Challenge Complete"
       : "Quiz Complete";
@@ -2904,6 +3013,11 @@ function prettyQuizType(value) {
     typing: "Typing",
     memory_recall: "Memory Recall",
     error_focus: "Error Focus",
+    sentence_upgrade_battle: "Sentence Upgrade Battle",
+    phrase_snap: "Phrase Snap",
+    phrase_duel: "Phrase Duel",
+    fix_the_mistake: "Fix the Mistake",
+    use_it_or_lose_it: "Use It or Lose It",
   };
   return mapping[value] || formatBand(String(value || "").replaceAll("_", " "));
 }
@@ -2915,6 +3029,138 @@ function prettyAnswerMode(value) {
     reorder: "Sentence order",
   };
   return mapping[value] || formatBand(value);
+}
+
+function formatXpBreakdown(breakdown) {
+  const parts = [];
+  if (breakdown.base_xp) parts.push(`${formatBand(breakdown.difficulty || "base")} +${breakdown.base_xp}`);
+  if (breakdown.first_try_bonus) parts.push(`First try +${breakdown.first_try_bonus}`);
+  if (breakdown.phrase_bonus) parts.push(`Phrase +${breakdown.phrase_bonus}`);
+  if (breakdown.fast_bonus) parts.push(`Fast +${breakdown.fast_bonus}`);
+  if (breakdown.complete_all_types_bonus) parts.push(`All types +${breakdown.complete_all_types_bonus}`);
+  if (breakdown.perfect_quiz_bonus) parts.push(`Perfect quiz +${breakdown.perfect_quiz_bonus}`);
+  if (breakdown.weak_item_bonus) parts.push(`Weak item +${breakdown.weak_item_bonus}`);
+  if (breakdown.combo_bonus) parts.push(`Combo +${breakdown.combo_bonus}`);
+  if (breakdown.daily_bonus) parts.push(`Challenge +${breakdown.daily_bonus}`);
+  return parts.length ? parts.join(" · ") : "No XP gained this time.";
+}
+
+function resultClassForType(resultType) {
+  if (resultType === "Correct") return "result-correct";
+  if (resultType === "Almost Correct") return "result-almost";
+  return "result-incorrect";
+}
+
+function resultMotionClassForType(resultType) {
+  if (prefersReducedMotion()) return "";
+  if (resultType === "Correct") return "result-glow";
+  if (resultType === "Incorrect") return "result-shake";
+  return "result-soft-pop";
+}
+
+function renderQuizTypeDetail(question) {
+  const phrase = question.related_reusable_phrase || question.metadata?.related_reusable_phrase || "";
+  if (question.quiz_type === "sentence_upgrade_battle") {
+    const weak = question.metadata?.weak_sentence || extractBrokenSentence(question.prompt);
+    return weak
+      ? `<div class="quote-card"><span class="field-label">Weak sentence</span><p>${escapeHtml(weak)}</p></div>`
+      : "";
+  }
+  if (question.quiz_type === "fix_the_mistake") {
+    const broken = extractBrokenSentence(question.prompt);
+    return broken
+      ? `<div class="broken-sentence-card"><span class="field-label">Broken sentence</span><p>${escapeHtml(broken)}</p></div>`
+      : "";
+  }
+  if (question.quiz_type === "use_it_or_lose_it" && phrase) {
+    return `<div class="phrase-focus-chip">${escapeHtml(phrase)}</div>`;
+  }
+  if (question.quiz_type === "phrase_snap") {
+    return `<div class="quick-action-note">Fill the blank with the reusable phrase.</div>`;
+  }
+  return "";
+}
+
+function renderQuizResultDetail(result, question) {
+  const quizType = result.quiz_type || question?.quiz_type || "";
+  const selected = result.selected_answer || "";
+  const correct = result.correct_answer || "";
+  const metadata = result.metadata || question?.metadata || {};
+  const phrase = result.phrase_mastery?.phrase || metadata.related_reusable_phrase || question?.related_reusable_phrase || "";
+
+  if (quizType === "sentence_upgrade_battle") {
+    const weak = metadata.weak_sentence || question?.metadata?.weak_sentence || "";
+    return `
+      <div class="before-after-grid">
+        ${weak ? `<div><span class="field-label">Before</span><p>${escapeHtml(weak)}</p></div>` : ""}
+        <div><span class="field-label">Your answer</span><p>${escapeHtml(selected)}</p></div>
+        <div><span class="field-label">Stronger version</span><p>${escapeHtml(correct)}</p></div>
+      </div>
+    `;
+  }
+  if (quizType === "fix_the_mistake") {
+    return `
+      <div class="before-after-grid">
+        <div><span class="field-label">Your fix</span><p>${highlightChangedWords(selected, correct)}</p></div>
+        <div><span class="field-label">Corrected version</span><p>${highlightChangedWords(correct, selected)}</p></div>
+      </div>
+    `;
+  }
+  if (quizType === "use_it_or_lose_it") {
+    return `
+      <div class="before-after-grid">
+        <div><span class="field-label">Your sentence</span><p>${highlightPhraseInText(selected, phrase)}</p></div>
+        <div><span class="field-label">Model answer</span><p>${highlightPhraseInText(correct, phrase)}</p></div>
+      </div>
+    `;
+  }
+  if (quizType === "phrase_duel") {
+    return `<p>Stronger phrase use: ${escapeHtml(correct)}</p>`;
+  }
+  return `<p>The answer is: ${escapeHtml(correct)}</p>`;
+}
+
+function extractBrokenSentence(prompt) {
+  return String(prompt || "")
+    .replace(/^Fix the Mistake:\s*/i, "")
+    .replace(/^Sentence Upgrade Battle:\s*Rewrite this sentence stronger:\s*/i, "")
+    .trim();
+}
+
+function highlightPhraseInText(text, phrase) {
+  const raw = String(text || "");
+  if (!phrase) return escapeHtml(raw);
+  const index = raw.toLowerCase().indexOf(String(phrase).toLowerCase());
+  if (index === -1) return escapeHtml(raw);
+  return `${escapeHtml(raw.slice(0, index))}<mark class="inline-phrase-highlight">${escapeHtml(
+    raw.slice(index, index + phrase.length)
+  )}</mark>${escapeHtml(raw.slice(index + phrase.length))}`;
+}
+
+function highlightChangedWords(text, compareText) {
+  const compareWords = new Set(normalizeClientText(compareText).split(" ").filter(Boolean));
+  return String(text || "")
+    .split(/(\s+)/)
+    .map((part) => {
+      if (/^\s+$/.test(part)) return escapeHtml(part);
+      const key = normalizeClientText(part);
+      if (key && !compareWords.has(key)) {
+        return `<mark class="correction-highlight">${escapeHtml(part)}</mark>`;
+      }
+      return escapeHtml(part);
+    })
+    .join("");
+}
+
+function applyPhraseMasteryUpdate(phraseMastery) {
+  const phrases = state.currentSession?.analysis?.phrases || [];
+  const key = normalizeClientText(phraseMastery.phrase);
+  phrases.forEach((item) => {
+    if (normalizeClientText(item.phrase) === key) {
+      item.mastery = phraseMastery.mastery;
+      item.mastery_state = phraseMastery.state;
+    }
+  });
 }
 
 function showToast(message, isError = false) {

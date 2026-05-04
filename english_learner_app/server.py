@@ -20,6 +20,7 @@ from .progress import combo_bonus_for_streak, level_from_xp, update_streak, xp_f
 from .quiz_engine import (
     QuizSelectionProfile,
     arrange_session_quick_challenge,
+    build_post_improve_quiz_rows,
     build_session_assets,
     choose_quiz_candidates,
     evaluate_quiz_response,
@@ -73,6 +74,7 @@ def build_app(config: AppConfig | None = None) -> web.Application:
     app.router.add_get("/api/me", get_me)
     app.router.add_post("/api/analyze", analyze_image)
     app.router.add_post(r"/api/sessions/{session_id:\d+}/feedback", session_feedback)
+    app.router.add_post(r"/api/sessions/{session_id:\d+}/post-improve-quiz", session_post_improve_quiz)
     app.router.add_get(r"/api/sessions/{session_id:\d+}/image", session_image)
     app.router.add_get("/api/sessions", list_sessions)
     app.router.add_get(r"/api/sessions/{session_id:\d+}", get_session)
@@ -164,7 +166,7 @@ def public_user(user: dict[str, Any]) -> dict[str, Any]:
     return {
         "id": user["id"],
         "full_name": user["full_name"],
-        "phone": user["phone"],
+        "phone": user.get("phone"),
         "email": user["email"],
         "difficulty_band": difficulty_band,
         "difficulty_label": level_label(difficulty_band),
@@ -323,6 +325,7 @@ def serialize_session_detail(
 
 
 def serialize_quiz_question(item: dict[str, Any], *, total_questions: int) -> dict[str, Any]:
+    metadata = item.get("metadata", {})
     return {
         "id": item["id"],
         "quiz_item_id": item.get("quiz_item_id"),
@@ -333,7 +336,10 @@ def serialize_quiz_question(item: dict[str, Any], *, total_questions: int) -> di
         "context_note": item.get("context_note", ""),
         "options": list(item.get("options", [])),
         "acceptable_answers": list(item.get("acceptable_answers", [])),
-        "metadata": item.get("metadata", {}),
+        "metadata": metadata,
+        "related_reusable_phrase": metadata.get("related_reusable_phrase", ""),
+        "difficulty": float(metadata.get("difficulty", 0.0) or 0.0),
+        "xp_value": int(metadata.get("xp_value", 0) or 0),
         "question_index": int(item["question_index"]) + 1,
         "total_questions": total_questions,
     }
@@ -524,6 +530,7 @@ def build_quiz_options(
     if item.get("answer_mode") != "multiple_choice":
         return []
 
+    option_limit = 2 if item.get("quiz_type") == "phrase_duel" else 4
     values: list[str] = []
     seen: set[str] = set()
     for value in [item["correct_answer"], *item.get("distractors", []), *pool]:
@@ -533,7 +540,7 @@ def build_quiz_options(
             continue
         seen.add(key)
         values.append(text)
-        if len(values) >= 4:
+        if len(values) >= option_limit:
             break
     if item.get("review_card_id") and len(values) < 4:
         review_card = {
@@ -564,11 +571,142 @@ def build_run_items(
                 "acceptable_answers": list(candidate.get("acceptable_answers", [])),
                 "correct_answer": candidate["correct_answer"],
                 "explanation": candidate.get("explanation", ""),
-                "metadata": candidate.get("metadata", {}),
+                "metadata": {
+                    **(candidate.get("metadata", {}) or {}),
+                    "difficulty": float(candidate.get("difficulty") or 0.0),
+                },
                 "question_index": index,
             }
         )
     return run_items
+
+
+def quiz_difficulty_label(item: dict[str, Any]) -> str:
+    metadata = item.get("metadata") or {}
+    difficulty = float(metadata.get("difficulty") or 0.0)
+    if difficulty <= 0.4:
+        return "easy"
+    if difficulty <= 0.65:
+        return "medium"
+    return "hard"
+
+
+def quiz_base_xp(item: dict[str, Any]) -> int:
+    return {
+        "easy": 5,
+        "medium": 10,
+        "hard": 15,
+    }[quiz_difficulty_label(item)]
+
+
+def quiz_has_perfect_phrase_usage(
+    *, item: dict[str, Any], selected_answer: str, correct: bool
+) -> bool:
+    if not correct:
+        return False
+    metadata = item.get("metadata") or {}
+    phrase = str(metadata.get("related_reusable_phrase") or "").strip()
+    if not phrase:
+        return False
+    if str(item.get("quiz_type") or "") == "use_it_or_lose_it":
+        return True
+    return normalize_answer(phrase) in normalize_answer(selected_answer)
+
+
+def quiz_run_completion_bonuses(
+    *,
+    db: Database,
+    run_id: int,
+    completed: bool,
+) -> dict[str, Any]:
+    if not completed:
+        return {"complete_all_types_bonus": 0, "perfect_quiz_bonus": 0, "completed_types": []}
+    items = db.list_quiz_run_items(run_id=run_id)
+    answered_types = {
+        str(item.get("quiz_type") or "")
+        for item in items
+        if item.get("was_correct") is not None
+    }
+    required_types = {
+        "sentence_upgrade_battle",
+        "phrase_snap",
+        "phrase_duel",
+        "fix_the_mistake",
+        "use_it_or_lose_it",
+    }
+    complete_all_types_bonus = 20 if required_types.issubset(answered_types) else 0
+    perfect_quiz_bonus = 30 if items and all(int(item.get("was_correct") or 0) == 1 for item in items) else 0
+    return {
+        "complete_all_types_bonus": complete_all_types_bonus,
+        "perfect_quiz_bonus": perfect_quiz_bonus,
+        "completed_types": sorted(answered_types),
+    }
+
+
+def build_quiz_xp_breakdown(
+    *,
+    item: dict[str, Any],
+    selected_answer: str,
+    correct: bool,
+    almost_correct: bool,
+    response_ms: int | None,
+    completion_bonuses: dict[str, Any],
+) -> dict[str, Any]:
+    base_xp = quiz_base_xp(item) if correct else xp_for_event("quiz_almost") if almost_correct else 0
+    first_try_bonus = 5 if correct else 0
+    phrase_bonus = 10 if quiz_has_perfect_phrase_usage(
+        item=item, selected_answer=selected_answer, correct=correct
+    ) else 0
+    fast_bonus = 3 if correct and response_ms is not None and response_ms <= 6000 else 0
+    complete_all_types_bonus = int(completion_bonuses.get("complete_all_types_bonus") or 0)
+    perfect_quiz_bonus = int(completion_bonuses.get("perfect_quiz_bonus") or 0)
+    total_before_combo = (
+        base_xp
+        + first_try_bonus
+        + phrase_bonus
+        + fast_bonus
+        + complete_all_types_bonus
+        + perfect_quiz_bonus
+    )
+    return {
+        "difficulty": quiz_difficulty_label(item),
+        "base_xp": base_xp,
+        "first_try_bonus": first_try_bonus,
+        "phrase_bonus": phrase_bonus,
+        "fast_bonus": fast_bonus,
+        "complete_all_types_bonus": complete_all_types_bonus,
+        "perfect_quiz_bonus": perfect_quiz_bonus,
+        "total_before_combo": total_before_combo,
+    }
+
+
+def phrase_mastery_target_for_quiz(
+    *,
+    quiz_type: str,
+    correct: bool,
+    almost_correct: bool,
+) -> float:
+    if correct and quiz_type == "use_it_or_lose_it":
+        return 0.75
+    if correct and quiz_type in {"sentence_upgrade_battle", "fix_the_mistake", "phrase_duel"}:
+        return 0.6
+    if correct:
+        return 0.35
+    if almost_correct:
+        return 0.25
+    return 0.0
+
+
+def serialize_phrase_mastery(item: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not item:
+        return None
+    return {
+        "phrase": item["phrase"],
+        "mastery": float(item.get("mastery") or 0.0),
+        "mastery_percent": round(float(item.get("mastery") or 0.0) * 100),
+        "state": item.get("mastery_state", "Seen"),
+        "correct_count": int(item.get("correct_count") or 0),
+    }
 
 
 def _current_day_key(now) -> str:
@@ -677,6 +815,7 @@ def apply_progress_event(
         "xp_awarded": max(0, int(xp_delta)) + combo_bonus,
         "combo_bonus": combo_bonus,
         "combo_streak": combo_streak,
+        "best_combo": best_combo,
     }
 
 
@@ -738,13 +877,13 @@ async def signup(request: web.Request) -> web.Response:
         raise web.HTTPBadRequest(reason="Please enter your full name.")
     if "@" not in email:
         raise web.HTTPBadRequest(reason="Please provide a valid email address.")
-    if len(phone) < 8:
+    if phone and len(phone) < 8:
         raise web.HTTPBadRequest(reason="Please provide a valid phone number.")
     if len(password) < 8:
         raise web.HTTPBadRequest(reason="Passwords should be at least 8 characters.")
 
     db: Database = request.app["db"]
-    if db.get_user_by_phone(phone):
+    if phone and db.get_user_by_phone(phone):
         raise web.HTTPConflict(reason="That phone number is already registered.")
     if db.get_user_by_email(email):
         raise web.HTTPConflict(reason="That email address is already registered.")
@@ -755,7 +894,7 @@ async def signup(request: web.Request) -> web.Response:
     try:
         user = db.create_user(
             full_name=full_name,
-            phone=phone,
+            phone=phone or None,
             email=email,
             password_hash=hash_password(password),
             difficulty_band=assessment["difficulty_band"],
@@ -883,16 +1022,16 @@ async def verify_otp(request: web.Request) -> web.Response:
 
 async def login(request: web.Request) -> web.Response:
     payload = await request.json()
-    phone = normalize_phone(str(payload.get("phone") or ""))
+    email = str(payload.get("email") or "").strip().lower()
     password = str(payload.get("password") or "")
 
-    if not phone or not password:
-        raise web.HTTPBadRequest(reason="Please provide your phone number and password.")
+    if not email or not password:
+        raise web.HTTPBadRequest(reason="Please provide your email and password.")
 
     db: Database = request.app["db"]
-    user = db.get_user_by_phone(phone)
+    user = db.get_user_by_email(email)
     if not user or not verify_password(password, user["password_hash"]):
-        raise web.HTTPUnauthorized(reason="Phone number or password is incorrect.")
+        raise web.HTTPUnauthorized(reason="Email or password is incorrect.")
     if not user["is_verified"]:
         raise web.HTTPUnauthorized(
             reason="Please verify your email OTP before logging in."
@@ -1157,6 +1296,86 @@ async def session_feedback(request: web.Request) -> web.Response:
     )
 
 
+async def session_post_improve_quiz(request: web.Request) -> web.Response:
+    user = current_user(request)
+    session_id = int(request.match_info["session_id"])
+    payload = await request.json()
+    learner_text = str(payload.get("learner_text") or payload.get("explanation") or "").strip()
+    improved_text = str(payload.get("improved_text") or payload.get("rewrite") or "").strip()
+    feedback = payload.get("feedback") if isinstance(payload.get("feedback"), dict) else {}
+
+    if not learner_text and not improved_text:
+        raise web.HTTPBadRequest(reason="Write and improve an answer before starting the quiz.")
+
+    db: Database = request.app["db"]
+    session = db.get_session(user_id=user["id"], session_id=session_id)
+    if not session:
+        raise web.HTTPNotFound(reason="That learning session was not found.")
+
+    active_run = db.get_active_quiz_run(user_id=user["id"], run_mode="post_improve")
+    if active_run and int(active_run.get("session_id") or 0) == session_id:
+        run_payload = serialize_quiz_run(
+            db, user_id=user["id"], run_id=int(active_run["id"]), include_question=True
+        )
+        return web.json_response({"run": run_payload, "message": "Your post-improve quiz is ready."})
+
+    now = utc_now()
+    now_iso = to_iso(now)
+    session_detail = serialize_session_detail(db, session, user_id=user["id"])
+    quiz_rows = build_post_improve_quiz_rows(
+        user_id=user["id"],
+        session_id=session_id,
+        analysis=session_detail["analysis"],
+        learner_level=user["difficulty_band"],
+        learner_text=learner_text,
+        improved_text=improved_text,
+        feedback=feedback,
+        created_at=now_iso,
+    )
+    if not quiz_rows:
+        raise web.HTTPBadRequest(reason="There was not enough lesson feedback to build a quiz.")
+
+    db.deactivate_post_improve_quiz_items(user_id=user["id"], session_id=session_id)
+    db.bulk_create_quiz_items(quiz_rows)
+    candidates = [
+        item
+        for item in db.list_candidate_quiz_items(user_id=user["id"], session_id=session_id, limit=80)
+        if item.get("skill_tag") == "post-improve quiz"
+    ]
+    type_order = {
+        "sentence_upgrade_battle": 0,
+        "phrase_snap": 1,
+        "phrase_duel": 2,
+        "fix_the_mistake": 3,
+        "use_it_or_lose_it": 4,
+    }
+    candidates = sorted(
+        candidates,
+        key=lambda item: (
+            type_order.get(str(item.get("quiz_type")), 99),
+            float(item.get("difficulty") or 0.0),
+            int(item.get("id") or 0),
+        ),
+    )[:12]
+    pool = [item["correct_answer"] for item in candidates]
+    run = db.create_quiz_run(
+        user_id=user["id"],
+        run_mode="post_improve",
+        started_at=now_iso,
+        items=build_run_items(candidates, pool=pool),
+        session_id=session_id,
+        source_label="Post-Improve Quiz",
+    )
+    run_payload = serialize_quiz_run(db, user_id=user["id"], run_id=int(run["id"]), include_question=True)
+    return web.json_response(
+        {
+            "run": run_payload,
+            "dashboard": build_quiz_dashboard(db, request.app["config"], user=user, now=now),
+            "message": "Quiz ready.",
+        }
+    )
+
+
 async def session_image(request: web.Request) -> web.StreamResponse:
     user = current_user(request)
     session_id = int(request.match_info["session_id"])
@@ -1373,6 +1592,8 @@ async def quiz_answer(request: web.Request) -> web.Response:
         confidence=confidence,
     )
     correct = bool(evaluation["correct"])
+    result_type = str(evaluation.get("result_type") or ("Correct" if correct else "Incorrect"))
+    almost_correct = result_type == "Almost Correct"
     now = utc_now()
     now_iso = to_iso(now)
     next_schedule = None
@@ -1418,6 +1639,24 @@ async def quiz_answer(request: web.Request) -> web.Response:
             seen_at=now_iso,
         )
 
+    phrase_mastery = None
+    related_phrase = str((item.get("metadata") or {}).get("related_reusable_phrase") or "").strip()
+    phrase_mastery_target = phrase_mastery_target_for_quiz(
+        quiz_type=str(item.get("quiz_type") or ""),
+        correct=correct,
+        almost_correct=almost_correct,
+    )
+    if related_phrase and item.get("session_id") and phrase_mastery_target > 0:
+        phrase_mastery = serialize_phrase_mastery(
+            db.update_phrase_mastery(
+                user_id=user["id"],
+                session_id=int(item["session_id"]),
+                phrase=related_phrase,
+                mastery=phrase_mastery_target,
+                was_correct=correct,
+            )
+        )
+
     db.record_quiz_attempt(
         quiz_item_id=int(item["quiz_item_id"]) if item.get("quiz_item_id") else None,
         card_id=int(item["card_id"]) if item.get("card_id") else None,
@@ -1447,11 +1686,22 @@ async def quiz_answer(request: web.Request) -> web.Response:
     )
     updated_run = db.sync_quiz_run(user_id=user["id"], run_id=run_id, completed_at=now_iso)
 
-    xp_delta = (
-        xp_for_event("weak_item_correct")
-        if correct and was_weak_item
-        else xp_for_event("quiz_correct" if correct else "quiz_incorrect")
+    completion_bonuses = quiz_run_completion_bonuses(
+        db=db,
+        run_id=run_id,
+        completed=bool(updated_run and updated_run["status"] == "completed"),
     )
+    xp_breakdown = build_quiz_xp_breakdown(
+        item=item,
+        selected_answer=selected_answer,
+        correct=correct,
+        almost_correct=almost_correct,
+        response_ms=response_ms,
+        completion_bonuses=completion_bonuses,
+    )
+    xp_delta = int(xp_breakdown["total_before_combo"])
+    if correct and was_weak_item:
+        xp_delta += xp_for_event("weak_item_correct")
     daily_bonus = 0
     quizzes_delta = 1 if updated_run and updated_run["status"] == "completed" else 0
     if updated_run and updated_run["status"] == "completed" and run.get("run_mode") == "daily_challenge":
@@ -1473,8 +1723,12 @@ async def quiz_answer(request: web.Request) -> web.Response:
         now=now,
         xp_delta=xp_delta,
         quizzes_delta=quizzes_delta,
-        activity_correct=correct,
+        activity_correct=True if correct else False if not almost_correct else None,
     )
+    xp_breakdown["combo_bonus"] = int(reward_meta["combo_bonus"])
+    xp_breakdown["weak_item_bonus"] = xp_for_event("weak_item_correct") if correct and was_weak_item else 0
+    xp_breakdown["daily_bonus"] = daily_bonus
+    xp_breakdown["total"] = int(reward_meta["xp_awarded"])
     run_payload = serialize_quiz_run(db, user_id=user["id"], run_id=run_id, include_question=True)
     dashboard = build_quiz_dashboard(
         db,
@@ -1486,6 +1740,11 @@ async def quiz_answer(request: web.Request) -> web.Response:
         {
             "result": {
                 "correct": correct,
+                "result_type": result_type,
+                "almost_correct": almost_correct,
+                "quiz_type": str(item.get("quiz_type") or ""),
+                "selected_answer": selected_answer,
+                "metadata": item.get("metadata") or {},
                 "correct_answer": item["correct_answer"],
                 "context_note": item.get("context_note", ""),
                 "feedback": evaluation["feedback"],
@@ -1493,8 +1752,11 @@ async def quiz_answer(request: web.Request) -> web.Response:
                 "next_due_at": next_schedule["due_at"] if next_schedule else None,
                 "question_index": int(item["question_index"]) + 1,
                 "xp_awarded": int(reward_meta["xp_awarded"]),
+                "xp_breakdown": xp_breakdown,
+                "phrase_mastery": phrase_mastery,
                 "combo_bonus": int(reward_meta["combo_bonus"]),
                 "combo_streak": int(reward_meta["combo_streak"]),
+                "best_combo": int(reward_meta["best_combo"]),
                 "daily_bonus": daily_bonus,
                 "was_weak_item": was_weak_item,
             },

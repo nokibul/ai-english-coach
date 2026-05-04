@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import timezone
 import os
 from pathlib import Path
+import sqlite3
 import tempfile
 import unittest
 import asyncio
@@ -11,13 +12,22 @@ from unittest.mock import patch
 from english_learner_app.assessment import evaluate_assessment
 from english_learner_app.ai_service import AIAnalyzer
 from english_learner_app.config import AppConfig
-from english_learner_app.quiz_engine import build_session_assets, evaluate_quiz_response
+from english_learner_app.database import Database, phrase_mastery_state
+from english_learner_app.quiz_engine import (
+    build_post_improve_quiz_rows,
+    build_session_assets,
+    evaluate_quiz_response,
+)
 from english_learner_app.review import (
     build_study_cards,
     calculate_next_review,
     select_quiz_cards,
 )
-from english_learner_app.server import build_highlight_terms
+from english_learner_app.server import (
+    apply_progress_event,
+    build_highlight_terms,
+    build_quiz_xp_breakdown,
+)
 from english_learner_app.utils import from_iso, highlight_phrases
 
 
@@ -103,6 +113,255 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(config.database_path, root / "runtime-db" / "app.sqlite3")
 
 
+class DatabaseAuthTests(unittest.TestCase):
+    def test_create_multiple_users_without_phone(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db = Database(Path(temp_dir) / "app.sqlite3")
+            db.initialize()
+
+            first = db.create_user(
+                full_name="First Learner",
+                phone=None,
+                email="first@example.com",
+                password_hash="hash-one",
+                difficulty_band="beginner",
+                fluency_score=10,
+                fluency_summary="Starting out.",
+                assessment={},
+                created_at="2026-05-04T00:00:00+00:00",
+            )
+            second = db.create_user(
+                full_name="Second Learner",
+                phone=None,
+                email="second@example.com",
+                password_hash="hash-two",
+                difficulty_band="developing",
+                fluency_score=20,
+                fluency_summary="Building confidence.",
+                assessment={},
+                created_at="2026-05-04T00:00:00+00:00",
+            )
+
+        self.assertIsNone(first["phone"])
+        self.assertIsNone(second["phone"])
+
+    def test_existing_users_table_migrates_phone_to_optional(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db_path = Path(temp_dir) / "app.sqlite3"
+            with sqlite3.connect(db_path) as conn:
+                conn.execute(
+                    """
+                    CREATE TABLE users (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        full_name TEXT NOT NULL,
+                        phone TEXT NOT NULL UNIQUE,
+                        email TEXT NOT NULL UNIQUE,
+                        password_hash TEXT NOT NULL,
+                        difficulty_band TEXT NOT NULL,
+                        fluency_score INTEGER NOT NULL,
+                        fluency_summary TEXT NOT NULL,
+                        assessment_json TEXT NOT NULL,
+                        is_verified INTEGER NOT NULL DEFAULT 0,
+                        created_at TEXT NOT NULL
+                    )
+                    """
+                )
+                conn.execute(
+                    """
+                    INSERT INTO users (
+                        full_name, phone, email, password_hash, difficulty_band,
+                        fluency_score, fluency_summary, assessment_json, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        "Existing Learner",
+                        "+8801555123456",
+                        "existing@example.com",
+                        "hash",
+                        "beginner",
+                        10,
+                        "Starting out.",
+                        "{}",
+                        "2026-05-04T00:00:00+00:00",
+                    ),
+                )
+
+            db = Database(db_path)
+            db.initialize()
+
+            with sqlite3.connect(db_path) as conn:
+                phone_column = next(
+                    row for row in conn.execute("PRAGMA table_info(users)")
+                    if row[1] == "phone"
+                )
+
+            self.assertEqual(0, phone_column[3])
+            self.assertEqual(
+                "existing@example.com",
+                db.get_user_by_email("existing@example.com")["email"],
+            )
+
+
+class ProgressRewardTests(unittest.TestCase):
+    def test_phrase_mastery_states_and_updates(self) -> None:
+        self.assertEqual("Seen", phrase_mastery_state(mastery=0.0, correct_count=0))
+        self.assertEqual("Practiced", phrase_mastery_state(mastery=0.35, correct_count=0))
+        self.assertEqual("Used Correctly", phrase_mastery_state(mastery=0.6, correct_count=0))
+        self.assertEqual("Mastered", phrase_mastery_state(mastery=0.8, correct_count=3))
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db = Database(Path(temp_dir) / "app.sqlite3")
+            db.initialize()
+            user = db.create_user(
+                full_name="Phrase Learner",
+                phone=None,
+                email="phrase@example.com",
+                password_hash="hash",
+                difficulty_band="beginner",
+                fluency_score=10,
+                fluency_summary="Starting out.",
+                assessment={},
+                created_at="2026-05-04T00:00:00+00:00",
+            )
+            session_id = db.create_analysis_session(
+                user_id=user["id"],
+                image_name="image.jpg",
+                image_path="uploads/image.jpg",
+                title="Phrase test",
+                difficulty_band="beginner",
+                simple_explanation="A cyclist is on the street.",
+                natural_explanation="Cars are in the background.",
+                highlighted_html="",
+                summary={},
+                raw_analysis={},
+                source_mode="demo",
+                created_at="2026-05-04T00:00:00+00:00",
+            )
+            db.bulk_create_session_phrase_items(
+                [
+                    {
+                        "user_id": user["id"],
+                        "session_id": session_id,
+                        "phrase": "in the background",
+                        "meaning_simple": "behind the main subject",
+                        "example": "Cars are in the background.",
+                        "examples": [],
+                        "reusable": 1,
+                        "collocation_type": "phrase",
+                        "mastery": 0.0,
+                        "correct_count": 0,
+                        "wrong_count": 0,
+                        "created_at": "2026-05-04T00:00:00+00:00",
+                    }
+                ]
+            )
+
+            practiced = db.update_phrase_mastery(
+                user_id=user["id"],
+                session_id=session_id,
+                phrase="in the background",
+                mastery=0.35,
+                was_correct=True,
+            )
+            used = db.update_phrase_mastery(
+                user_id=user["id"],
+                session_id=session_id,
+                phrase="in the background",
+                mastery=0.75,
+                was_correct=True,
+            )
+
+        self.assertEqual("Practiced", practiced["mastery_state"])
+        self.assertEqual("Used Correctly", used["mastery_state"])
+        self.assertEqual(2, used["correct_count"])
+
+    def test_quiz_xp_breakdown_applies_base_and_bonuses(self) -> None:
+        breakdown = build_quiz_xp_breakdown(
+            item={
+                "quiz_type": "use_it_or_lose_it",
+                "metadata": {
+                    "difficulty": 0.72,
+                    "related_reusable_phrase": "in the background",
+                },
+            },
+            selected_answer="Cars are in the background while the cyclist rides.",
+            correct=True,
+            almost_correct=False,
+            response_ms=4500,
+            completion_bonuses={"complete_all_types_bonus": 20, "perfect_quiz_bonus": 30},
+        )
+
+        self.assertEqual("hard", breakdown["difficulty"])
+        self.assertEqual(15, breakdown["base_xp"])
+        self.assertEqual(5, breakdown["first_try_bonus"])
+        self.assertEqual(10, breakdown["phrase_bonus"])
+        self.assertEqual(3, breakdown["fast_bonus"])
+        self.assertEqual(20, breakdown["complete_all_types_bonus"])
+        self.assertEqual(30, breakdown["perfect_quiz_bonus"])
+        self.assertEqual(83, breakdown["total_before_combo"])
+
+    def test_combo_rules_for_correct_almost_and_wrong(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db = Database(Path(temp_dir) / "app.sqlite3")
+            db.initialize()
+            user = db.create_user(
+                full_name="Combo Learner",
+                phone=None,
+                email="combo@example.com",
+                password_hash="hash",
+                difficulty_band="beginner",
+                fluency_score=10,
+                fluency_summary="Starting out.",
+                assessment={},
+                created_at="2026-05-04T00:00:00+00:00",
+            )
+            now = from_iso("2026-05-04T00:00:00+00:00")
+
+            progress, reward = apply_progress_event(
+                db, user_id=user["id"], now=now, xp_delta=5, activity_correct=True
+            )
+            self.assertEqual(1, reward["combo_streak"])
+
+            progress, reward = apply_progress_event(
+                db, user_id=user["id"], now=now, xp_delta=5, activity_correct=None
+            )
+            self.assertEqual(1, reward["combo_streak"])
+
+            progress, reward = apply_progress_event(
+                db, user_id=user["id"], now=now, xp_delta=0, activity_correct=False
+            )
+            self.assertEqual(0, reward["combo_streak"])
+            self.assertEqual(1, progress["best_combo"])
+
+    def test_combo_x3_and_x5_bonus_values(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db = Database(Path(temp_dir) / "app.sqlite3")
+            db.initialize()
+            user = db.create_user(
+                full_name="Bonus Learner",
+                phone=None,
+                email="bonus@example.com",
+                password_hash="hash",
+                difficulty_band="beginner",
+                fluency_score=10,
+                fluency_summary="Starting out.",
+                assessment={},
+                created_at="2026-05-04T00:00:00+00:00",
+            )
+            now = from_iso("2026-05-04T00:00:00+00:00")
+
+            rewards = []
+            for _ in range(5):
+                _, reward = apply_progress_event(
+                    db, user_id=user["id"], now=now, xp_delta=5, activity_correct=True
+                )
+                rewards.append(reward)
+
+        self.assertEqual(5, rewards[2]["combo_bonus"])
+        self.assertEqual(12, rewards[4]["combo_bonus"])
+        self.assertEqual(5, rewards[4]["best_combo"])
+
+
 class AIAnalyzerTests(unittest.TestCase):
     def test_prompt_emphasizes_natural_english_and_reusable_language(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -117,6 +376,745 @@ class AIAnalyzerTests(unittest.TestCase):
         self.assertIn("do not teach them as key vocabulary", prompt)
         self.assertIn("Sentence patterns should help learners write better sentences", prompt)
         self.assertIn("Do not include basic function words", prompt)
+
+    def test_feedback_prompt_caps_scores_by_image_coverage(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with patch.dict(os.environ, {}, clear=True):
+                config = AppConfig.from_env(base_dir=Path(temp_dir))
+
+        analyzer = AIAnalyzer(config)
+        prompt = analyzer._build_explanation_feedback_prompt(
+            learner_text="The man is smiling.",
+            original_text="",
+            analysis={"natural_explanation": "A man is smiling in a busy cafe."},
+            learner_level="beginner",
+        )
+
+        self.assertIn("Judge coverage of the whole image before language quality", prompt)
+        self.assertIn("foreground, main subject, main action, setting/background", prompt)
+        self.assertIn("main subject 25%, main action 20%", prompt)
+        self.assertIn("main subject missing = max 40", prompt)
+        self.assertIn("only background described = max 25", prompt)
+        self.assertIn("Calculate final score mechanically", prompt)
+        self.assertIn("If the learner does not mention the main subject", prompt)
+        self.assertIn("Do not let good English override poor coverage", prompt)
+        self.assertIn('"coverage": {"level": "low"', prompt)
+
+    def test_extract_required_image_parts_from_reference_analysis(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with patch.dict(os.environ, {}, clear=True):
+                config = AppConfig.from_env(base_dir=Path(temp_dir))
+
+        analyzer = AIAnalyzer(config)
+        parts = analyzer._extract_required_image_parts(
+            {
+                "objects": [
+                    {
+                        "name": "person",
+                        "description": "A person is riding a mower in the foreground.",
+                        "importance": 0.95,
+                    },
+                    {
+                        "name": "riding mower",
+                        "description": "The mower is cutting the grass.",
+                        "importance": 0.9,
+                    },
+                    {
+                        "name": "palm trees",
+                        "description": "Palm trees stand in the background.",
+                        "importance": 0.5,
+                    },
+                ],
+                "actions": [{"phrase": "mowing the lawn", "description": "The person is mowing the lawn."}],
+                "environment": "sunny yard",
+                "environment_details": ["foreground grass", "palm trees", "blue sky"],
+                "natural_explanation": "A person is mowing a sunny yard with a tidy, calm feeling.",
+            }
+        )
+
+        types = {part["type"] for part in parts}
+        self.assertIn("main_subject", types)
+        self.assertIn("main_action", types)
+        self.assertIn("foreground", types)
+        self.assertIn("setting", types)
+        self.assertIn("important_object", types)
+        self.assertIn("mood", types)
+        self.assertAlmostEqual(100.0, sum(float(part["weight"]) for part in parts), places=1)
+        for part in parts:
+            self.assertTrue(part["name"])
+            self.assertTrue(part["description"])
+
+    def test_required_image_part_weights_adapt_to_missing_action_and_weak_mood(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with patch.dict(os.environ, {}, clear=True):
+                config = AppConfig.from_env(base_dir=Path(temp_dir))
+
+        analyzer = AIAnalyzer(config)
+        parts = analyzer._extract_required_image_parts(
+            {
+                "objects": [
+                    {"name": "vase", "description": "A vase sits on a table.", "importance": 0.9},
+                    {"name": "flowers", "description": "Flowers are inside the vase.", "importance": 0.8},
+                    {"name": "table", "description": "A table is near the front.", "importance": 0.6},
+                ],
+                "actions": [],
+                "environment": "bright indoor room",
+                "environment_details": ["front table", "window light"],
+                "natural_explanation": "A vase with flowers sits on a front table in a bright indoor room.",
+            }
+        )
+
+        weights = {part["type"]: float(part["weight"]) for part in parts}
+        self.assertAlmostEqual(100.0, sum(weights.values()), places=1)
+        self.assertNotIn("main_action", weights)
+        self.assertGreater(weights["main_subject"], weights["setting"])
+        self.assertGreater(weights["main_subject"], weights.get("mood", 0.0))
+        self.assertGreater(weights["important_object"], weights.get("mood", 0.0))
+
+        weak_mood_parts = analyzer._extract_required_image_parts(
+            {
+                "objects": [
+                    {"name": "person", "description": "A person stands on the grass.", "importance": 0.9},
+                    {"name": "ball", "description": "A ball is near the person.", "importance": 0.8},
+                ],
+                "actions": [{"phrase": "standing on the grass"}],
+                "environment": "sunny field",
+                "environment_details": ["grass in front", "open field"],
+                "natural_explanation": "A person stands on the grass in a sunny field.",
+            }
+        )
+        weak_weights = {part["type"]: float(part["weight"]) for part in weak_mood_parts}
+        self.assertAlmostEqual(100.0, sum(weak_weights.values()), places=1)
+        self.assertLess(weak_weights["mood"], 10.0)
+        self.assertGreater(weak_weights["main_subject"], weak_weights["setting"])
+        self.assertGreater(weak_weights["main_action"], weak_weights["mood"])
+
+    def test_heuristic_feedback_caps_background_only_without_main_subject(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with patch.dict(os.environ, {}, clear=True):
+                config = AppConfig.from_env(base_dir=Path(temp_dir))
+
+        analyzer = AIAnalyzer(config)
+        analysis = {
+            "objects": [
+                {"name": "person", "description": "A person is sitting near the river.", "importance": 0.9},
+                {"name": "bridge", "description": "A bridge is in the background.", "importance": 0.5},
+                {"name": "trees", "description": "Trees stand near the river.", "importance": 0.5},
+            ],
+            "actions": [{"phrase": "sitting near the river"}],
+            "environment": "outdoor river scene",
+            "environment_details": ["river", "trees", "bridge"],
+            "vocabulary": [],
+            "phrases": [],
+            "sentence_patterns": [],
+        }
+
+        incomplete = analyzer._heuristic_explanation_feedback(
+            learner_text="The background reveals lush greenery and a distant bridge, creating a peaceful atmosphere.",
+            original_text="",
+            analysis=analysis,
+        )
+        complete = analyzer._heuristic_explanation_feedback(
+            learner_text=(
+                "The image shows a man sitting near a river. "
+                "There are trees, a bridge, and a calm outdoor setting."
+            ),
+            original_text="",
+            analysis=analysis,
+        )
+
+        self.assertLessEqual(incomplete["score"], 40)
+        self.assertEqual("low", incomplete["coverage"]["level"])
+        self.assertIn("main subject", incomplete["main_issue"])
+        self.assertGreaterEqual(complete["score"], 70)
+        self.assertGreater(complete["score"], incomplete["score"])
+
+    def test_heuristic_feedback_scores_by_weighted_image_parts(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with patch.dict(os.environ, {}, clear=True):
+                config = AppConfig.from_env(base_dir=Path(temp_dir))
+
+        analyzer = AIAnalyzer(config)
+        analysis = {
+            "objects": [
+                {"name": "person", "description": "A person is on a riding mower.", "importance": 0.95},
+                {"name": "riding mower", "description": "The mower is on the grass.", "importance": 0.9},
+                {"name": "grass", "description": "Foreground grass fills the yard.", "importance": 0.7},
+                {"name": "palm trees", "description": "Palm trees stand in the background.", "importance": 0.5},
+            ],
+            "actions": [{"phrase": "mowing the lawn"}],
+            "environment": "sunny lawn or yard setting",
+            "environment_details": ["yard", "palm trees", "bushes", "sky"],
+            "vocabulary": [],
+            "phrases": [],
+            "sentence_patterns": [],
+        }
+
+        partial = analyzer._heuristic_explanation_feedback(
+            learner_text="The far background has palm trees, blue sky, and a sunny tidy atmosphere.",
+            original_text="",
+            analysis=analysis,
+        )
+
+        self.assertLessEqual(partial["score"], 45)
+        self.assertLess(partial["coverage"]["coveragePercent"], 50)
+        self.assertEqual(partial["coverage"]["coverageScore"], partial["coverage"]["coveragePercent"])
+        self.assertLessEqual(partial["coverage"]["coverageScore"], 40)
+        missing_parts = partial["coverage"]["missingMajorParts"]
+        self.assertTrue(any("main subject" in part for part in missing_parts))
+        self.assertTrue(any("main action" in part for part in missing_parts))
+        self.assertTrue(partial["coverage"]["imageParts"])
+
+    def test_heuristic_feedback_classifies_part_coverage_statuses(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with patch.dict(os.environ, {}, clear=True):
+                config = AppConfig.from_env(base_dir=Path(temp_dir))
+
+        analyzer = AIAnalyzer(config)
+        analysis = {
+            "objects": [
+                {"name": "person", "description": "A person is on a riding mower.", "importance": 0.95},
+                {"name": "riding mower", "description": "The mower is on the grass.", "importance": 0.9},
+                {"name": "grass", "description": "Foreground grass fills the yard.", "importance": 0.7},
+            ],
+            "actions": [{"phrase": "mowing the lawn"}],
+            "environment": "sunny lawn or yard setting",
+            "environment_details": ["yard", "grass in front"],
+            "natural_explanation": "A person is mowing a sunny yard.",
+            "vocabulary": [],
+            "phrases": [],
+            "sentence_patterns": [],
+        }
+
+        feedback = analyzer._heuristic_explanation_feedback(
+            learner_text="A person is mowing grass in a yard.",
+            original_text="",
+            analysis=analysis,
+        )
+
+        by_type = {part["type"]: part for part in feedback["coverage"]["imageParts"]}
+        self.assertTrue(feedback["coverage"]["mainSubjectMentioned"])
+        self.assertTrue(feedback["coverage"]["mainActionMentioned"])
+        self.assertEqual("covered", by_type["main_subject"]["coverageStatus"])
+        self.assertEqual("covered", by_type["main_action"]["coverageStatus"])
+        self.assertEqual("covered", by_type["setting"]["coverageStatus"])
+        self.assertEqual("partially_covered", by_type["important_object"]["coverageStatus"])
+        self.assertIn(by_type["foreground"]["coverageStatus"], {"missing", "partially_covered", "covered"})
+        self.assertGreater(feedback["coverage"]["coveragePercent"], 50)
+        self.assertEqual(feedback["coverage"]["coverageScore"], feedback["coverage"]["coveragePercent"])
+
+    def test_heuristic_feedback_marks_serious_inaccuracy(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with patch.dict(os.environ, {}, clear=True):
+                config = AppConfig.from_env(base_dir=Path(temp_dir))
+
+        analyzer = AIAnalyzer(config)
+        analysis = {
+            "objects": [{"name": "person", "description": "A person is sitting indoors.", "importance": 0.9}],
+            "actions": [{"phrase": "sitting"}],
+            "environment": "indoor room",
+            "environment_details": ["room"],
+            "natural_explanation": "A person is sitting in an indoor room.",
+            "vocabulary": [],
+            "phrases": [],
+            "sentence_patterns": [],
+        }
+
+        feedback = analyzer._heuristic_explanation_feedback(
+            learner_text="A person is standing outside.",
+            original_text="",
+            analysis=analysis,
+        )
+
+        by_type = {part["type"]: part for part in feedback["coverage"]["imageParts"]}
+        self.assertEqual("inaccurate", by_type["main_action"]["coverageStatus"])
+        self.assertEqual("inaccurate", by_type["setting"]["coverageStatus"])
+        self.assertGreater(feedback["coverage"]["accuracyPenalty"], 0)
+
+    def test_heuristic_feedback_applies_action_and_brief_overall_caps(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with patch.dict(os.environ, {}, clear=True):
+                config = AppConfig.from_env(base_dir=Path(temp_dir))
+
+        analyzer = AIAnalyzer(config)
+        analysis = {
+            "objects": [
+                {"name": "person", "description": "A person is using a mower.", "importance": 0.95},
+                {"name": "mower", "description": "A mower is in the yard.", "importance": 0.85},
+                {"name": "grass", "description": "Grass is in the foreground.", "importance": 0.7},
+            ],
+            "actions": [{"phrase": "mowing the lawn"}],
+            "environment": "yard setting",
+            "environment_details": ["yard", "foreground grass"],
+            "natural_explanation": "A person is mowing a calm yard with a mower.",
+            "vocabulary": [],
+            "phrases": [],
+            "sentence_patterns": [],
+        }
+
+        missing_action = analyzer._heuristic_explanation_feedback(
+            learner_text="A person is with a mower in the yard.",
+            original_text="",
+            analysis=analysis,
+        )
+        brief_overall = analyzer._heuristic_explanation_feedback(
+            learner_text="A person is mowing grass in a yard with a mower.",
+            original_text="",
+            analysis=analysis,
+        )
+
+        self.assertLessEqual(missing_action["score"], 50)
+        self.assertEqual(50, missing_action["coverage"]["scoreCapApplied"])
+        self.assertLessEqual(brief_overall["score"], 80)
+        self.assertEqual(80, brief_overall["coverage"]["scoreCapApplied"])
+
+    def test_language_quality_is_downstream_of_coverage_caps(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with patch.dict(os.environ, {}, clear=True):
+                config = AppConfig.from_env(base_dir=Path(temp_dir))
+
+        analyzer = AIAnalyzer(config)
+        analysis = {
+            "objects": [
+                {"name": "person", "description": "A person is sitting near the river.", "importance": 0.95},
+                {"name": "bridge", "description": "A bridge is in the background.", "importance": 0.6},
+            ],
+            "actions": [{"phrase": "sitting near the river"}],
+            "environment": "outdoor river scene",
+            "environment_details": ["river", "bridge", "trees"],
+            "natural_explanation": "A person is sitting near a river with a bridge in the background.",
+            "phrases": [{"phrase": "in the background"}],
+            "vocabulary": [],
+            "sentence_patterns": [],
+        }
+
+        fluent_partial = analyzer._heuristic_explanation_feedback(
+            learner_text=(
+                "In the background, the distant bridge and calm river create a peaceful, "
+                "well-balanced outdoor atmosphere."
+            ),
+            original_text="",
+            analysis=analysis,
+        )
+
+        self.assertLessEqual(fluent_partial["score"], 40)
+        self.assertGreaterEqual(fluent_partial["language_quality"]["score"], 50)
+        self.assertLessEqual(fluent_partial["language_quality"]["reusableLanguage"], 100)
+
+    def test_final_score_uses_coverage_dominant_formula_and_cap(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with patch.dict(os.environ, {}, clear=True):
+                config = AppConfig.from_env(base_dir=Path(temp_dir))
+
+        analyzer = AIAnalyzer(config)
+        analysis = {
+            "objects": [
+                {"name": "person", "description": "A person is sitting near the river.", "importance": 0.95},
+                {"name": "bridge", "description": "A bridge is in the background.", "importance": 0.6},
+                {"name": "trees", "description": "Trees are near the river.", "importance": 0.5},
+            ],
+            "actions": [{"phrase": "sitting near the river"}],
+            "environment": "outdoor river scene",
+            "environment_details": ["river", "bridge", "trees"],
+            "natural_explanation": "A person is sitting near a calm river with trees and a bridge.",
+            "phrases": [{"phrase": "in the background"}],
+            "vocabulary": [],
+            "sentence_patterns": [],
+        }
+
+        fluent_partial = analyzer._heuristic_explanation_feedback(
+            learner_text=(
+                "In the background, the distant bridge and calm river create a peaceful, "
+                "well-balanced outdoor atmosphere."
+            ),
+            original_text="",
+            analysis=analysis,
+        )
+        simple_complete = analyzer._heuristic_explanation_feedback(
+            learner_text="A person is sitting near a calm river with trees and a bridge.",
+            original_text="",
+            analysis=analysis,
+        )
+
+        self.assertLess(fluent_partial["score"], simple_complete["score"])
+        self.assertLessEqual(fluent_partial["score"], fluent_partial["coverage"]["scoreCapApplied"])
+        self.assertLessEqual(simple_complete["score"], simple_complete["coverage"]["scoreCapApplied"])
+
+    def test_feedback_generation_explains_covered_missing_and_cap(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with patch.dict(os.environ, {}, clear=True):
+                config = AppConfig.from_env(base_dir=Path(temp_dir))
+
+        analyzer = AIAnalyzer(config)
+        analysis = {
+            "objects": [
+                {"name": "person", "description": "A person is riding a mower.", "importance": 0.95},
+                {"name": "riding mower", "description": "The mower is on the grass.", "importance": 0.9},
+                {"name": "grass", "description": "Foreground grass fills the yard.", "importance": 0.7},
+                {"name": "palm trees", "description": "Palm trees stand in the background.", "importance": 0.5},
+            ],
+            "actions": [{"phrase": "mowing the lawn", "description": "The person is mowing the lawn."}],
+            "environment": "sunny yard setting",
+            "environment_details": ["palm trees", "blue sky", "foreground grass"],
+            "natural_explanation": "A person is mowing a sunny yard with palm trees in the background.",
+            "phrases": [{"phrase": "in the background"}],
+            "vocabulary": [],
+            "sentence_patterns": [],
+        }
+
+        feedback = analyzer._heuristic_explanation_feedback(
+            learner_text="In the background, palm trees and blue sky create a sunny atmosphere.",
+            original_text="",
+            analysis=analysis,
+        )
+
+        self.assertIn("covered", feedback["main_issue"].lower())
+        self.assertIn("missed", feedback["main_issue"].lower())
+        self.assertIn("main subject", feedback["main_issue"].lower())
+        self.assertIn("main action", feedback["main_issue"].lower())
+        self.assertIn("capped", feedback["main_issue"].lower())
+        self.assertLessEqual(feedback["score"], 40)
+        self.assertTrue(feedback["what_did_well"][0].startswith("You covered"))
+
+    def test_improved_version_adds_missing_subject_and_action(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with patch.dict(os.environ, {}, clear=True):
+                config = AppConfig.from_env(base_dir=Path(temp_dir))
+
+        analyzer = AIAnalyzer(config)
+        analysis = {
+            "objects": [
+                {"name": "person", "description": "A person is riding a mower.", "importance": 0.95},
+                {"name": "mower", "description": "A mower is on the grass.", "importance": 0.9},
+            ],
+            "actions": [{"phrase": "mowing the lawn", "description": "The person is mowing the lawn."}],
+            "environment": "yard setting",
+            "environment_details": ["yard", "grass"],
+            "natural_explanation": "A person is mowing the lawn in a yard.",
+            "phrases": [{"phrase": "in the yard"}],
+            "vocabulary": [],
+            "sentence_patterns": [],
+        }
+
+        feedback = analyzer._heuristic_explanation_feedback(
+            learner_text="The yard is green.",
+            original_text="",
+            analysis=analysis,
+        )
+
+        better = feedback["better_version"].lower()
+        self.assertIn("person", better)
+        self.assertIn("mowing", better)
+
+    def test_score_realism_adjustment_stays_within_five_points(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with patch.dict(os.environ, {}, clear=True):
+                config = AppConfig.from_env(base_dir=Path(temp_dir))
+
+        analyzer = AIAnalyzer(config)
+        positive = analyzer._score_realism_adjustment(
+            coverage={"coverageScore": 85, "scoreCapApplied": 80, "mainSubjectMentioned": True},
+            language_score=70,
+            word_count=10,
+        )
+        negative = analyzer._score_realism_adjustment(
+            coverage={"coverageScore": 30, "scoreCapApplied": 40, "mainSubjectMentioned": False},
+            language_score=85,
+            word_count=18,
+        )
+
+        self.assertLessEqual(abs(positive), 5)
+        self.assertLessEqual(abs(negative), 5)
+        self.assertEqual(5, positive)
+        self.assertEqual(-5, negative)
+
+    def test_language_quality_weights_reusable_language_lightly(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with patch.dict(os.environ, {}, clear=True):
+                config = AppConfig.from_env(base_dir=Path(temp_dir))
+
+        analyzer = AIAnalyzer(config)
+        quality = analyzer._normalize_language_quality(
+            {
+                "clarity": 80,
+                "vocabulary": 70,
+                "structure": 70,
+                "grammar": 60,
+                "naturalness": 60,
+                "reusableLanguage": 100,
+            }
+        )
+
+        expected = round((80 * 25 + 70 * 20 + 70 * 20 + 60 * 15 + 60 * 10 + 100 * 10) / 100)
+        self.assertEqual(expected, quality["score"])
+        self.assertEqual(100, quality["reusableLanguage"])
+
+    def test_feedback_normalization_applies_coverage_score_cap(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with patch.dict(os.environ, {}, clear=True):
+                config = AppConfig.from_env(base_dir=Path(temp_dir))
+
+        analyzer = AIAnalyzer(config)
+        fallback = analyzer._heuristic_explanation_feedback(
+            learner_text="A man is smiling in the picture.",
+            original_text="",
+            analysis={
+                "objects": [{"name": "man", "description": "A man is visible."}],
+                "actions": [],
+                "environment_details": ["busy cafe background"],
+                "vocabulary": [],
+                "phrases": [],
+            },
+        )
+        normalized = analyzer._normalize_explanation_feedback(
+            {
+                "score": 88,
+                "scores": {"vocabulary": 9, "structure": 9, "depth": 8, "clarity": 9},
+                "coverage": {
+                    "level": "partial",
+                    "imageParts": [
+                        {
+                            "name": "main subject",
+                            "description": "the visible person",
+                            "type": "main_subject",
+                            "required": True,
+                            "weight": 25,
+                            "coverageStatus": "partially_covered",
+                            "covered": True,
+                            "evidence": "man",
+                        }
+                    ],
+                    "missingMajorParts": ["background and overall setting"],
+                    "coverageScore": 55,
+                    "coveragePercent": 55,
+                    "scoreCapApplied": 55,
+                    "reason": "Main subject only.",
+                },
+                "languageQuality": {
+                    "clarity": 90,
+                    "vocabulary": 90,
+                    "structure": 90,
+                    "grammar": 90,
+                    "naturalness": 90,
+                    "reusableLanguage": 100,
+                },
+                "mainIssue": "Your English is clear, but you only described the main subject.",
+                "whatWentWell": ["Your sentence is clear."],
+                "fixes": ["Add the background and setting."],
+                "missingDetails": ["background and overall setting"],
+                "reusableLanguage": {"usedWell": [], "tryNext": [], "misused": [], "message": ""},
+                "inlineImprovements": [],
+                "improvedVersion": "A man is smiling in a busy cafe.",
+            },
+            fallback=fallback,
+        )
+
+        self.assertEqual(30, normalized["score"])
+        self.assertEqual("low", normalized["coverage"]["level"])
+        self.assertEqual(30, normalized["coverage"]["scoreCapApplied"])
+        self.assertEqual(61, normalized["coverage"]["coverageScore"])
+        self.assertEqual("main_subject", normalized["coverage"]["imageParts"][0]["type"])
+        self.assertEqual("A man is visible.", normalized["coverage"]["imageParts"][0]["description"])
+        self.assertEqual("covered", normalized["coverage"]["imageParts"][0]["coverageStatus"])
+        self.assertTrue(normalized["coverage"]["imageParts"][0]["covered"])
+        self.assertEqual(56, normalized["language_quality"]["score"])
+
+    def test_feedback_normalization_enforces_missing_subject_hard_cap(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with patch.dict(os.environ, {}, clear=True):
+                config = AppConfig.from_env(base_dir=Path(temp_dir))
+
+        analyzer = AIAnalyzer(config)
+        fallback = analyzer._heuristic_explanation_feedback(
+            learner_text="The background has a bridge and peaceful trees.",
+            original_text="",
+            analysis={
+                "objects": [{"name": "person", "description": "A person is visible.", "importance": 0.9}],
+                "actions": [{"phrase": "sitting"}],
+                "environment": "outdoor river scene",
+                "environment_details": ["bridge", "trees"],
+                "vocabulary": [],
+                "phrases": [],
+            },
+        )
+        normalized = analyzer._normalize_explanation_feedback(
+            {
+                "score": 94,
+                "scores": {"vocabulary": 9, "structure": 9, "depth": 9, "clarity": 9},
+                "coverage": {
+                    "level": "strong",
+                    "mainSubjectMentioned": False,
+                    "mainActionMentioned": False,
+                    "imageParts": [
+                        {
+                            "name": "person",
+                            "description": "the main person",
+                            "type": "main_subject",
+                            "required": True,
+                            "weight": 25,
+                            "coverageStatus": "missing",
+                        },
+                        {
+                            "name": "setting/background",
+                            "description": "bridge and trees",
+                            "type": "setting",
+                            "required": True,
+                            "weight": 15,
+                            "coverageStatus": "covered",
+                        },
+                        {
+                            "name": "mood",
+                            "description": "peaceful atmosphere",
+                            "type": "mood",
+                            "required": True,
+                            "weight": 15,
+                            "coverageStatus": "covered",
+                        },
+                    ],
+                    "coverageScore": 30,
+                    "coveragePercent": 30,
+                    "scoreCapApplied": 95,
+                    "reason": "The answer sounds fluent.",
+                },
+                "mainIssue": "The answer sounds fluent.",
+                "whatWentWell": ["The sentence is clear."],
+                "fixes": ["Mention the main subject."],
+                "missingDetails": ["main subject"],
+                "reusableLanguage": {"usedWell": [], "tryNext": [], "misused": [], "message": ""},
+                "inlineImprovements": [],
+                "improvedVersion": "A person is sitting near a bridge and trees.",
+            },
+            fallback=fallback,
+        )
+
+        self.assertLessEqual(normalized["score"], 40)
+        self.assertLessEqual(normalized["coverage"]["scoreCapApplied"], 40)
+
+    def test_feedback_normalization_scores_rewrite_with_fresh_cap(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with patch.dict(os.environ, {}, clear=True):
+                config = AppConfig.from_env(base_dir=Path(temp_dir))
+
+        analyzer = AIAnalyzer(config)
+        analysis = {
+            "objects": [
+                {"name": "person", "description": "A person is riding a lawn mower.", "importance": 0.9},
+                {"name": "lawn mower", "description": "A mower is cutting the grass.", "importance": 0.8},
+            ],
+            "actions": [{"phrase": "mowing the grass", "verb": "mowing", "subject": "person"}],
+            "environment": "green yard",
+            "environment_details": ["palm trees", "bushes", "sunny sky"],
+            "vocabulary": [],
+            "phrases": [],
+        }
+        fresh_fallback = analyzer._heuristic_explanation_feedback(
+            learner_text=(
+                "A person is mowing the grass on a lawn mower in a green yard "
+                "with palm trees, bushes, and a sunny calm feeling."
+            ),
+            original_text="The yard is sunny with palm trees.",
+            analysis=analysis,
+        )
+
+        normalized = analyzer._normalize_explanation_feedback(
+            {
+                "score": 40,
+                "scores": {"vocabulary": 8, "structure": 8, "depth": 8, "clarity": 8},
+                "coverage": {
+                    "level": "low",
+                    "mainSubjectMentioned": False,
+                    "mainActionMentioned": False,
+                    "imageParts": [
+                        {
+                            "name": "person",
+                            "type": "main_subject",
+                            "weight": 25,
+                            "coverageStatus": "missing",
+                        },
+                        {
+                            "name": "mowing the grass",
+                            "type": "main_action",
+                            "weight": 20,
+                            "coverageStatus": "missing",
+                        },
+                        {
+                            "name": "setting",
+                            "type": "setting",
+                            "weight": 15,
+                            "coverageStatus": "covered",
+                        },
+                    ],
+                    "coverageScore": 15,
+                    "coveragePercent": 15,
+                    "scoreCapApplied": 40,
+                    "missingMajorParts": ["the main subject (person)", "the main action (mowing)"],
+                },
+                "mainIssue": "Your answer missed the main subject.",
+                "missingDetails": ["the main subject (person)", "the main action (mowing)"],
+                "fixes": ["Mention the person."],
+                "reusableLanguage": {"usedWell": [], "tryNext": [], "misused": [], "message": ""},
+                "inlineImprovements": [],
+                "improvedVersion": "A person is mowing the grass in a green yard.",
+            },
+            fallback=fresh_fallback,
+        )
+
+        self.assertGreater(normalized["score"], 40)
+        self.assertGreater(normalized["coverage"]["scoreCapApplied"], 40)
+        self.assertTrue(normalized["coverage"]["mainSubjectMentioned"])
+        self.assertTrue(normalized["coverage"]["mainActionMentioned"])
+        self.assertNotIn("the main subject (person)", normalized["missing_details"])
+
+    def test_partial_image_descriptions_cannot_score_high(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with patch.dict(os.environ, {}, clear=True):
+                config = AppConfig.from_env(base_dir=Path(temp_dir))
+
+        analyzer = AIAnalyzer(config)
+        analysis = {
+            "objects": [
+                {"name": "person", "description": "A person is riding a mower.", "importance": 0.95},
+                {"name": "mower", "description": "A riding mower is on the grass.", "importance": 0.9},
+                {"name": "grass", "description": "Foreground grass fills the yard.", "importance": 0.7},
+                {"name": "palm trees", "description": "Palm trees are in the background.", "importance": 0.6},
+                {"name": "bushes", "description": "Bushes are in the yard.", "importance": 0.5},
+            ],
+            "actions": [{"phrase": "mowing the lawn", "verb": "mowing"}],
+            "environment": "sunny yard setting",
+            "environment_details": ["foreground grass", "palm trees", "bushes", "bright sky"],
+            "natural_explanation": (
+                "A person is riding a mower across a grassy lawn. Palm trees, bushes, "
+                "and bright daylight are in the background, making the scene look tidy and sunny."
+            ),
+            "vocabulary": [],
+            "phrases": [],
+        }
+
+        background_only = analyzer._heuristic_explanation_feedback(
+            learner_text="The sky is bright and there are trees in the background.",
+            original_text="",
+            analysis=analysis,
+        )
+        action_only = analyzer._heuristic_explanation_feedback(
+            learner_text="A person is mowing the lawn.",
+            original_text="",
+            analysis=analysis,
+        )
+        full_description = analyzer._heuristic_explanation_feedback(
+            learner_text=(
+                "A person is riding a mower across a grassy lawn. There are palm trees, "
+                "bushes, and bright daylight in the background, making the scene look tidy and sunny."
+            ),
+            original_text="",
+            analysis=analysis,
+        )
+
+        self.assertLessEqual(background_only["score"], 30)
+        self.assertLessEqual(background_only["coverage"]["scoreCapApplied"], 25)
+        self.assertLessEqual(action_only["score"], 60)
+        self.assertGreater(action_only["score"], background_only["score"])
+        self.assertGreaterEqual(full_description["score"], 85)
+        self.assertGreater(full_description["score"], action_only["score"])
 
     def test_vllm_error_raises_when_demo_mode_disabled(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -919,6 +1917,78 @@ class ReviewTests(unittest.TestCase):
 
 
 class QuizEngineTests(unittest.TestCase):
+    def test_post_improve_quiz_uses_feedback_context_and_required_types(self) -> None:
+        rows = build_post_improve_quiz_rows(
+            user_id=1,
+            session_id=2,
+            learner_level="developing",
+            created_at="2026-05-04T00:00:00+00:00",
+            learner_text="A man is in the street.",
+            improved_text="A cyclist is riding down a busy street with cars in the background.",
+            feedback={
+                "better_version": "A cyclist is riding down a busy street with cars in the background.",
+                "missing_details": ["cars in the background"],
+                "fix_this_to_improve": ["Mention the cyclist and the street action."],
+                "phrase_usage": {
+                    "suggested": ["in the background"],
+                    "message": "Use the full phrase in the background.",
+                },
+            },
+            analysis={
+                "scene_summary_natural": "A cyclist is riding down a busy street with cars in the background.",
+                "scene_summary_simple": "A cyclist is riding on a street.",
+                "objects": [
+                    {"name": "cyclist", "description": "A cyclist is visible."},
+                    {"name": "cars", "description": "Cars are in the background."},
+                ],
+                "actions": [{"phrase": "riding down a busy street"}],
+                "phrases": [
+                    {
+                        "phrase": "in the background",
+                        "meaning_simple": "behind the main subject",
+                        "example": "Cars are in the background.",
+                    },
+                    {
+                        "phrase": "riding down",
+                        "meaning_simple": "moving along a place on a bike",
+                        "example": "A cyclist is riding down a busy street.",
+                    }
+                ],
+                "vocabulary": [{"word": "cyclist"}],
+            },
+        )
+
+        quiz_types = [row["quiz_type"] for row in rows]
+        for quiz_type in [
+            "sentence_upgrade_battle",
+            "phrase_snap",
+            "phrase_duel",
+            "fix_the_mistake",
+            "use_it_or_lose_it",
+        ]:
+            self.assertIn(quiz_type, quiz_types)
+            self.assertGreaterEqual(quiz_types.count(quiz_type), 2)
+
+        self.assertTrue(any(row["answer_mode"] == "typing" for row in rows))
+        self.assertTrue(any(row["answer_mode"] == "multiple_choice" for row in rows))
+        self.assertTrue(
+            all("_____" in row["prompt"] for row in rows if row["quiz_type"] == "phrase_snap")
+        )
+        self.assertTrue(
+            all(len(row["distractors"]) <= 1 for row in rows if row["quiz_type"] == "phrase_duel")
+        )
+        for row in rows:
+            self.assertIn("prompt", row)
+            self.assertIn("correct_answer", row)
+            self.assertTrue(row["explanation"])
+            self.assertGreater(row["difficulty"], 0)
+            self.assertGreater(row["metadata"]["xp_value"], 0)
+            if row["metadata"]["related_reusable_phrase"]:
+                self.assertIn(
+                    row["metadata"]["related_reusable_phrase"],
+                    {"in the background", "riding down"},
+                )
+
     def test_build_session_assets_generates_multiple_quiz_types(self) -> None:
         assets = build_session_assets(
             user_id=1,
@@ -1000,6 +2070,88 @@ class QuizEngineTests(unittest.TestCase):
         )
         self.assertTrue(result["correct"])
         self.assertGreaterEqual(result["score"], 0.55)
+
+    def test_phrase_snap_typing_accepts_close_answer_as_almost_correct(self) -> None:
+        result = evaluate_quiz_response(
+            item={
+                "quiz_type": "phrase_snap",
+                "answer_mode": "typing",
+                "correct_answer": "in the background",
+                "acceptable_answers": ["in the background"],
+                "metadata": {},
+            },
+            selected_answer="in background",
+            response_ms=3000,
+            confidence=2,
+        )
+
+        self.assertFalse(result["correct"])
+        self.assertEqual("Almost Correct", result["result_type"])
+        self.assertGreater(result["score"], 0.5)
+
+    def test_sentence_upgrade_validates_meaning_strength_and_phrase_use(self) -> None:
+        result = evaluate_quiz_response(
+            item={
+                "quiz_type": "sentence_upgrade_battle",
+                "answer_mode": "typing",
+                "correct_answer": "A cyclist is riding down a busy street with cars in the background.",
+                "acceptable_answers": ["A cyclist is riding down a busy street with cars in the background."],
+                "metadata": {
+                    "weak_sentence": "A man is in the street.",
+                    "related_reusable_phrase": "in the background",
+                    "keywords": ["cyclist", "riding", "street", "cars", "in the background"],
+                    "reference_answer": "A cyclist is riding down a busy street with cars in the background.",
+                },
+            },
+            selected_answer="A cyclist is riding down the street with cars in the background.",
+            response_ms=8000,
+            confidence=3,
+        )
+
+        self.assertTrue(result["correct"])
+        self.assertEqual("Correct", result["result_type"])
+
+    def test_fix_the_mistake_allows_natural_alternative(self) -> None:
+        result = evaluate_quiz_response(
+            item={
+                "quiz_type": "fix_the_mistake",
+                "answer_mode": "typing",
+                "correct_answer": "A cyclist is riding down a busy street with cars in the background.",
+                "acceptable_answers": ["A cyclist is riding down a busy street with cars in the background."],
+                "metadata": {
+                    "keywords": ["cyclist", "riding", "street", "cars"],
+                    "reference_answer": "A cyclist is riding down a busy street with cars in the background.",
+                },
+            },
+            selected_answer="The cyclist is riding on a busy street near cars.",
+            response_ms=9000,
+            confidence=2,
+        )
+
+        self.assertTrue(result["correct"])
+        self.assertEqual("Correct", result["result_type"])
+
+    def test_use_it_or_lose_it_gives_partial_credit_for_weak_phrase_sentence(self) -> None:
+        result = evaluate_quiz_response(
+            item={
+                "quiz_type": "use_it_or_lose_it",
+                "answer_mode": "typing",
+                "correct_answer": "Cars are in the background while a cyclist rides down the street.",
+                "acceptable_answers": ["Cars are in the background while a cyclist rides down the street."],
+                "metadata": {
+                    "related_reusable_phrase": "in the background",
+                    "keywords": ["in the background", "cyclist", "street"],
+                    "reference_answer": "Cars are in the background while a cyclist rides down the street.",
+                },
+            },
+            selected_answer="in the background cyclist",
+            response_ms=5000,
+            confidence=1,
+        )
+
+        self.assertFalse(result["correct"])
+        self.assertEqual("Almost Correct", result["result_type"])
+        self.assertGreaterEqual(result["score"], 0.5)
 
 
 if __name__ == "__main__":

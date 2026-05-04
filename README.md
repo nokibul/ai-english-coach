@@ -9,7 +9,7 @@ An image-to-English learning web app that turns uploaded photos into reusable st
 - spaced repetition with later review scheduling
 - a daily 5-minute challenge
 - XP, streaks, learner levels, and progress tracking
-- phone + password login with email OTP verification
+- email + password login with email OTP verification
 - learner levels: `Beginner`, `Developing`, and `Advancing`
 
 ## Stack
@@ -72,7 +72,8 @@ This serves `Qwen/Qwen2.5-VL-7B-Instruct-AWQ` at `http://127.0.0.1:8000/v1` usin
 - `DEMO_MODE=true` still lets the full product flow run without a live model. Uploads still create lessons, quiz items, review items, and progress updates, but the lesson content is demo content.
 - To use hosted inference instead, set `AI_BACKEND=openai`, `DEMO_MODE=false`, and provide `OPENAI_API_KEY`.
 - If SMTP is not configured, OTP codes are printed to the terminal so you can still verify accounts during development.
-- Login is done with phone number + password, while email is used for OTP verification during signup.
+- Login and signup use email + password. Signup sends an email OTP before the account can log in.
+- To send real OTP emails, configure `SMTP_HOST`, `SMTP_PORT`, `SMTP_USERNAME`, `SMTP_PASSWORD`, and `SMTP_SENDER`. For Gmail, use `SMTP_HOST=smtp.gmail.com`, `SMTP_PORT=587`, `SMTP_USE_STARTTLS=true`, `SMTP_USERNAME=<your Gmail address>`, `SMTP_PASSWORD=<a Google App Password>`, and `SMTP_SENDER=<your Gmail address>`.
 
 ## Product behavior
 

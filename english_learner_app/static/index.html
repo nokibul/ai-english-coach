@@ -128,7 +128,7 @@
           <p class="eyebrow">Sign Up Or Log In</p>
           <h2>Build English from real scenes, then review it at the right time.</h2>
           <p class="muted">
-            Register with your phone number and password, verify with an email OTP, then start building saved image lessons, quizzes, and daily challenges.
+            Register with your email and password, verify with an email OTP, then start building saved image lessons, quizzes, and daily challenges.
           </p>
         </div>
 
@@ -144,15 +144,15 @@
               <input name="full_name" type="text" required placeholder="Learner name">
             </label>
             <label class="field-block">
-              <span class="field-label">Phone number</span>
-              <input name="phone" type="tel" required placeholder="+8801XXXXXXXXX">
+              <span class="field-label">Email</span>
+              <input name="email" type="email" required placeholder="you@example.com">
             </label>
           </div>
 
           <div class="field-row">
             <label class="field-block">
-              <span class="field-label">Email</span>
-              <input name="email" type="email" required placeholder="you@example.com">
+              <span class="field-label">Phone number</span>
+              <input name="phone" type="tel" placeholder="Optional">
             </label>
             <label class="field-block">
               <span class="field-label">Password</span>
@@ -167,8 +167,8 @@
 
         <form id="loginForm" class="auth-form hidden">
           <label class="field-block">
-            <span class="field-label">Phone number</span>
-            <input name="phone" type="tel" required placeholder="+8801XXXXXXXXX">
+            <span class="field-label">Email</span>
+            <input name="email" type="email" required placeholder="you@example.com">
           </label>
           <label class="field-block">
             <span class="field-label">Password</span>
@@ -226,6 +226,6 @@
 
     <div id="toast" class="toast hidden"></div>
 
-    <script src="/static/app.js?v=20260501-answer-validation" defer></script>
+    <script src="/static/app.js?v=20260504-quiz-game-feel" defer></script>
   </body>
 </html>

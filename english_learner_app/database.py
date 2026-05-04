@@ -11,13 +11,25 @@ from .progress import improvement_percent
 from .utils import from_iso, normalize_answer, to_iso
 
 
+def phrase_mastery_state(*, mastery: float, correct_count: int = 0) -> str:
+    mastery = float(mastery or 0.0)
+    correct_count = int(correct_count or 0)
+    if mastery >= 0.85 or correct_count >= 3:
+        return "Mastered"
+    if mastery >= 0.55 or correct_count >= 2:
+        return "Used Correctly"
+    if mastery >= 0.2 or correct_count >= 1:
+        return "Practiced"
+    return "Seen"
+
+
 SCHEMA_SQL = """
 PRAGMA foreign_keys = ON;
 
 CREATE TABLE IF NOT EXISTS users (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     full_name TEXT NOT NULL,
-    phone TEXT NOT NULL UNIQUE,
+    phone TEXT UNIQUE,
     email TEXT NOT NULL UNIQUE,
     password_hash TEXT NOT NULL,
     difficulty_band TEXT NOT NULL,
@@ -300,6 +312,7 @@ class Database:
         return conn
 
     def _run_migrations(self, conn: sqlite3.Connection) -> None:
+        self._migrate_users_phone_optional(conn)
         self._migrate_quiz_run_items_schema(conn)
 
         column_specs: dict[str, dict[str, str]] = {
@@ -440,6 +453,54 @@ class Database:
             return
         conn.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {definition}")
 
+    def _migrate_users_phone_optional(self, conn: sqlite3.Connection) -> None:
+        columns = conn.execute("PRAGMA table_info(users)").fetchall()
+        if not columns:
+            return
+
+        phone_column = next(
+            (row for row in columns if str(row["name"]) == "phone"),
+            None,
+        )
+        if not phone_column or int(phone_column["notnull"]) == 0:
+            return
+
+        conn.execute("PRAGMA foreign_keys = OFF")
+        conn.execute("PRAGMA legacy_alter_table = ON")
+        conn.execute("ALTER TABLE users RENAME TO users_legacy")
+        conn.execute(
+            """
+            CREATE TABLE users (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                full_name TEXT NOT NULL,
+                phone TEXT UNIQUE,
+                email TEXT NOT NULL UNIQUE,
+                password_hash TEXT NOT NULL,
+                difficulty_band TEXT NOT NULL,
+                fluency_score INTEGER NOT NULL,
+                fluency_summary TEXT NOT NULL,
+                assessment_json TEXT NOT NULL,
+                is_verified INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO users (
+                id, full_name, phone, email, password_hash, difficulty_band,
+                fluency_score, fluency_summary, assessment_json, is_verified, created_at
+            )
+            SELECT
+                id, full_name, phone, email, password_hash, difficulty_band,
+                fluency_score, fluency_summary, assessment_json, is_verified, created_at
+            FROM users_legacy
+            """
+        )
+        conn.execute("DROP TABLE users_legacy")
+        conn.execute("PRAGMA legacy_alter_table = OFF")
+        conn.execute("PRAGMA foreign_keys = ON")
+
     def _migrate_quiz_run_items_schema(self, conn: sqlite3.Connection) -> None:
         columns = conn.execute("PRAGMA table_info(quiz_run_items)").fetchall()
         if not columns:
@@ -550,7 +611,7 @@ class Database:
         self,
         *,
         full_name: str,
-        phone: str,
+        phone: str | None,
         email: str,
         password_hash: str,
         difficulty_band: str,
@@ -909,6 +970,19 @@ class Database:
                 ],
             )
 
+    def deactivate_post_improve_quiz_items(self, *, user_id: int, session_id: int) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                """
+                UPDATE quiz_items
+                SET active = 0
+                WHERE user_id = ?
+                  AND session_id = ?
+                  AND skill_tag = 'post-improve quiz'
+                """,
+                (user_id, session_id),
+            )
+
     def list_sessions(self, user_id: int) -> list[dict[str, Any]]:
         with self._connect() as conn:
             rows = conn.execute(
@@ -964,6 +1038,10 @@ class Database:
             item["examples"] = self._json_load(item.get("examples_json"), [])
             if not item["examples"] and item.get("example"):
                 item["examples"] = [item["example"]]
+            item["mastery_state"] = phrase_mastery_state(
+                mastery=float(item.get("mastery") or 0.0),
+                correct_count=int(item.get("correct_count") or 0),
+            )
         return items
 
     def list_session_phrases(self, *, user_id: int, session_id: int) -> list[dict[str, Any]]:
@@ -1208,6 +1286,64 @@ class Database:
                     (mastery, 1 if was_correct else 0, 0 if was_correct else 1, session_id, source_text),
                 )
         self.sync_session_mastery(session_id=session_id)
+
+    def update_phrase_mastery(
+        self,
+        *,
+        user_id: int,
+        session_id: int,
+        phrase: str,
+        mastery: float,
+        was_correct: bool,
+    ) -> dict[str, Any] | None:
+        normalized_phrase = normalize_answer(phrase)
+        if not normalized_phrase:
+            return None
+
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT *
+                FROM session_phrase_items
+                WHERE user_id = ?
+                  AND session_id = ?
+                  AND LOWER(REPLACE(phrase, ' ', '')) = LOWER(REPLACE(?, ' ', ''))
+                LIMIT 1
+                """,
+                (user_id, session_id, phrase),
+            ).fetchone()
+            if not row:
+                return None
+
+            conn.execute(
+                """
+                UPDATE session_phrase_items
+                SET mastery = MAX(mastery, ?),
+                    correct_count = correct_count + ?,
+                    wrong_count = wrong_count + ?
+                WHERE id = ?
+                """,
+                (
+                    max(0.0, min(float(mastery or 0.0), 1.0)),
+                    1 if was_correct else 0,
+                    0 if was_correct else 1,
+                    int(row["id"]),
+                ),
+            )
+            updated = conn.execute(
+                "SELECT * FROM session_phrase_items WHERE id = ?",
+                (int(row["id"]),),
+            ).fetchone()
+
+        self.sync_session_mastery(session_id=session_id)
+        if not updated:
+            return None
+        item = dict(updated)
+        item["mastery_state"] = phrase_mastery_state(
+            mastery=float(item.get("mastery") or 0.0),
+            correct_count=int(item.get("correct_count") or 0),
+        )
+        return item
 
     def sync_session_mastery(self, *, session_id: int) -> None:
         with self._connect() as conn:
