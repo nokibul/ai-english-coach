@@ -282,6 +282,7 @@ class AIAnalyzer:
             '  "environment": {"setting":"","details":[""]},\n'
             '  "vocabulary": [{"word":"","part_of_speech":"","meaning_simple":"","example":"","frequency_priority":"high"}],\n'
             '  "phrases": [{"phrase":"","meaning_simple":"","example":"","collocation_type":"phrase","reusable":true}],\n'
+            '  "sentence_starters": ["The image shows ...", "Here we see ...", "This scene shows ..."],\n'
             '  "sentence_patterns": [{"pattern":"","example":"","usage_note":"","examples":["","",""]}],\n'
             '  "quiz_candidates": [{"quiz_type":"recognition","prompt":"","answer":"","distractors":["","",""],"explanation":""}],\n'
             '  "teaching_notes": [""]\n'
@@ -302,6 +303,8 @@ class AIAnalyzer:
             "- Prefer words like crowded, shaded, casual, leaning, crossing, gathered, pavement, railing, entrance, expression, posture, background, foreground, nearby, partially visible.\n"
             "- Include 6–10 useful vocabulary words that are worth learning, not just visible object names.\n"
             "- Include 5–8 useful phrases or sentence chunks that can be reused in many photos.\n"
+            "- Include 4–6 generic sentence_starters for learners to begin their own description.\n"
+            "- sentence_starters must NOT name or explain objects from this image. Good: 'The image shows ...', 'Here we see ...', 'This scene appears to show ...', 'In this picture, ...'. Bad: 'A man is mowing ...', 'The dog is sitting ...'.\n"
             "- Phrases should be natural chunks like 'standing next to', 'in the background', 'appears to be', 'on the edge of', 'surrounded by', 'looking toward', 'partially hidden by', 'walking past'.\n"
             "- Include 3–5 rich reusable sentence_patterns for describing similar images.\n"
             "- Sentence patterns should help learners write better sentences, for example 'While ..., ...', 'The main subject appears to be ...', 'In the background, ...', 'The scene gives the impression that ...', 'One detail that stands out is ...'.\n"
@@ -324,13 +327,20 @@ class AIAnalyzer:
         original_text: str,
         analysis: dict[str, Any],
         learner_level: str,
+        attempt_index: int = 1,
     ) -> dict[str, Any]:
         validation_feedback = self._validate_learner_answer_for_feedback(
             learner_text=learner_text,
             analysis=analysis,
         )
         if validation_feedback is not None:
-            return validation_feedback
+            return self._apply_progressive_coaching(
+                validation_feedback,
+                analysis=analysis,
+                learner_text=learner_text,
+                original_text=original_text,
+                attempt_index=attempt_index,
+            )
 
         fallback = self._heuristic_explanation_feedback(
             learner_text=learner_text,
@@ -356,10 +366,23 @@ class AIAnalyzer:
                     raise
                 repaired_text = await self._get_local_runtime().repair_json(output_text=output_text)
                 payload = extract_json_payload(repaired_text)
-            return self._normalize_explanation_feedback(payload, fallback=fallback)
+            normalized = self._normalize_explanation_feedback(payload, fallback=fallback)
+            return self._apply_progressive_coaching(
+                normalized,
+                analysis=analysis,
+                learner_text=learner_text,
+                original_text=original_text,
+                attempt_index=attempt_index,
+            )
         except Exception as exc:
             print(f"[feedback-fallback] {type(exc).__name__}: {exc}")
-            return fallback
+            return self._apply_progressive_coaching(
+                fallback,
+                analysis=analysis,
+                learner_text=learner_text,
+                original_text=original_text,
+                attempt_index=attempt_index,
+            )
 
     def _build_explanation_feedback_prompt(
         self,
@@ -393,29 +416,46 @@ class AIAnalyzer:
             f"Learner level: {level_label(canonical_level(learner_level))}.\n"
             "The reference description is only visual context, not the perfect answer and not a text to copy.\n"
             "Evaluate the learner's answer like a realistic human English coach.\n"
-            "Score in this order: validity/relevance, main subject, setting/background, important visible details, mood/atmosphere or interpretation, English clarity/naturalness, then reusable language.\n"
-            "Judge coverage of the whole image before language quality: main subject, setting/background, important objects/details, mood/atmosphere, and relationships/positions between things.\n"
-            "The main subject of the image is mandatory for high scores. Good English must not compensate for missing the main subject.\n"
-            "Then judge accuracy, clarity, vocabulary, sentence structure, depth of observation, important missing major parts, and how well the learner expresses their own version.\n"
-            "Before normal feedback, validate that the answer is understandable English, long enough to evaluate, related to the uploaded image, and mentions visible image elements.\n"
-            "If the answer is nonsense, random text, too short, or off-topic, return a low score, empty improvedVersion, and fixes that ask the learner to try again.\n"
+            "Score in this exact order: 1 meaning/meaningfulness, 2 sentence coherence, 3 grammar, 4 image coverage, 5 vocabulary, 6 reusable language.\n"
+            "Before image coverage scoring, validate that the answer forms understandable connected sentences with a clear subject + verb, logical word relationships, and a complete idea.\n"
+            "Keyword presence alone must never produce a high score. Good image keywords cannot override bad sentence quality.\n"
+            "If the answer is mostly fragments, keyword stuffing, unfinished, cut off, not meaningful, random text, or a list of image-related words, score it 0-25 before normal scoring.\n"
+            "Hard coherence caps: random words / keyword stuffing max 15; broken fragments with some image-related words max 25; understandable but very poor grammar max 40; meaningful but incomplete sentence max 45; clear sentence but low image coverage uses coverage caps.\n"
+            "Only after the answer is meaningful and coherent should you judge image coverage: main subject, main action, setting/background, important objects/details, foreground/details, mood/overall meaning, and relationships/positions between things.\n"
+            "Judge coverage of the whole image before vocabulary or reusable language, but never before meaningfulness, coherence, and grammar.\n"
+            "The main subject of the image is mandatory for high scores, but meaningful English is mandatory first.\n"
+            "If coherence is bad, do not give normal high feedback. Say: 'Your answer includes some relevant words, but it is not yet a clear sentence. Rewrite it with a subject, verb, and complete idea.'\n"
+            "For bad coherence, give specific help: start with 'This image shows...', use one clear sentence, connect objects with verbs, and avoid listing random words.\n"
             "Do not reward, polish, or preserve unrelated text.\n"
-            "The feedback should feel like a personal coach: short, clear, specific, encouraging, and action-oriented.\n"
+            "The feedback should feel like a personal coach: short, clear, specific, encouraging, and action-oriented. Do not write long report-style feedback.\n"
             "Return valid JSON only with this exact structured shape:\n"
             '{ "score": 0, "scores": {"vocabulary": 0, "structure": 0, "depth": 0, "clarity": 0}, '
             '"languageQuality": {"score": 0, "clarity": 0, "vocabulary": 0, "structure": 0, "grammar": 0, "naturalness": 0, "reusableLanguage": 0}, '
             '"answerValidation": {"valid": true, "reason": "", "retryMessage": ""}, '
             '"coverage": {"level": "low", "mainSubjectMentioned": false, "mainActionMentioned": false, "imageParts": [{"name": "", "description": "", "type": "main_subject", "required": true, "weight": 0, "coverageStatus": "missing", "covered": false, "evidence": ""}], "missingMajorParts": [], "coverageScore": 0, "coveragePercent": 0, "accuracyPenalty": 0, "scoreCapApplied": 0, "reason": ""}, '
+            '"readiness": {"ready": false, "reason": "", "criteria": {"mainSubject": false, "mainAction": false, "settingBackground": false, "twoImportantDetails": false, "naturalEnglish": false, "notAWordList": false, "overallSense": false}}, '
             '"mainIssue": "", "whatWentWell": ["", ""], "fixes": ["", "", ""], '
+            '"nextStepInstructions": ["", "", ""], '
             '"reusableLanguage": {"usedWell": [""], "tryNext": [""], "misused": [{"phrase": "", "note": ""}], "message": ""}, '
             '"missingDetails": ["", "", ""], '
             '"inlineImprovements": [{"old": "", "new": "", "why": ""}], '
             '"improvedVersion": "" }\n'
             "Rules:\n"
-            "- First set answerValidation.valid to false if the answer is not understandable English, not relevant to the image, does not mention at least one visible element, is too short, random, or nonsense.\n"
-            "- If answerValidation.valid is false: score must be 0-15, improvedVersion must be empty, inlineImprovements must be empty, whatWentWell must be empty, and fixes must tell the learner to mention the main subject, describe the setting, and add 1-2 visible details.\n"
+            "- First set answerValidation.valid to false if the answer is not understandable English, not coherent, keyword stuffing, fragments, unfinished, not relevant to the image, does not mention at least one visible element, is too short, random, or nonsense.\n"
+            "- If answerValidation.valid is false because of random words or keyword stuffing: score must be 0-15, improvedVersion must be empty, inlineImprovements must be empty, whatWentWell must be empty, and fixes must tell the learner to start with 'This image shows...', use one clear sentence, connect objects with verbs, and avoid listing random words.\n"
+            "- If answerValidation.valid is false because of broken fragments with some image-related words: score must be 15-25, improvedVersion must be empty, inlineImprovements must be empty, and mainIssue must say the answer includes relevant words but is not yet a clear sentence.\n"
+            "- If answerValidation.valid is false for other reasons: score must be 0-15, improvedVersion must be empty, inlineImprovements must be empty, whatWentWell must be empty, and fixes must tell the learner to mention the main subject, describe the setting, and add 1-2 visible details.\n"
             "- If answerValidation.valid is false: mainIssue should be a short justification such as 'Your answer does not clearly describe the image yet.'\n"
             "- For valid answers, first divide the image into major required parts before scoring: foreground, main subject, main action, setting/background, important objects, and mood/overall meaning.\n"
+            "- Judge coverage of the whole image before language quality, but only after meaningfulness, coherence, and grammar pass the validity gate.\n"
+            "- Readiness is separate from score. Mark readiness.ready true only when the learner includes the main subject, main action when present, setting/background, at least two important details, understandable natural English, not just a list of words, and an overall sense of the image.\n"
+            "- Use progressive guided expansion for nextStepInstructions. Do not give all feedback at once.\n"
+            "- If main subject or main action is missing, nextStepInstructions must focus only on adding the subject/action.\n"
+            "- Once subject/action exist, focus only on setting/context.\n"
+            "- Once setting/context exists, focus only on background and visible details.\n"
+            "- Once at least two visible details exist, focus on mood/quality/stronger wording and sentence structure.\n"
+            "- If readiness.ready is false, nextStepInstructions must contain only 1-2 concrete next actions for the current layer.\n"
+            "- Bad nextStepInstructions: 'Add more detail' or 'Improve vocabulary'. Good: 'Mention the background: palm trees, trimmed bushes, and sunny sky.' or 'Use well-kept yard instead of nice place.'\n"
             "- In coverage.imageParts, list each required part with its weight, coverageStatus, whether the learner covered it, and short evidence from the learner answer. Omit a part only when it truly does not exist in the image, such as main action in a still object photo.\n"
             "- For every required part, classify coverageStatus strictly as covered, partially_covered, missing, or inaccurate. Do not assume coverage unless it is clearly stated in the learner answer.\n"
             "- Scoring by status: covered = full weight; partially_covered = 50% of weight; missing = 0; inaccurate = 0 and apply an accuracy penalty if the inaccuracy is serious.\n"
@@ -440,7 +480,7 @@ class AIAnalyzer:
             "- Do not make scoring too harsh. If the learner mentions the main subject, setting/background, at least one important detail, and writes clearly, a score around 70-80 is appropriate even when the English is simple.\n"
             "- A complete but simple answer should beat an advanced but incomplete answer. Strong English plus partial coverage should not receive 80-90. Simple English plus good overall coverage can receive 70-80.\n"
             "- mainIssue or fixes must clearly explain score limits when coverage caps the score, for example: 'Your English is clear, but you only described the foreground and missed the background and overall setting, so your score is limited.'\n"
-            "- Feedback must explain what image parts the learner covered, what major parts were missing, whether a score cap was applied, and why the score is limited.\n"
+            "- Feedback must briefly explain the biggest coverage issue and why the score is limited when a cap applies. Keep it to a short coach note, not a report.\n"
             "- Missing details must prioritize in this order: main subject, main action, setting/background, important objects, foreground, mood.\n"
             "- If the answer only covers background, say something like: 'Your English is clear, but you only described the background and missed the main subject and action.'\n"
             "- Only generate improvedVersion and inlineImprovements when answerValidation.valid is true.\n"
@@ -563,6 +603,12 @@ class AIAnalyzer:
         coverage["scoreCapApplied"] = score_cap
         if isinstance(score_cap, int) and score_cap > 0:
             score = min(score, score_cap)
+        readiness = self._normalize_feedback_readiness(
+            payload.get("readiness"),
+            coverage=coverage,
+            score=score,
+            fallback=fallback.get("readiness") if isinstance(fallback.get("readiness"), dict) else {},
+        )
         fresh_missing_details = (
             self._clean_string_list(coverage.get("missingMajorParts"), limit=3)
             if has_fresh_coverage
@@ -580,6 +626,8 @@ class AIAnalyzer:
             "scores": scores,
             "language_quality": language_quality,
             "coverage": coverage,
+            "readiness": readiness,
+            "is_ready": bool(readiness.get("ready")),
             "main_issue": (
                 self._clean_text_value(fallback.get("main_issue"))
                 if has_fresh_coverage
@@ -605,6 +653,12 @@ class AIAnalyzer:
                 limit=3,
             )
             or fallback["fix_this_to_improve"],
+            "next_step_instructions": self._clean_string_list(
+                payload.get("nextStepInstructions")
+                or payload.get("next_step_instructions")
+                or fallback.get("next_step_instructions"),
+                limit=2,
+            ),
             "word_phrase_upgrades": self._normalize_feedback_alternatives(
                 payload.get("inlineImprovements")
                 or payload.get("word_phrase_upgrades")
@@ -641,8 +695,712 @@ class AIAnalyzer:
             )
             or fallback["quiz_focus"],
         }
+        if not normalized["next_step_instructions"]:
+            normalized["next_step_instructions"] = self._build_next_step_instructions(
+                feedback=normalized,
+                analysis={},
+            )
         self._dedupe_feedback_sections(normalized)
         return normalized
+
+    def _normalize_feedback_readiness(
+        self,
+        payload: Any,
+        *,
+        coverage: dict[str, Any],
+        score: int,
+        fallback: dict[str, Any],
+    ) -> dict[str, Any]:
+        payload = payload if isinstance(payload, dict) else {}
+        criteria_payload = payload.get("criteria") if isinstance(payload.get("criteria"), dict) else {}
+        fallback_criteria = fallback.get("criteria") if isinstance(fallback.get("criteria"), dict) else {}
+        image_parts = coverage.get("imageParts") if isinstance(coverage.get("imageParts"), list) else []
+
+        def covered_type(name: str) -> bool:
+            for part in image_parts:
+                if not isinstance(part, dict):
+                    continue
+                part_type = str(part.get("type") or "").casefold()
+                status = str(part.get("coverageStatus") or "").casefold()
+                if name in part_type and (part.get("covered") is True or status == "covered"):
+                    return True
+            return False
+
+        detail_count = 0
+        for part in image_parts:
+            if not isinstance(part, dict):
+                continue
+            part_type = str(part.get("type") or "").casefold()
+            status = str(part.get("coverageStatus") or "").casefold()
+            if (
+                any(key in part_type for key in ("important", "foreground", "detail", "object"))
+                and (part.get("covered") is True or status == "covered")
+            ):
+                detail_count += 1
+
+        criteria = {
+            "mainSubject": bool(criteria_payload.get("mainSubject", fallback_criteria.get("mainSubject", coverage.get("mainSubjectMentioned") is not False))),
+            "mainAction": bool(criteria_payload.get("mainAction", fallback_criteria.get("mainAction", coverage.get("mainActionMentioned") is not False))),
+            "settingBackground": bool(criteria_payload.get("settingBackground", fallback_criteria.get("settingBackground", covered_type("setting") or covered_type("background")))),
+            "twoImportantDetails": bool(criteria_payload.get("twoImportantDetails", fallback_criteria.get("twoImportantDetails", detail_count >= 2))),
+            "naturalEnglish": bool(criteria_payload.get("naturalEnglish", fallback_criteria.get("naturalEnglish", score >= 60))),
+            "notAWordList": bool(criteria_payload.get("notAWordList", fallback_criteria.get("notAWordList", True))),
+            "overallSense": bool(criteria_payload.get("overallSense", fallback_criteria.get("overallSense", score >= 72 and int(coverage.get("coveragePercent") or coverage.get("coverageScore") or 0) >= 75))),
+        }
+        inferred_ready = all(criteria.values())
+        explicit_ready = payload.get("ready")
+        if explicit_ready is None:
+            explicit_ready = payload.get("is_ready")
+        ready = bool(explicit_ready) if isinstance(explicit_ready, bool) else inferred_ready
+        if ready and not inferred_ready:
+            ready = False
+        return {
+            "ready": ready,
+            "reason": self._clean_text_value(payload.get("reason") or fallback.get("reason"))
+            or (
+                "The explanation covers the image well enough."
+                if ready
+                else "Keep adding the missing image coverage before the quiz."
+            ),
+            "criteria": criteria,
+        }
+
+    def _apply_progressive_coaching(
+        self,
+        feedback: dict[str, Any],
+        *,
+        analysis: dict[str, Any],
+        learner_text: str,
+        original_text: str,
+        attempt_index: int,
+    ) -> dict[str, Any]:
+        coached = dict(feedback)
+        attempt_index = max(1, int(attempt_index or 1))
+        state = self._progressive_dimension_state(coached, analysis=analysis)
+        focus_areas = self._select_progressive_focus_areas(state)
+        specific_guidance = self._build_specific_guidance(
+            focus_areas=focus_areas,
+            feedback=coached,
+            analysis=analysis,
+        )
+        suggestions = specific_guidance["actionable_suggestions"]
+        raw_score = int(coached.get("score") or 0)
+        score = self._progressive_score(
+            raw_score,
+            state=state,
+            attempt_index=attempt_index,
+            validation_retry=bool(coached.get("retry_required")) and raw_score <= 25,
+        )
+        coached["score"] = score
+        coached["articulation_level"] = self._articulation_level(score)
+        coached["focus_areas"] = focus_areas
+        coached["actionable_suggestions"] = suggestions
+        coached["specific_guidance"] = specific_guidance
+        coached["dimension_tracker"] = self._dimension_tracker(state)
+        coached["next_challenge"] = specific_guidance["next_challenge"]
+        coached["coaching_message"] = self._progressive_coaching_message(
+            score=score,
+            state=state,
+            focus_areas=focus_areas,
+            attempt_index=attempt_index,
+        )
+        coached["what_improved"] = self._progressive_improvement_note(
+            feedback=coached,
+            learner_text=learner_text,
+            original_text=original_text,
+            state=state,
+        )
+
+        ready = self._progressive_ready_for_quiz(
+            state=state,
+            score=score,
+            attempt_index=attempt_index,
+        )
+        readiness = coached.get("readiness") if isinstance(coached.get("readiness"), dict) else {}
+        readiness = dict(readiness)
+        readiness["ready"] = ready
+        readiness["reason"] = (
+            "The explanation is complete, natural, and ready for reinforcement."
+            if ready
+            else "Keep refining the current focus areas before the quiz."
+        )
+        coached["readiness"] = readiness
+        coached["is_ready"] = ready
+        if not ready:
+            coached["retry_required"] = False
+            coached["cta_label"] = "Improve explanation"
+        return coached
+
+    def _progressive_dimension_state(
+        self,
+        feedback: dict[str, Any],
+        *,
+        analysis: dict[str, Any],
+    ) -> dict[str, bool]:
+        readiness = feedback.get("readiness") if isinstance(feedback.get("readiness"), dict) else {}
+        criteria = readiness.get("criteria") if isinstance(readiness.get("criteria"), dict) else {}
+        coverage = feedback.get("coverage") if isinstance(feedback.get("coverage"), dict) else {}
+        language = feedback.get("language_quality") if isinstance(feedback.get("language_quality"), dict) else {}
+        image_parts = coverage.get("imageParts") if isinstance(coverage.get("imageParts"), list) else []
+
+        def covered_type(*needles: str) -> bool:
+            for part in image_parts:
+                if not isinstance(part, dict):
+                    continue
+                part_type = str(part.get("type") or "").casefold()
+                if not any(needle in part_type for needle in needles):
+                    continue
+                status = str(part.get("coverageStatus") or "").casefold()
+                if part.get("covered") is True or status in {"covered", "partially_covered"}:
+                    return True
+            return False
+
+        natural_score = int(language.get("naturalness") or language.get("score") or 0)
+        structure_score = int(language.get("structure") or 0)
+        vocabulary_score = int(language.get("vocabulary") or 0)
+        action_required = bool(analysis.get("actions"))
+        return {
+            "main subject": bool(criteria.get("mainSubject", coverage.get("mainSubjectMentioned") is not False)),
+            "main action": (
+                True
+                if not action_required
+                else bool(criteria.get("mainAction", coverage.get("mainActionMentioned") is not False))
+            ),
+            "foreground": covered_type("foreground"),
+            "background/setting": bool(criteria.get("settingBackground", covered_type("setting", "background"))),
+            "important objects": covered_type("important", "object", "detail"),
+            "mood/atmosphere": covered_type("mood") or self._feedback_mood_in_text(str(feedback.get("better_version") or "")),
+            "sentence flow": structure_score >= 60 or bool(criteria.get("naturalEnglish")),
+            "vocabulary strength": vocabulary_score >= 60 or bool(feedback.get("phrase_usage", {}).get("used") if isinstance(feedback.get("phrase_usage"), dict) else False),
+            "articulation/naturalness": natural_score >= 60 or bool(criteria.get("naturalEnglish")),
+            "sentence connection": structure_score >= 65 or bool(criteria.get("notAWordList")),
+            "descriptive depth": bool(criteria.get("twoImportantDetails")) or covered_type("foreground") and covered_type("important"),
+        }
+
+    def _select_progressive_focus_areas(self, state: dict[str, bool]) -> list[str]:
+        priority = [
+            "main subject",
+            "main action",
+            "background/setting",
+            "foreground",
+            "important objects",
+            "mood/atmosphere",
+            "sentence flow",
+            "vocabulary strength",
+            "articulation/naturalness",
+            "sentence connection",
+            "descriptive depth",
+        ]
+        missing = [dimension for dimension in priority if not state.get(dimension)]
+        if not missing:
+            return ["articulation/naturalness", "sentence flow"]
+        return missing[:2]
+
+    def _build_specific_guidance(
+        self,
+        *,
+        focus_areas: list[str],
+        feedback: dict[str, Any],
+        analysis: dict[str, Any],
+    ) -> dict[str, Any]:
+        nouns: list[str] = []
+        verbs: list[str] = []
+        details: list[str] = []
+        suggestions: list[str] = []
+        for focus in focus_areas[:2]:
+            focus_hints = self._specific_hints_for_focus(
+                focus=focus,
+                feedback=feedback,
+                analysis=analysis,
+            )
+            nouns.extend(focus_hints["nouns"])
+            verbs.extend(focus_hints["verbs"])
+            details.extend(focus_hints["details"])
+            if focus_hints["suggestion"]:
+                suggestions.append(focus_hints["suggestion"])
+
+        nouns = self._unique_short_hints(nouns, limit=5)
+        verbs = self._unique_short_hints(verbs, limit=4)
+        details = self._unique_short_hints(details, limit=5)
+        words = self._unique_short_hints([*nouns, *verbs, *details], limit=7)
+        sentence_starter = self._specific_sentence_starter(
+            focus_areas=focus_areas,
+            analysis=analysis,
+            nouns=nouns,
+            verbs=verbs,
+            details=details,
+        )
+        next_challenge = self._specific_next_challenge(
+            focus_areas=focus_areas,
+            sentence_starter=sentence_starter,
+        )
+        if not suggestions:
+            suggestions = [next_challenge]
+        return {
+            "focus_areas": focus_areas[:2],
+            "nouns": nouns,
+            "verbs": verbs,
+            "details": details,
+            "words": words,
+            "sentence_starter": sentence_starter,
+            "next_challenge": next_challenge,
+            "actionable_suggestions": self._unique_short_hints(suggestions, limit=2),
+        }
+
+    def _specific_hints_for_focus(
+        self,
+        *,
+        focus: str,
+        feedback: dict[str, Any],
+        analysis: dict[str, Any],
+    ) -> dict[str, Any]:
+        objects = analysis.get("objects") if isinstance(analysis.get("objects"), list) else []
+        actions = analysis.get("actions") if isinstance(analysis.get("actions"), list) else []
+        environment = self._clean_text_value(analysis.get("environment"))
+        environment_details = self._clean_string_list(analysis.get("environment_details") or [], limit=6)
+        primary_subject = self._primary_subject_name(objects)
+        main_action = self._main_action_phrase(actions)
+        important_objects = self._important_object_names(objects, primary_subject=primary_subject)
+        background_details = self._background_detail_hints(environment=environment, details=environment_details)
+        foreground_details = self._foreground_detail_hints(objects=objects, details=environment_details)
+        missing = self._clean_string_list(
+            feedback.get("missing_details")
+            or (feedback.get("coverage") or {}).get("missingMajorParts")
+            or [],
+            limit=3,
+        )
+        phrase_usage = feedback.get("phrase_usage") if isinstance(feedback.get("phrase_usage"), dict) else {}
+        suggested_phrases = self._clean_string_list(phrase_usage.get("suggested"), limit=2)
+        vocabulary = [
+            self._clean_text_value(item.get("word"))
+            for item in (analysis.get("vocabulary") or [])[:4]
+            if isinstance(item, dict)
+        ]
+        phrases = [
+            self._clean_text_value(item.get("phrase"))
+            for item in (analysis.get("phrases") or [])[:4]
+            if isinstance(item, dict)
+        ]
+
+        if focus == "main subject":
+            subject = primary_subject or (important_objects[0] if important_objects else "the main subject")
+            return {
+                "nouns": [subject],
+                "verbs": [],
+                "details": [self._object_description(objects, subject)] if subject else [],
+                "suggestion": f"Mention the main subject: {subject}.",
+            }
+        if focus == "main action":
+            action = main_action or "the main action"
+            return {
+                "nouns": [primary_subject, *important_objects[:2]],
+                "verbs": self._action_verbs(actions),
+                "details": [action],
+                "suggestion": f"Mention the main action: {action}.",
+            }
+        if focus == "background/setting":
+            details = background_details or missing[:2]
+            detail_text = self._join_hints(details) or "the setting or background"
+            return {
+                "nouns": details,
+                "verbs": [],
+                "details": details,
+                "suggestion": f"Add the background: {detail_text}.",
+            }
+        if focus == "foreground":
+            details = foreground_details or important_objects[:2] or missing[:2]
+            detail_text = self._join_hints(details) or "the nearest visible detail"
+            return {
+                "nouns": details,
+                "verbs": [],
+                "details": details,
+                "suggestion": f"Add the foreground detail: {detail_text}.",
+            }
+        if focus == "important objects":
+            details = important_objects[:3] or missing[:2]
+            detail_text = self._join_hints(details) or "one important visible object"
+            return {
+                "nouns": details,
+                "verbs": [],
+                "details": details,
+                "suggestion": f"Include these visible objects: {detail_text}.",
+            }
+        if focus == "mood/atmosphere":
+            mood = self._mood_part_description(
+                analysis,
+                self._clean_text_value(analysis.get("natural_explanation") or analysis.get("scene_summary_natural")),
+                environment,
+            )
+            mood_words = self._mood_words_from_text(mood) or self._mood_words_from_text(
+                self._clean_text_value(analysis.get("natural_explanation") or "")
+            )
+            if not mood_words:
+                mood_words = ["calm" if background_details else "natural"]
+            return {
+                "nouns": background_details[:2],
+                "verbs": [],
+                "details": mood_words[:2],
+                "suggestion": f"Describe the atmosphere: {self._join_hints(mood_words[:2])}.",
+            }
+        if focus == "vocabulary strength":
+            words = [*suggested_phrases, *phrases, *vocabulary]
+            return {
+                "nouns": words[:3],
+                "verbs": [],
+                "details": words[:3],
+                "suggestion": f"Use one stronger phrase: {words[0]}." if words else "",
+            }
+        if focus in {"sentence flow", "sentence connection", "articulation/naturalness"}:
+            details = [item for item in [main_action, *(background_details[:2] or important_objects[:2])] if item]
+            return {
+                "nouns": [primary_subject, *background_details[:2]],
+                "verbs": self._action_verbs(actions),
+                "details": details,
+                "suggestion": "Connect the action and background in one smooth sentence.",
+            }
+        if focus == "descriptive depth":
+            details = [*important_objects[:2], *background_details[:2], *foreground_details[:1]]
+            detail_text = self._join_hints(details[:3]) or "one more specific visible detail"
+            return {
+                "nouns": details[:3],
+                "verbs": self._action_verbs(actions)[:1],
+                "details": details[:3],
+                "suggestion": f"Add one specific visible detail: {detail_text}.",
+            }
+        return {"nouns": [], "verbs": [], "details": [], "suggestion": ""}
+
+    def _specific_sentence_starter(
+        self,
+        *,
+        focus_areas: list[str],
+        analysis: dict[str, Any],
+        nouns: list[str],
+        verbs: list[str],
+        details: list[str],
+    ) -> str:
+        objects = analysis.get("objects") if isinstance(analysis.get("objects"), list) else []
+        actions = analysis.get("actions") if isinstance(analysis.get("actions"), list) else []
+        environment = self._clean_text_value(analysis.get("environment"))
+        environment_details = self._clean_string_list(analysis.get("environment_details") or [], limit=4)
+        primary_subject = self._primary_subject_name(objects) or "main subject"
+        subject_text = self._sentence_subject_label(primary_subject)
+        action = self._main_action_phrase(actions)
+        background = self._background_detail_hints(environment=environment, details=environment_details)
+        foreground = self._foreground_detail_hints(objects=objects, details=environment_details)
+        focus_set = set(focus_areas[:2])
+
+        if "main action" in focus_set and action:
+            return self._ensure_sentence_punctuation(f"{subject_text} is {action}")
+        if "background/setting" in focus_set:
+            target = self._join_hints(background[:3] or details[:3])
+            if target:
+                verb = "are" if len(background[:3] or details[:3]) > 1 else "is"
+                return self._ensure_sentence_punctuation(f"In the background, there {verb} {target}")
+        if "foreground" in focus_set:
+            target = self._join_hints(foreground[:2] or details[:2])
+            if target:
+                return self._ensure_sentence_punctuation(f"In the foreground, there is {target}")
+        if "important objects" in focus_set:
+            target = self._join_hints(nouns[:3])
+            if target:
+                return self._ensure_sentence_punctuation(f"You can also see {target}")
+        if "mood/atmosphere" in focus_set:
+            mood = details[0] if details else "calm"
+            return self._ensure_sentence_punctuation(f"The scene feels {mood}")
+        if focus_set & {"sentence flow", "sentence connection", "articulation/naturalness"}:
+            background_text = self._join_hints(background[:2])
+            if action and background_text:
+                return self._ensure_sentence_punctuation(
+                    f"{subject_text} is {action}, while the background shows {background_text}"
+                )
+        if action:
+            return self._ensure_sentence_punctuation(f"{subject_text} is {action}")
+        if nouns:
+            return self._ensure_sentence_punctuation(f"The image shows {self._join_hints(nouns[:2])}")
+        return "The image shows the main subject clearly."
+
+    def _sentence_subject_label(self, subject: str) -> str:
+        text = self._clean_text_value(subject).strip(" ,.;:")
+        if not text:
+            return "The main subject"
+        if re.match(r"^(a|an|the|this|that|these|those)\b", text, flags=re.I):
+            return text[0].upper() + text[1:]
+        return f"The {text}"
+
+    def _specific_next_challenge(self, *, focus_areas: list[str], sentence_starter: str) -> str:
+        focus_set = set(focus_areas[:2])
+        if "main action" in focus_set and "background/setting" in focus_set:
+            return "Add one sentence saying what the main subject is doing, then one short background detail."
+        if "main action" in focus_set:
+            return "Add one sentence saying exactly what the main subject is doing."
+        if "background/setting" in focus_set and "mood/atmosphere" in focus_set:
+            return "Add one sentence about the background and one word for the mood."
+        if "background/setting" in focus_set:
+            return "Add one sentence about the background using the structure above."
+        if "foreground" in focus_set or "important objects" in focus_set:
+            return "Add one sentence with the visible detail listed above."
+        if "mood/atmosphere" in focus_set:
+            return "Add one short phrase that describes the overall feeling of the image."
+        if focus_set & {"sentence flow", "sentence connection", "articulation/naturalness"}:
+            return "Rewrite your answer by connecting the action and background in one smooth sentence."
+        if "vocabulary strength" in focus_set:
+            return "Replace one general word with one exact word from the hint list."
+        return f"Use this next: {sentence_starter}"
+
+    def _main_action_phrase(self, actions: list[Any]) -> str:
+        for item in actions:
+            if not isinstance(item, dict):
+                continue
+            phrase = self._clean_text_value(item.get("phrase") or item.get("description"))
+            verb = self._clean_text_value(item.get("verb"))
+            if phrase:
+                return self._strip_subject_from_action(phrase)
+            if verb:
+                return verb
+        return ""
+
+    def _strip_subject_from_action(self, phrase: str) -> str:
+        text = self._clean_text_value(phrase).rstrip(".")
+        text = re.sub(r"^(a|an|the)\s+[^,.]{1,40}\s+(is|are|was|were)\s+", "", text, flags=re.I)
+        return text
+
+    def _action_verbs(self, actions: list[Any]) -> list[str]:
+        verbs: list[str] = []
+        for item in actions:
+            if not isinstance(item, dict):
+                continue
+            verb = self._clean_text_value(item.get("verb"))
+            phrase = self._clean_text_value(item.get("phrase"))
+            if verb:
+                verbs.append(verb)
+            match = re.search(r"\b[a-z][a-z-]*ing\b", phrase, flags=re.I)
+            if match:
+                verbs.append(match.group(0))
+        return self._unique_short_hints(verbs, limit=4)
+
+    def _important_object_names(self, objects: list[Any], *, primary_subject: str) -> list[str]:
+        names: list[str] = []
+        primary_key = normalize_answer(primary_subject)
+        for item in objects:
+            if not isinstance(item, dict):
+                continue
+            name = self._clean_text_value(item.get("name"))
+            if not name or normalize_answer(name) == primary_key:
+                continue
+            names.append(name)
+        return self._unique_short_hints(names, limit=5)
+
+    def _object_description(self, objects: list[Any], subject: str) -> str:
+        subject_key = normalize_answer(subject)
+        for item in objects:
+            if not isinstance(item, dict):
+                continue
+            if normalize_answer(str(item.get("name") or "")) == subject_key:
+                return self._clean_text_value(item.get("description"))
+        return ""
+
+    def _background_detail_hints(self, *, environment: str, details: list[str]) -> list[str]:
+        candidates = [environment, *details]
+        background_words = re.compile(
+            r"\b(background|sky|tree|trees|bush|bushes|building|buildings|wall|road|street|park|garden|yard|field|lawn|water|mountain|palm|cloud|outside|outdoor|indoors|room)\b",
+            re.I,
+        )
+        matched = [item for item in candidates if background_words.search(item or "")]
+        return self._unique_short_hints(matched or candidates, limit=4)
+
+    def _foreground_detail_hints(self, *, objects: list[Any], details: list[str]) -> list[str]:
+        candidates: list[str] = []
+        foreground_words = re.compile(r"\b(foreground|front|near|nearby|close|grass|ground|floor|path|pavement|road|table|lawn)\b", re.I)
+        for item in objects:
+            if not isinstance(item, dict):
+                continue
+            name = self._clean_text_value(item.get("name"))
+            description = self._clean_text_value(item.get("description"))
+            if foreground_words.search(f"{name} {description}"):
+                candidates.append(name or description)
+        candidates.extend([detail for detail in details if foreground_words.search(detail)])
+        return self._unique_short_hints(candidates, limit=4)
+
+    def _mood_words_from_text(self, text: str) -> list[str]:
+        mood_words = [
+            "calm",
+            "peaceful",
+            "quiet",
+            "busy",
+            "crowded",
+            "relaxed",
+            "serious",
+            "bright",
+            "sunny",
+            "friendly",
+            "tense",
+            "casual",
+        ]
+        normalized = normalize_answer(text)
+        return [word for word in mood_words if word in normalized][:3]
+
+    def _unique_short_hints(self, values: list[str], *, limit: int) -> list[str]:
+        cleaned: list[str] = []
+        seen: set[str] = set()
+        for value in values:
+            text = self._clean_text_value(value).strip(" ,.;:")
+            key = normalize_answer(text)
+            if not text or not key or key in seen:
+                continue
+            seen.add(key)
+            cleaned.append(text)
+            if len(cleaned) >= limit:
+                break
+        return cleaned
+
+    def _join_hints(self, values: list[str]) -> str:
+        hints = self._unique_short_hints(values, limit=4)
+        if not hints:
+            return ""
+        if len(hints) == 1:
+            return hints[0]
+        return f"{', '.join(hints[:-1])}, and {hints[-1]}"
+
+    def _progressive_score(
+        self,
+        score: int,
+        *,
+        state: dict[str, bool],
+        attempt_index: int,
+        validation_retry: bool = False,
+    ) -> int:
+        if validation_retry:
+            return max(1, min(25, score))
+        completed = sum(1 for value in state.values() if value)
+        coverage_floor = min(88, 18 + completed * 7)
+        score = max(score, coverage_floor)
+        caps = {1: 62, 2: 74, 3: 84, 4: 91}
+        cap = caps.get(attempt_index, 95)
+        if all(state.values()):
+            cap = max(cap, 90)
+        return max(1, min(cap, score))
+
+    def _articulation_level(self, score: int) -> str:
+        if score < 45:
+            return "Basic"
+        if score < 60:
+            return "Clear"
+        if score < 75:
+            return "Descriptive"
+        if score < 88:
+            return "Natural"
+        return "Fluent"
+
+    def _dimension_tracker(self, state: dict[str, bool]) -> list[dict[str, Any]]:
+        display = [
+            ("main subject", "Main subject"),
+            ("main action", "Main action"),
+            ("background/setting", "Background/setting"),
+            ("foreground", "Foreground"),
+            ("important objects", "Important objects"),
+            ("mood/atmosphere", "Mood/atmosphere"),
+            ("sentence flow", "Sentence flow"),
+            ("vocabulary strength", "Vocabulary strength"),
+            ("articulation/naturalness", "Naturalness"),
+            ("sentence connection", "Sentence connection"),
+            ("descriptive depth", "Descriptive depth"),
+        ]
+        return [
+            {"key": key, "label": label, "complete": bool(state.get(key))}
+            for key, label in display
+        ]
+
+    def _progressive_ready_for_quiz(
+        self,
+        *,
+        state: dict[str, bool],
+        score: int,
+        attempt_index: int,
+    ) -> bool:
+        required = [
+            "main subject",
+            "main action",
+            "background/setting",
+            "important objects",
+            "sentence flow",
+            "articulation/naturalness",
+            "descriptive depth",
+        ]
+        return attempt_index >= 3 and score >= 82 and all(state.get(item) for item in required)
+
+    def _progressive_coaching_message(
+        self,
+        *,
+        score: int,
+        state: dict[str, bool],
+        focus_areas: list[str],
+        attempt_index: int,
+    ) -> str:
+        if self._progressive_ready_for_quiz(state=state, score=score, attempt_index=attempt_index):
+            return "Excellent articulation. Your explanation now feels complete and natural."
+        if attempt_index == 1:
+            return "Good start. Let’s build the description one layer at a time."
+        focus_text = " and ".join(focus_areas[:2]).replace("/", " or ")
+        return f"Nice improvement. Now focus on {focus_text}."
+
+    def _progressive_improvement_note(
+        self,
+        *,
+        feedback: dict[str, Any],
+        learner_text: str,
+        original_text: str,
+        state: dict[str, bool],
+    ) -> str:
+        positives = self._clean_string_list(feedback.get("what_did_well"), limit=1)
+        if positives:
+            return positives[0]
+        if normalize_answer(learner_text) != normalize_answer(original_text):
+            return "Your revision is moving toward a fuller explanation."
+        completed = [label for label, complete in state.items() if complete]
+        if completed:
+            return f"You already have {completed[0]}."
+        return "You started with your own observation."
+
+    def _build_next_step_instructions(
+        self,
+        *,
+        feedback: dict[str, Any],
+        analysis: dict[str, Any],
+    ) -> list[str]:
+        coverage = feedback.get("coverage") if isinstance(feedback.get("coverage"), dict) else {}
+        missing = self._clean_string_list(
+            feedback.get("missing_details") or coverage.get("missingMajorParts") or [],
+            limit=2,
+        )
+        upgrades = feedback.get("word_phrase_upgrades") if isinstance(feedback.get("word_phrase_upgrades"), list) else []
+        structures = self._clean_string_list(feedback.get("reusable_sentence_structures"), limit=1)
+        steps: list[str] = []
+        if missing and not re.search(r"no major visual detail", missing[0], re.I):
+            detail = missing[0]
+            steps.append(
+                detail
+                if re.match(r"^(mention|add|describe)\b", detail, re.I)
+                else f"Mention this missing observation: {detail}."
+            )
+        for item in upgrades:
+            if isinstance(item, dict):
+                phrase = self._clean_text_value(
+                    item.get("use") or item.get("new") or item.get("strong")
+                )
+            else:
+                phrase = self._clean_text_value(item)
+            if phrase:
+                steps.append(f"Use a stronger phrase if it fits: {phrase}.")
+                break
+        if structures:
+            steps.append(f"Use this structure: {structures[0]}")
+        if not steps:
+            steps = [
+                "Mention the setting/background with one visible detail.",
+                "Use one specific image phrase instead of a general word.",
+                "Use: The main subject is ..., while the background shows ...",
+            ]
+        return steps[:2]
 
     def _normalize_retry_score(self, value: Any) -> int:
         try:
@@ -1079,6 +1837,19 @@ class AIAnalyzer:
                 ],
             )
 
+        coherence_issue = self._coherence_issue_for_feedback(text, meaningful_words)
+        if coherence_issue:
+            return self._retry_feedback(
+                score=coherence_issue["score"],
+                main_issue=coherence_issue["message"],
+                fixes=[
+                    "Start with: 'This image shows...'",
+                    "Use one clear sentence with a subject and verb.",
+                    "Connect objects with verbs instead of listing random words.",
+                ],
+                max_score=coherence_issue["cap"],
+            )
+
         visual_targets = self._feedback_visual_targets(
             objects=analysis.get("objects", [])[:8],
             actions=analysis.get("actions", [])[:6],
@@ -1105,6 +1876,96 @@ class AIAnalyzer:
             )
 
         return None
+
+    def _coherence_issue_for_feedback(
+        self,
+        text: str,
+        words: list[str],
+    ) -> dict[str, Any] | None:
+        sentence_like = self._has_subject_verb_structure(text)
+        fragment_like = self._looks_like_keyword_fragment(text, words)
+        unfinished = self._looks_unfinished_or_cut_off(text, words)
+        very_poor_grammar = self._looks_like_very_poor_grammar(text, words)
+        message = (
+            "Your answer includes some relevant words, but it is not yet a clear sentence. "
+            "Rewrite it with a subject, verb, and complete idea."
+        )
+        if fragment_like and not sentence_like:
+            return {"score": 8, "cap": 15, "message": message}
+        if unfinished and not sentence_like:
+            return {"score": 18, "cap": 25, "message": message}
+        if very_poor_grammar:
+            return {
+                "score": 28,
+                "cap": 40,
+                "message": "Your meaning is partly understandable, but the grammar is too broken for normal scoring yet.",
+            }
+        if not sentence_like:
+            return {
+                "score": 22,
+                "cap": 25,
+                "message": message,
+            }
+        return None
+
+    def _has_subject_verb_structure(self, text: str) -> bool:
+        lowered = f" {text.casefold()} "
+        if re.search(
+            r"\b(i|we|you|they|he|she|it|this|that|there|image|picture|photo|scene|man|woman|person|people|child|children|dog|cat|car|building|structure|object|debris|sticks?)\s+"
+            r"(am|is|are|was|were|has|have|do|does|can|seems?|appears?|looks?|shows?|see|shows|sits?|stands?|lies?|lying|riding|walking|holding|wearing|mowing|crossing|running|playing|working|looking)\b",
+            lowered,
+        ):
+            return True
+        if re.search(r"\bthere\s+(is|are|was|were)\b", lowered):
+            return True
+        if re.search(r"\b[a-z]{3,}\s+(is|are|was|were|has|have)\s+[a-z]{3,}", lowered):
+            return True
+        return False
+
+    def _looks_like_keyword_fragment(self, text: str, words: list[str]) -> bool:
+        if len(words) < 4:
+            return False
+        lowered = text.casefold()
+        has_punctuation = bool(re.search(r"[.!?]", text))
+        function_words = re.findall(
+            r"\b(the|a|an|is|are|was|were|in|on|with|and|to|of|there|this|that|shows|see)\b",
+            lowered,
+        )
+        verb_like = re.findall(
+            r"\b(is|are|was|were|has|have|shows?|see|looks?|appears?|stands?|sits?|lies?|lying|riding|walking|holding|wearing|mowing|crossing|running|playing|working)\b",
+            lowered,
+        )
+        content_ratio = len([word for word in words if len(word) >= 4]) / max(1, len(words))
+        return (
+            not has_punctuation
+            and len(function_words) <= 1
+            and len(verb_like) == 0
+            and content_ratio >= 0.65
+        )
+
+    def _looks_unfinished_or_cut_off(self, text: str, words: list[str]) -> bool:
+        stripped = text.strip()
+        if len(words) < 5:
+            return False
+        if stripped.endswith((",", "and", "with", "in", "on", "the", "a", "an", "to", "of")):
+            return True
+        return False
+
+    def _looks_like_very_poor_grammar(self, text: str, words: list[str]) -> bool:
+        lowered = text.casefold()
+        if len(words) < 6:
+            return False
+        broken_patterns = [
+            r"\b\w+ing\s+lies?\b",
+            r"\bare\s+\w+ing\s+lies?\b",
+            r"\b(debrising|sandsmall)\b",
+            r"\b(is|are|was|were)\s+(the\s+)?\w+\s+\w+ing\s+\w+ing\b",
+        ]
+        if any(re.search(pattern, lowered) for pattern in broken_patterns):
+            return True
+        if not self._has_subject_verb_structure(text) and len(words) >= 8:
+            return True
+        return False
 
     def _looks_like_nonsense_answer(self, text: str, words: list[str]) -> bool:
         if not re.search(r"[A-Za-z]", text):
@@ -1176,8 +2037,10 @@ class AIAnalyzer:
         score: int,
         main_issue: str,
         fixes: list[str],
+        max_score: int = 15,
     ) -> dict[str, Any]:
-        score = max(1, min(15, int(score)))
+        score_cap = max(1, min(45, int(max_score)))
+        score = max(1, min(score_cap, int(score)))
         return {
             "score": score,
             "scores": {"vocabulary": 1, "structure": 1, "depth": 1, "clarity": 1},
@@ -1199,9 +2062,23 @@ class AIAnalyzer:
                 "coverageScore": 0,
                 "coveragePercent": 0,
                 "accuracyPenalty": 0,
-                "scoreCapApplied": 15,
+                "scoreCapApplied": score_cap,
                 "reason": main_issue,
             },
+            "readiness": {
+                "ready": False,
+                "reason": main_issue,
+                "criteria": {
+                    "mainSubject": False,
+                    "mainAction": False,
+                    "settingBackground": False,
+                    "twoImportantDetails": False,
+                    "naturalEnglish": False,
+                    "notAWordList": False,
+                    "overallSense": False,
+                },
+            },
+            "is_ready": False,
             "main_issue": main_issue,
             "what_did_well": [],
             "missing_details": [],
@@ -1214,6 +2091,7 @@ class AIAnalyzer:
                 "message": "None yet. First, write a clear description of the image.",
             },
             "fix_this_to_improve": fixes[:3],
+            "next_step_instructions": fixes[:2],
             "word_phrase_upgrades": [],
             "improvements": fixes[:3],
             "better_version": "",
@@ -1514,6 +2392,22 @@ class AIAnalyzer:
         elif missing_phrases:
             fix_this.append(f"Use one learned phrase naturally, such as '{missing_phrases[0]}'.")
 
+        readiness = self._normalize_feedback_readiness(
+            {},
+            coverage=coverage,
+            score=score,
+            fallback={},
+        )
+        next_step_instructions = self._build_next_step_instructions(
+            feedback={
+                "missing_details": missing_details,
+                "coverage": coverage,
+                "word_phrase_upgrades": alternatives,
+                "reusable_sentence_structures": patterns,
+            },
+            analysis=analysis,
+        )
+
         return {
             "score": score,
             "scores": {
@@ -1524,6 +2418,8 @@ class AIAnalyzer:
             },
             "language_quality": language_quality,
             "coverage": coverage,
+            "readiness": readiness,
+            "is_ready": bool(readiness.get("ready")),
             "main_issue": main_issue,
             "what_did_well": what_did_well[:4],
             "missing_details": missing_details or ["No major visual detail is missing; focus on making the wording stronger."],
@@ -1536,6 +2432,7 @@ class AIAnalyzer:
                 "message": phrase_message,
             },
             "fix_this_to_improve": fix_this[:5],
+            "next_step_instructions": next_step_instructions,
             "word_phrase_upgrades": alternatives[:5]
             or [
                 {
@@ -2694,6 +3591,11 @@ class AIAnalyzer:
             natural_explanation,
         )
         sentence_patterns = self._normalize_sentence_patterns(raw.get("sentence_patterns") or [])
+        sentence_starters = self._normalize_sentence_starters(
+            raw.get("sentence_starters") or raw.get("writing_starters") or [],
+            objects=objects,
+            actions=actions,
+        )
         teaching_notes = self._clean_string_list(
             raw.get("teaching_notes") or raw.get("scene_notes") or [],
             limit=6,
@@ -2764,6 +3666,7 @@ class AIAnalyzer:
             "environment_details": environment_details,
             "vocabulary": vocabulary,
             "phrases": phrases,
+            "sentence_starters": sentence_starters,
             "sentence_patterns": sentence_patterns,
             "quiz_candidates": quiz_candidates,
             "difficulty_recommendation": str(raw.get("difficulty_recommendation") or "").strip()
@@ -3549,6 +4452,52 @@ class AIAnalyzer:
                 }
             )
         return patterns
+
+    def _normalize_sentence_starters(
+        self,
+        raw_items: list[Any],
+        *,
+        objects: list[dict[str, Any]],
+        actions: list[dict[str, Any]],
+    ) -> list[str]:
+        blocked_terms = {
+            normalize_answer(str(item.get("name") or ""))
+            for item in objects
+            if str(item.get("name") or "").strip()
+        }
+        blocked_terms.update(
+            normalize_answer(str(item.get("verb") or item.get("phrase") or ""))
+            for item in actions
+            if str(item.get("verb") or item.get("phrase") or "").strip()
+        )
+        starters: list[str] = []
+        seen: set[str] = set()
+        for value in [
+            *(raw_items if isinstance(raw_items, list) else []),
+            "The image shows ...",
+            "Here we see ...",
+            "This scene shows ...",
+            "In this picture, ...",
+            "The photo captures ...",
+            "At first glance, ...",
+        ]:
+            text = self._clean_text_value(value).replace("…", "...").strip()
+            if not text:
+                continue
+            if not re.search(r"\.\.\.$|[, ]$", text):
+                text = f"{text} ..."
+            key = normalize_answer(text)
+            if not key or key in seen:
+                continue
+            if any(term and term in key for term in blocked_terms):
+                continue
+            if len(text.split()) > 7:
+                continue
+            seen.add(key)
+            starters.append(text)
+            if len(starters) >= 6:
+                break
+        return starters
 
     def _derive_sentence_patterns(
         self,

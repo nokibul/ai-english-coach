@@ -291,14 +291,25 @@ class ProgressRewardTests(unittest.TestCase):
             completion_bonuses={"complete_all_types_bonus": 20, "perfect_quiz_bonus": 30},
         )
 
-        self.assertEqual("hard", breakdown["difficulty"])
+        self.assertEqual("micro", breakdown["difficulty"])
         self.assertEqual(15, breakdown["base_xp"])
-        self.assertEqual(5, breakdown["first_try_bonus"])
-        self.assertEqual(10, breakdown["phrase_bonus"])
-        self.assertEqual(3, breakdown["fast_bonus"])
+        self.assertEqual(0, breakdown["first_try_bonus"])
+        self.assertEqual(0, breakdown["phrase_bonus"])
+        self.assertEqual(0, breakdown["fast_bonus"])
         self.assertEqual(20, breakdown["complete_all_types_bonus"])
-        self.assertEqual(30, breakdown["perfect_quiz_bonus"])
-        self.assertEqual(83, breakdown["total_before_combo"])
+        self.assertEqual(0, breakdown["perfect_quiz_bonus"])
+        self.assertEqual(35, breakdown["total_before_combo"])
+
+        almost = build_quiz_xp_breakdown(
+            item={"quiz_type": "fix_the_sentence", "metadata": {}},
+            selected_answer="The man riding mower grass.",
+            correct=False,
+            almost_correct=True,
+            response_ms=4500,
+            completion_bonuses={"complete_all_types_bonus": 0, "perfect_quiz_bonus": 0},
+        )
+        self.assertEqual(5, almost["base_xp"])
+        self.assertEqual(5, almost["total_before_combo"])
 
     def test_combo_rules_for_correct_almost_and_wrong(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -333,7 +344,7 @@ class ProgressRewardTests(unittest.TestCase):
             self.assertEqual(0, reward["combo_streak"])
             self.assertEqual(1, progress["best_combo"])
 
-    def test_combo_x3_and_x5_bonus_values(self) -> None:
+    def test_combo_x3_bonus_values(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             db = Database(Path(temp_dir) / "app.sqlite3")
             db.initialize()
@@ -357,8 +368,8 @@ class ProgressRewardTests(unittest.TestCase):
                 )
                 rewards.append(reward)
 
-        self.assertEqual(5, rewards[2]["combo_bonus"])
-        self.assertEqual(12, rewards[4]["combo_bonus"])
+        self.assertEqual(10, rewards[2]["combo_bonus"])
+        self.assertEqual(0, rewards[4]["combo_bonus"])
         self.assertEqual(5, rewards[4]["best_combo"])
 
 
@@ -1479,6 +1490,52 @@ class AIAnalyzerTests(unittest.TestCase):
         )
         self.assertIsNone(relevant_feedback)
 
+    def test_feedback_validation_caps_keyword_lists_and_broken_fragments(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with patch.dict(os.environ, {}, clear=True):
+                config = AppConfig.from_env(base_dir=Path(temp_dir))
+
+        analyzer = AIAnalyzer(config)
+        analysis = {
+            "objects": [
+                {"name": "broken sticks", "description": "Broken sticks are on sand.", "importance": 0.8},
+                {"name": "tall structure", "description": "A tall structure is in the background.", "importance": 0.7},
+            ],
+            "actions": [{"verb": "lying", "phrase": "lying on the sand", "importance": 0.8}],
+            "environment_details": ["sand", "background", "foreground"],
+            "vocabulary": [{"word": "debris"}],
+            "phrases": [{"phrase": "in the background"}],
+        }
+
+        keyword_feedback = analyzer._validate_learner_answer_for_feedback(
+            learner_text="sand debris background foreground tall structure",
+            analysis=analysis,
+        )
+        self.assertIsNotNone(keyword_feedback)
+        self.assertTrue(keyword_feedback["retry_required"])
+        self.assertLessEqual(keyword_feedback["score"], 15)
+        self.assertIn("not yet a clear sentence", keyword_feedback["main_issue"])
+
+        broken_feedback = analyzer._validate_learner_answer_for_feedback(
+            learner_text=(
+                "Broken stick pieces are debrising lies on the sandsmall debris "
+                "tall structure in the background"
+            ),
+            analysis=analysis,
+        )
+        self.assertIsNotNone(broken_feedback)
+        self.assertTrue(broken_feedback["retry_required"])
+        self.assertLessEqual(broken_feedback["score"], 40)
+
+        coherent_feedback = analyzer._validate_learner_answer_for_feedback(
+            learner_text=(
+                "There are broken sticks and small debris lying on the sand, "
+                "with a tall structure in the background."
+            ),
+            analysis=analysis,
+        )
+        self.assertIsNone(coherent_feedback)
+
     def test_ai_feedback_validation_payload_maps_to_retry_feedback(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             with patch.dict(os.environ, {}, clear=True):
@@ -1515,6 +1572,75 @@ class AIAnalyzerTests(unittest.TestCase):
         self.assertEqual("", normalized["better_version"])
         self.assertEqual([], normalized["word_phrase_upgrades"])
         self.assertEqual("Try Again", normalized["cta_label"])
+
+    def test_progressive_feedback_includes_specific_image_hints(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with patch.dict(os.environ, {}, clear=True):
+                config = AppConfig.from_env(base_dir=Path(temp_dir))
+
+        analyzer = AIAnalyzer(config)
+        analysis = {
+            "natural_explanation": (
+                "A person is riding a mower across a grassy lawn. "
+                "Palm trees and trimmed bushes are in the sunny background."
+            ),
+            "objects": [
+                {"name": "person", "description": "A person is on a red riding mower."},
+                {"name": "riding mower", "description": "A red mower is on the grass."},
+                {"name": "palm trees", "description": "Palm trees are in the background."},
+                {"name": "trimmed bushes", "description": "Trimmed bushes are behind the lawn."},
+            ],
+            "actions": [{"verb": "riding", "phrase": "riding a mower across the lawn"}],
+            "environment": "sunny outdoor lawn",
+            "environment_details": ["green grass", "palm trees", "trimmed bushes", "sunny sky"],
+            "vocabulary": [{"word": "lawn"}],
+            "phrases": [{"phrase": "in the background"}],
+        }
+        feedback = {
+            "score": 34,
+            "scores": {"vocabulary": 4, "structure": 5, "depth": 3, "clarity": 5},
+            "language_quality": {"score": 45, "vocabulary": 40, "structure": 50, "naturalness": 40},
+            "coverage": {
+                "mainSubjectMentioned": True,
+                "mainActionMentioned": False,
+                "imageParts": [
+                    {"type": "main_subject", "coverageStatus": "covered", "covered": True},
+                    {"type": "main_action", "coverageStatus": "missing", "covered": False},
+                    {"type": "setting", "coverageStatus": "missing", "covered": False},
+                ],
+                "coveragePercent": 35,
+            },
+            "readiness": {
+                "criteria": {
+                    "mainSubject": True,
+                    "mainAction": False,
+                    "settingBackground": False,
+                    "twoImportantDetails": False,
+                    "naturalEnglish": False,
+                    "notAWordList": True,
+                }
+            },
+            "what_did_well": ["Good start — you mentioned the person."],
+            "missing_details": ["the main action", "the setting or background"],
+            "phrase_usage": {"used": [], "suggested": ["in the background"]},
+        }
+
+        coached = analyzer._apply_progressive_coaching(
+            feedback,
+            analysis=analysis,
+            learner_text="A man is outside.",
+            original_text="A man is outside.",
+            attempt_index=1,
+        )
+
+        self.assertEqual(["main action", "background/setting"], coached["focus_areas"])
+        guidance = coached["specific_guidance"]
+        self.assertIn("riding mower", guidance["words"])
+        self.assertIn("riding", guidance["verbs"])
+        self.assertIn("palm trees", guidance["words"])
+        self.assertIn("riding a mower across the lawn", guidance["sentence_starter"])
+        self.assertNotIn("Add more detail", " ".join(guidance["actionable_suggestions"]))
+        self.assertFalse(coached["is_ready"])
 
     def test_reusable_language_prefers_high_value_expression_over_common_word(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -1959,34 +2085,39 @@ class QuizEngineTests(unittest.TestCase):
         )
 
         quiz_types = [row["quiz_type"] for row in rows]
-        for quiz_type in [
-            "sentence_upgrade_battle",
-            "phrase_snap",
-            "phrase_duel",
-            "fix_the_mistake",
-            "use_it_or_lose_it",
-        ]:
-            self.assertIn(quiz_type, quiz_types)
-            self.assertGreaterEqual(quiz_types.count(quiz_type), 2)
-
-        self.assertTrue(any(row["answer_mode"] == "typing" for row in rows))
-        self.assertTrue(any(row["answer_mode"] == "multiple_choice" for row in rows))
-        self.assertTrue(
-            all("_____" in row["prompt"] for row in rows if row["quiz_type"] == "phrase_snap")
+        self.assertEqual(
+            [
+                "multiple_choice_comprehension",
+                "matching_pairs",
+                "fill_blank",
+                "sentence_reconstruction",
+            ],
+            quiz_types,
+        )
+        self.assertEqual(4, len(rows))
+        self.assertEqual(
+            ["multiple_choice", "matching", "typing", "reorder"],
+            [row["answer_mode"] for row in rows],
         )
         self.assertTrue(
-            all(len(row["distractors"]) <= 1 for row in rows if row["quiz_type"] == "phrase_duel")
+            all("_____" in row["prompt"] for row in rows if row["quiz_type"] == "fill_blank")
         )
+        matching = next(row for row in rows if row["quiz_type"] == "matching_pairs")
+        self.assertGreaterEqual(len(matching["metadata"]["pairs"]), 2)
+        reconstruction = next(row for row in rows if row["quiz_type"] == "sentence_reconstruction")
+        self.assertTrue(reconstruction["metadata"]["tokens"])
+        self.assertTrue(all(row["session_id"] == 2 for row in rows))
         for row in rows:
             self.assertIn("prompt", row)
             self.assertIn("correct_answer", row)
             self.assertTrue(row["explanation"])
             self.assertGreater(row["difficulty"], 0)
             self.assertGreater(row["metadata"]["xp_value"], 0)
+            self.assertTrue(row["metadata"]["post_improve"])
             if row["metadata"]["related_reusable_phrase"]:
                 self.assertIn(
                     row["metadata"]["related_reusable_phrase"],
-                    {"in the background", "riding down"},
+                    {"in the background", "riding down", "riding down a busy street", "riding"},
                 )
 
     def test_build_session_assets_generates_multiple_quiz_types(self) -> None:
@@ -2089,6 +2220,66 @@ class QuizEngineTests(unittest.TestCase):
         self.assertEqual("Almost Correct", result["result_type"])
         self.assertGreater(result["score"], 0.5)
 
+    def test_fill_blank_uses_direct_and_close_matching(self) -> None:
+        item = {
+            "quiz_type": "fill_blank",
+            "answer_mode": "typing",
+            "correct_answer": "riding",
+            "acceptable_answers": ["riding", "ride"],
+            "metadata": {},
+        }
+
+        direct = evaluate_quiz_response(
+            item=item,
+            selected_answer="ride",
+            response_ms=2000,
+            confidence=2,
+        )
+        close = evaluate_quiz_response(
+            item=item,
+            selected_answer="ridng",
+            response_ms=2000,
+            confidence=2,
+        )
+
+        self.assertTrue(direct["correct"])
+        self.assertEqual("Correct", direct["result_type"])
+        self.assertFalse(close["correct"])
+        self.assertEqual("Almost Correct", close["result_type"])
+        self.assertTrue(close["feedback"]["corrected_example"])
+
+    def test_fix_the_sentence_accepts_natural_alternative_and_partial(self) -> None:
+        item = {
+            "quiz_type": "fix_the_sentence",
+            "answer_mode": "typing",
+            "correct_answer": "The man is riding a mower on the grass.",
+            "acceptable_answers": ["The man is riding a mower on the grass."],
+            "metadata": {
+                "weak_sentence": "The man on mower grass.",
+                "keywords": ["man", "riding", "mower", "grass"],
+                "reference_answer": "The man is riding a mower on the grass.",
+            },
+        }
+
+        natural = evaluate_quiz_response(
+            item=item,
+            selected_answer="A man is riding the mower across the grass.",
+            response_ms=7000,
+            confidence=2,
+        )
+        partial = evaluate_quiz_response(
+            item=item,
+            selected_answer="The man riding mower grass.",
+            response_ms=7000,
+            confidence=2,
+        )
+
+        self.assertTrue(natural["correct"])
+        self.assertEqual("Correct", natural["result_type"])
+        self.assertFalse(partial["correct"])
+        self.assertEqual("Almost Correct", partial["result_type"])
+        self.assertTrue(partial["feedback"]["corrected_example"])
+
     def test_sentence_upgrade_validates_meaning_strength_and_phrase_use(self) -> None:
         result = evaluate_quiz_response(
             item={
@@ -2152,6 +2343,7 @@ class QuizEngineTests(unittest.TestCase):
         self.assertFalse(result["correct"])
         self.assertEqual("Almost Correct", result["result_type"])
         self.assertGreaterEqual(result["score"], 0.5)
+        self.assertTrue(result["feedback"]["corrected_example"])
 
 
 if __name__ == "__main__":

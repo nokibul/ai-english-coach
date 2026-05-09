@@ -292,12 +292,12 @@ function renderSession(session) {
   renderLearnMode();
   els.sessionDetailPanel.classList.remove("hidden");
   state.sessionFlow = {
-    step: "learn",
+    step: "write",
     explanation: "",
     feedback: null,
     attempts: [],
   };
-  renderSessionStep("learn");
+  renderSessionStep("write");
 }
 
 function renderSessionStep(step, updates = {}) {
@@ -332,8 +332,8 @@ function renderSessionStep(step, updates = {}) {
     animateStepTransition();
     return;
   }
-  setFocusedSessionLayout(false);
-  renderLearnStep(session);
+  setFocusedSessionLayout(true);
+  renderWriteStep(session);
   animateStepTransition();
 }
 
@@ -348,14 +348,20 @@ function setFocusedSessionLayout(focused) {
 }
 
 function renderStepProgress(activeStep) {
-  const steps = [
-    ["learn", "Learn"],
-    ["write", "Write"],
-    ["feedback", "Feedback"],
-    ["improve", "Improve"],
-    ["quiz", "Quiz"],
-    ["reward", "Reward"],
-  ];
+  const steps = activeStep === "guided_write" || activeStep === "submit"
+    ? [
+        ["image", "Image"],
+        ["guided_write", "Guided Write"],
+        ["submit", "Submit"],
+      ]
+    : [
+        ["image", "Image"],
+        ["write", "Write"],
+        ["feedback", "Feedback"],
+        ["improve", "Improve"],
+        ["quiz", "Quiz"],
+        ["reward", "Reward"],
+      ];
   const activeIndex = steps.findIndex(([key]) => key === activeStep);
 
   return `
@@ -395,11 +401,12 @@ function animateNumber(elementId, finalValue, options = {}) {
   const element = document.getElementById(elementId);
   const target = Math.max(0, Math.round(Number(finalValue) || 0));
   const suffix = options.suffix || "";
+  const prefix = options.prefix || "";
   if (!element) {
     return;
   }
   if (prefersReducedMotion()) {
-    element.textContent = `${target}${suffix}`;
+    element.textContent = `${prefix}${target}${suffix}`;
     return;
   }
   const duration = 520;
@@ -407,12 +414,24 @@ function animateNumber(elementId, finalValue, options = {}) {
   const tick = (now) => {
     const progress = Math.min(1, (now - startTime) / duration);
     const eased = 1 - Math.pow(1 - progress, 3);
-    element.textContent = `${Math.round(target * eased)}${suffix}`;
+    element.textContent = `${prefix}${Math.round(target * eased)}${suffix}`;
     if (progress < 1) {
       requestAnimationFrame(tick);
     }
   };
   requestAnimationFrame(tick);
+}
+
+function playTapAnimation(element) {
+  if (!element || prefersReducedMotion()) {
+    return;
+  }
+  element.classList.remove("tap-pop");
+  void element.offsetWidth;
+  element.classList.add("tap-pop");
+  window.setTimeout(() => {
+    element.classList.remove("tap-pop");
+  }, 220);
 }
 
 function renderLearnStep(session) {
@@ -607,33 +626,65 @@ function onLanguageCardClick(event) {
 }
 
 function renderWriteStep(session) {
-  const suggestions = buildWritingSuggestions(session);
+  const hintGroups = buildWritingHintGroups(session);
+  const starterOptions = getWritingStarters(session);
+  const starterText = starterOptions[0] || "The image shows ";
+  const draftText = state.sessionFlow.explanation || starterText;
   els.sessionDetailPanel.innerHTML = `
     <div class="journey-shell focused-step-shell">
-      ${renderStepProgress("write")}
+      ${renderStepProgress("guided_write")}
       <section class="focused-writing-card">
-        <img class="focused-image-preview" src="${session.image_url}" alt="Image to describe">
+        <div class="focused-image-frame">
+          <img class="focused-image-preview" src="${session.image_url}" alt="Image to describe">
+        </div>
         <div class="focused-copy">
-          <p class="eyebrow">Step 2: Write</p>
-          <h3>Describe this image in your own words</h3>
+          <p class="eyebrow">Guided Write</p>
+          <h3>Describe this in 1 sentence.</h3>
+        </div>
+        <div class="mini-suggestion-row sentence-starter-row" aria-label="Sentence starters">
+          ${starterOptions
+            .map(
+              (starter, index) => `
+                <button class="sentence-starter-button ${index === 0 ? "selected" : ""}" type="button" data-insert-starter="${escapeHtml(starter)}">
+                  ${escapeHtml(starter.trim())}
+                </button>
+              `
+            )
+            .join("")}
         </div>
         <textarea
           id="learnerExplanationInput"
-          class="focused-writing-input"
-          rows="10"
-          placeholder="Write your own explanation here..."
-        >${escapeHtml(state.sessionFlow.explanation || "")}</textarea>
+          class="focused-writing-input guided-writing-input"
+          rows="4"
+          maxlength="900"
+          placeholder="${escapeHtml(starterText)}"
+        >${escapeHtml(draftText)}</textarea>
         ${
-          suggestions.length
+          hintGroups.some((group) => group.items.length)
             ? `
-              <details class="phrase-help-toggle">
-                <summary>View help</summary>
-                <div class="mini-suggestion-row">
-                  ${suggestions
-                    .map((item) => `<span class="guidance-pill">${escapeHtml(item)}</span>`)
-                    .join("")}
-                </div>
-              </details>
+              <section class="guided-hint-panel" aria-label="Writing hints">
+                ${hintGroups
+                  .filter((group) => group.items.length)
+                  .map(
+                    (group) => `
+                      <div class="guided-hint-group">
+                        <span class="field-label">${escapeHtml(group.label)}</span>
+                        <div class="mini-suggestion-row">
+                          ${group.items
+                            .map(
+                              (item) => `
+                                <button class="guidance-pill hint-chip-button" type="button" data-insert-hint="${escapeHtml(item)}">
+                                  ${escapeHtml(item)}
+                                </button>
+                              `
+                            )
+                            .join("")}
+                        </div>
+                      </div>
+                    `
+                  )
+                  .join("")}
+              </section>
             `
             : ""
         }
@@ -647,9 +698,158 @@ function renderWriteStep(session) {
   document.getElementById("submitWritingButton").addEventListener("click", () => {
     submitExplanationFeedback(session, { mode: "first" });
   });
+  els.sessionDetailPanel.querySelectorAll("[data-insert-starter]").forEach((button) => {
+    button.addEventListener("click", () => {
+      replaceWritingStarter(button.dataset.insertStarter || "");
+      playTapAnimation(button);
+      els.sessionDetailPanel.querySelectorAll("[data-insert-starter]").forEach((item) => {
+        item.classList.toggle("selected", item === button);
+      });
+    });
+  });
+  els.sessionDetailPanel.querySelectorAll("[data-insert-hint]").forEach((button) => {
+    button.addEventListener("click", () => {
+      insertWritingHint(button.dataset.insertHint || "");
+      playTapAnimation(button);
+      button.classList.add("selected");
+    });
+  });
+  const writingInput = document.getElementById("learnerExplanationInput");
+  writingInput?.addEventListener("input", limitWritingInput);
+  if (writingInput) {
+    const cursorPosition = writingInput.value.length;
+    writingInput.setSelectionRange(cursorPosition, cursorPosition);
+  }
   window.setTimeout(() => {
-    document.getElementById("learnerExplanationInput")?.focus();
+    writingInput?.focus();
   }, 50);
+}
+
+function getWritingStarters(session) {
+  const analysis = session?.analysis || {};
+  const aiStarters = Array.isArray(analysis.sentence_starters) ? analysis.sentence_starters : [];
+  const defaults = [
+    "The image shows ",
+    "Here we see ",
+    "This scene shows ",
+    "In this picture, ",
+    "The photo captures ",
+    "At first glance, ",
+  ];
+  const blockedTerms = [
+    ...(analysis.objects || []).map((item) => item?.name || item),
+    ...(analysis.actions || []).map((item) => item?.verb || item?.phrase || item),
+    analysis.environment,
+    ...(analysis.environment_details || []),
+  ]
+    .map((item) => normalizeClientText(item))
+    .filter((item) => item && item.length > 2);
+  return uniqueWritingHints([...aiStarters, ...defaults])
+    .map(normalizeSentenceStarter)
+    .filter((starter) => starter && !starterMentionsImageContent(starter, blockedTerms))
+    .slice(0, 4);
+}
+
+function getWritingStarter(session) {
+  return getWritingStarters(session)[0] || "The image shows ";
+}
+
+function normalizeSentenceStarter(value) {
+  let text = cleanUiText(value).replace(/…/g, "...").replace(/\s*\.\.\.\s*$/, " ").trimEnd();
+  if (!text) {
+    return "";
+  }
+  if (!/[\s,]$/.test(text)) {
+    text += " ";
+  }
+  return text;
+}
+
+function starterMentionsImageContent(starter, blockedTerms) {
+  const key = normalizeClientText(starter);
+  return blockedTerms.some((term) => term && key.includes(term));
+}
+
+function buildWritingHintGroups(session) {
+  const analysis = session.analysis || {};
+  const objectHints = uniqueWritingHints(
+    (analysis.objects || []).map((item) => item?.name || item)
+  ).slice(0, 3);
+  const actionHints = uniqueWritingHints(
+    (analysis.actions || []).map((item) => item?.verb || actionPhraseToVerb(item?.phrase || item))
+  ).slice(0, 2);
+  const structureHints = uniqueWritingHints([
+    ...buildStructureHints(analysis),
+    ...((analysis.sentence_patterns || []).map((item) => item?.pattern || "")),
+  ]).slice(0, 3);
+
+  const groups = [
+    { label: "Objects", items: objectHints },
+    { label: "Actions", items: actionHints },
+    { label: "Structures", items: structureHints },
+  ];
+  let total = groups.reduce((sum, group) => sum + group.items.length, 0);
+  if (total > 8) {
+    groups.forEach((group) => {
+      group.items = group.items.slice(0, Math.max(1, 8 - (total - group.items.length)));
+      total = groups.reduce((sum, nextGroup) => sum + nextGroup.items.length, 0);
+    });
+  }
+  return groups;
+}
+
+function actionPhraseToVerb(value) {
+  const text = cleanUiText(value);
+  const ingWord = text.match(/\b[a-z][a-z-]*ing\b/i)?.[0];
+  return ingWord || text.split(/\s+/).slice(0, 2).join(" ");
+}
+
+function buildStructureHints(analysis) {
+  const details = [analysis.environment, ...(analysis.environment_details || [])];
+  const hints = details
+    .map((item) => structureHintFromDetail(item))
+    .filter(Boolean);
+  return [...hints, "in the background", "in the foreground"];
+}
+
+function structureHintFromDetail(value) {
+  const text = cleanUiText(value).replace(/[.!?]+$/, "");
+  if (!text) {
+    return "";
+  }
+  const lower = text.toLowerCase();
+  if (/^on\s|^in\s|^near\s|^under\s|^behind\s|^beside\s|^with\s/.test(lower)) {
+    return text;
+  }
+  if (lower.includes("background")) {
+    return "in the background";
+  }
+  if (lower.includes("foreground") || lower.includes("front")) {
+    return "in the foreground";
+  }
+  if (/\bgrass|lawn|field|road|street|sidewalk|floor|ground|table|chair|bench\b/.test(lower)) {
+    return `on the ${lastUsefulNoun(lower)}`;
+  }
+  if (/\broom|kitchen|park|yard|garden|cafe|shop|market|water|river|beach\b/.test(lower)) {
+    return `in the ${lastUsefulNoun(lower)}`;
+  }
+  if (/\btree|car|building|window|bridge|wall\b/.test(lower)) {
+    return `near the ${lastUsefulNoun(lower)}`;
+  }
+  return "";
+}
+
+function lastUsefulNoun(text) {
+  const blocked = new Set(["front", "back", "bright", "busy", "open", "sunny", "foreground"]);
+  const words = text
+    .replace(/[^a-z\s-]/g, " ")
+    .split(/\s+/)
+    .filter((word) => word && !blocked.has(word));
+  return words.at(-1) || text;
+}
+
+function buildWritingSuggestions(session) {
+  return buildWritingHintGroups(session).flatMap((group) => group.items);
 }
 
 function renderFeedbackStep(session, feedback) {
@@ -658,152 +858,52 @@ function renderFeedbackStep(session, feedback) {
     return;
   }
 
-  const scores = feedback.scores || {};
   const totalScore = feedbackTotalScore(feedback);
-  const retryRequired = Boolean(feedback.retry_required);
   const latestAttempt = (state.sessionFlow.attempts || []).at(-1) || null;
-  const learnerText = latestAttempt?.text || state.sessionFlow.explanation || "";
-  const alternatives = Array.isArray(feedback.word_phrase_upgrades)
-    ? feedback.word_phrase_upgrades.slice(0, 3)
-    : Array.isArray(feedback.alternatives)
-    ? feedback.alternatives.slice(0, 3)
-    : [];
-  const didWell = cleanUiList(feedback.what_did_well, 2);
-  const missingDetails = Array.isArray(feedback.missing_details)
-    ? cleanUiList(feedback.missing_details, 3)
-    : [];
-  const fixThis = Array.isArray(feedback.fix_this_to_improve)
-    ? cleanUiList(feedback.fix_this_to_improve, 3)
-    : Array.isArray(feedback.improvements)
-    ? cleanUiList(feedback.improvements, 3)
-    : [];
-  const phraseUsage = feedback.phrase_usage || {};
-  const phraseUsageUsed = cleanUiList(phraseUsage.used, 5);
-  const phraseUsageSuggested = cleanUiList(phraseUsage.suggested, 3);
-  const phraseUsagePartial = cleanPhraseIssueList(phraseUsage.partial, true);
-  const phraseUsageMisused = cleanPhraseIssueList(phraseUsage.misused, false);
-  const betterVersion = retryRequired
-    ? ""
-    :
-    cleanUiText(feedback.better_version) ||
-    "Use your answer as the base, then add one stronger phrase and one clearer detail.";
+  const attemptCount = Math.max(1, (state.sessionFlow.attempts || []).length);
+  const latestText = latestAttempt?.text || state.sessionFlow.explanation || "";
+  const issue = buildFeedbackIssue(feedback, session);
+  const positive = buildFeedbackPositiveLine(feedback, totalScore, issue.focusAreas);
+  const inlineUpgrades = buildFeedbackInlineUpgrades(feedback, latestText, issue);
 
   els.sessionDetailPanel.innerHTML = `
-    <div class="journey-shell focused-step-shell">
-      ${renderStepProgress("feedback")}
-      <section class="feedback-screen-card">
-        <div class="score-hero coach-reveal" ${coachRevealStyle(0)}>
-          <p class="eyebrow">Step 3: Feedback</p>
-          <span class="score-label">Score</span>
-          <strong id="feedbackScoreValue" data-score="${totalScore}">0</strong>
-          <span>/100</span>
+    <div class="journey-shell focused-step-shell diagnosis-shell">
+      ${renderStepProgress("submit")}
+      <section class="feedback-screen-card fast-feedback-card diagnosis-card">
+        <div class="score-hero progressive-score-hero diagnosis-score-card coach-reveal" ${coachRevealStyle(0)}>
+          <span class="score-label">Attempt ${attemptCount}</span>
+          <div class="diagnosis-score-line">
+            <strong id="feedbackScoreValue" data-score="${totalScore}">0</strong>
+            <span>/100</span>
+          </div>
         </div>
 
-        <div class="score-grid score-grid-four coach-reveal" ${coachRevealStyle(0)}>
-          ${[
-            ["Vocab", scores.vocabulary || 0],
-            ["Structure", scores.structure || 0],
-            ["Clarity", scores.clarity || 0],
-            ["Depth", scores.depth || 0],
-          ]
-            .map(
-              ([label, value]) => `
-                <article class="status-pill">
-                  <span class="status-label">${escapeHtml(label)}</span>
-                  <strong class="status-value">${Number(value) || 0}/10</strong>
-                </article>
-              `
-            )
-            .join("")}
-        </div>
-
-        <section class="simple-feedback-section coach-reveal" ${coachRevealStyle(1)}>
-          <h4>Main issue</h4>
-          <p>${escapeHtml(cleanUiText(feedback.main_issue) || "Make your answer clearer and more specific.")}</p>
+        <section class="diagnosis-line-card diagnosis-good-card coach-reveal" ${coachRevealStyle(1)}>
+          <p><span aria-hidden="true">✓</span> Good: ${escapeHtml(positive)}</p>
         </section>
 
-        ${!retryRequired && didWell.length
-          ? `
-              <section class="simple-feedback-section coach-reveal" ${coachRevealStyle(2)}>
-                <h4>What you did well</h4>
-                <ul class="compact-list">
-                  ${didWell.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}
-                </ul>
-              </section>
-            `
-          : ""}
+        <section class="diagnosis-line-card diagnosis-issue-card coach-reveal" ${coachRevealStyle(2)}>
+          <p><strong>Main issue:</strong> ${escapeHtml(issue.message)}</p>
+        </section>
 
-        ${
-          retryRequired
-            ? `
-              <section class="simple-feedback-section coach-reveal" ${coachRevealStyle(2)}>
-                <h4>Try again</h4>
-                <ul class="compact-list">
-                  ${
-                    fixThis.length
-                      ? fixThis.map((item) => `<li>${escapeHtml(item)}</li>`).join("")
-                      : `<li>Mention the main subject.</li><li>Add one visible detail.</li>`
-                  }
-                </ul>
-              </section>
-            `
-            : ""
-        }
+        <section class="simple-feedback-section diagnosis-focus-card coach-reveal" ${coachRevealStyle(3)}>
+          <h4>Next focus</h4>
+          <div class="focus-area-row">
+            ${issue.focusAreas.map((item) => `<span class="focus-area-chip diagnosis-chip">${escapeHtml(item)}</span>`).join("")}
+          </div>
+        </section>
 
-        ${!retryRequired ? `<section class="simple-feedback-section coach-reveal" ${coachRevealStyle(3)}>
-          <h4>Fix this to improve</h4>
-          <ul class="compact-list">
-            ${
-              fixThis.length
-                ? fixThis.map((item) => `<li>${escapeHtml(item)}</li>`).join("")
-                : `<li>Add clearer details and one useful phrase.</li>`
-            }
-          </ul>
-        </section>` : ""}
+        ${renderInlineUpgradeSection(inlineUpgrades, 4)}
 
-        ${!retryRequired ? renderReusableLanguageFeedback({
-          phraseUsage,
-          used: phraseUsageUsed,
-          suggested: phraseUsageSuggested,
-          partial: phraseUsagePartial,
-          misused: phraseUsageMisused,
-          revealIndex: 4,
-        }) : ""}
-
-        ${!retryRequired ? (
-          missingDetails.length
-            ? `
-              <section class="simple-feedback-section coach-reveal" ${coachRevealStyle(5)}>
-                <h4>Missing details</h4>
-                <ul class="compact-list">
-                  ${missingDetails.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}
-                </ul>
-              </section>
-            `
-            : `
-              <section class="simple-feedback-section coach-reveal" ${coachRevealStyle(5)}>
-                <h4>Missing details</h4>
-                <p>No major visible detail is missing. Now focus on stronger language.</p>
-              </section>
-            `
-        ) : ""}
-
-        ${!retryRequired ? renderInlineUpgradeSection(learnerText, alternatives, 6) : ""}
-
-        ${!retryRequired ? `<section class="improved-version-box coach-reveal" ${coachRevealStyle(7)}>
-          <h4>Improved version</h4>
-          <p>${highlightSessionPhrases(betterVersion, session)}</p>
-        </section>` : ""}
-
-        <button id="feedbackPrimaryButton" class="primary-button journey-primary-button coach-reveal" ${coachRevealStyle(8)} type="button">
-          ${escapeHtml(feedback.cta_label || (retryRequired ? "Try Again" : "Improve My Answer"))}
+        <button id="feedbackPrimaryButton" class="primary-button journey-primary-button diagnosis-cta coach-reveal" ${coachRevealStyle(5)} type="button">
+          Improve My Answer
         </button>
       </section>
     </div>
   `;
 
   document.getElementById("feedbackPrimaryButton").addEventListener("click", () => {
-    renderSessionStep(retryRequired ? "write" : "improve");
+    renderSessionStep("improve");
     window.scrollTo({ top: 0, behavior: "smooth" });
   });
   animateNumber("feedbackScoreValue", totalScore);
@@ -813,18 +913,433 @@ function coachRevealStyle(index) {
   return `style="--reveal-delay: ${Math.min(index * 70, 560)}ms"`;
 }
 
-function renderInlineUpgradeSection(learnerText, alternatives, revealIndex = 0) {
-  const upgrades = buildInlineUpgrades(learnerText, alternatives).slice(0, 3);
+function renderInlineUpgradeSection(upgrades, revealIndex = 0) {
   if (!upgrades.length) {
     return "";
   }
 
   return `
-    <section class="simple-feedback-section inline-upgrade-section coach-reveal" ${coachRevealStyle(revealIndex)}>
+    <section class="simple-feedback-section inline-upgrade-section diagnosis-upgrade-card coach-reveal" ${coachRevealStyle(revealIndex)}>
       <h4>Improve your sentence</h4>
-      <p class="inline-upgrade-text">${renderInlineUpgradeText(learnerText, upgrades)}</p>
+      <ul class="inline-upgrade-list">
+        ${upgrades
+          .map(
+            (item) => `
+              <li>
+                ${
+                  item.kind === "add"
+                    ? `
+                      <span class="inline-upgrade-swap inline-upgrade-add">
+                        <span class="inline-upgrade-label">Add:</span>
+                        <strong>${escapeHtml(item.newText)}</strong>
+                      </span>
+                    `
+                    : `
+                      <span class="inline-upgrade-swap">
+                        <del>${escapeHtml(item.oldText)}</del>
+                        <span class="inline-upgrade-arrow">→</span>
+                        <strong>${escapeHtml(item.newText)}</strong>
+                      </span>
+                    `
+                }
+              </li>
+            `
+          )
+          .join("")}
+      </ul>
     </section>
   `;
+}
+
+function buildFeedbackPositiveLine(feedback, score, focusAreas = []) {
+  const coveragePositive = positiveLineFromCoverage(feedback, focusAreas);
+  if (coveragePositive) {
+    return coveragePositive;
+  }
+  const focusKeys = focusAreas.map(normalizeClientText).filter(Boolean);
+  const candidates = [
+    ...cleanUiList(feedback?.what_did_well || [], 2),
+    cleanUiText(feedback?.what_improved),
+  ].filter((item) => !focusKeys.some((focus) => normalizeClientText(item).includes(focus)));
+  const positive = candidates.map(firstSentence).map(shortCoachSentence).find(Boolean);
+  if (positive) {
+    return stripLeadingFeedbackLabel(positive);
+  }
+  return score >= 45 ? "you described the basic scene clearly" : "you started with your own observation";
+}
+
+function buildFeedbackIssue(feedback, session) {
+  const missingTypes = missingFeedbackTypes(feedback);
+  const focusAreas = focusAreasFromMissingTypes(missingTypes);
+  const additions = buildAdditiveSuggestions(feedback, session, missingTypes);
+  const coveredTypes = coveredFeedbackTypes(feedback);
+  const describedBackground = coveredTypes.some((type) => ["background", "setting"].includes(type));
+
+  if (missingTypes.includes("main_subject") && missingTypes.includes("main_action")) {
+    return {
+      message: describedBackground
+        ? "you described the background but missed the main subject and action."
+        : "missing the main subject and main action.",
+      focusAreas: ["main subject", "main action"],
+      additions,
+    };
+  }
+  if (missingTypes.includes("main_subject")) {
+    return {
+      message: "you missed the main subject.",
+      focusAreas: ["main subject"],
+      additions,
+    };
+  }
+  if (missingTypes.includes("main_action")) {
+    return {
+      message: "you missed the main action.",
+      focusAreas: ["main action"],
+      additions,
+    };
+  }
+  if (missingTypes.includes("foreground")) {
+    return {
+      message: "your answer needs more coverage of the foreground.",
+      focusAreas: ["foreground"],
+      additions,
+    };
+  }
+  if (missingTypes.includes("background") || missingTypes.includes("setting")) {
+    return {
+      message: "you need to add the setting or background.",
+      focusAreas: ["background"],
+      additions,
+    };
+  }
+  if (missingTypes.includes("detail")) {
+    return {
+      message: "your description is too partial.",
+      focusAreas: focusAreas.length ? focusAreas : ["visible detail"],
+      additions,
+    };
+  }
+
+  const state = getProgressiveCoverageState(feedback);
+  if (!state.naturalOk || !state.notListOk) {
+    return {
+      message: "your sentence needs clearer wording.",
+      focusAreas: ["wording"],
+      additions: [],
+    };
+  }
+
+  const direct = shortCoachSentence(firstSentence(cleanUiText(feedback?.main_issue)));
+  if (direct && !/\bcovered\b/i.test(direct)) {
+    const directFocus = cleanUiList(feedback?.focus_areas || [], 3);
+    return {
+      message: stripLeadingFeedbackLabel(direct),
+      focusAreas: directFocus.length ? directFocus : ["wording"],
+      additions: [],
+    };
+  }
+
+  const fix = shortCoachSentence(firstSentence(cleanUiList(feedback?.fix_this_to_improve || feedback?.improvements || [], 1)[0]));
+  return {
+    message: stripLeadingFeedbackLabel(fix) || "add one clearer missing detail.",
+    focusAreas: focusAreas.length ? focusAreas : ["visible detail"],
+    additions,
+  };
+}
+
+function buildFeedbackInlineUpgrades(feedback, learnerText, issue = null) {
+  if (issue?.additions?.length) {
+    return issue.additions.slice(0, 2).map((item) => ({
+      kind: "add",
+      newText: item,
+    }));
+  }
+  const upgrades = Array.isArray(feedback?.word_phrase_upgrades)
+    ? feedback.word_phrase_upgrades
+    : Array.isArray(feedback?.alternatives)
+    ? feedback.alternatives
+    : [];
+  const direct = buildInlineUpgrades(learnerText, upgrades).slice(0, 3);
+  if (direct.length) {
+    return direct;
+  }
+  const loose = upgrades
+    .map((item) => ({
+      oldText: cleanUiText(item?.instead_of || item?.old),
+      newText: cleanUiText(item?.use || item?.new || item?.strong),
+    }))
+    .filter((item) => item.oldText && item.newText)
+    .filter((item) => !/^(simple wording|general word|short sentence|basic wording|instead)$/i.test(item.oldText))
+    .slice(0, 3);
+  if (loose.length) {
+    return loose;
+  }
+  return buildQuickInlineUpgrade(
+    learnerText,
+    upgrades,
+    feedback?.better_version || feedback?.improvedVersion || "",
+    cleanUiList(feedback?.fix_this_to_improve || feedback?.improvements || [], 1)[0] || ""
+  ).slice(0, 1);
+}
+
+function stripLeadingFeedbackLabel(value) {
+  return cleanUiText(value).replace(/^(good|main issue|issue|focus|next):\s*/i, "");
+}
+
+function shortCoachSentence(value) {
+  const text = cleanUiText(value).replace(/\s+/g, " ").trim();
+  if (!text) {
+    return "";
+  }
+  return text
+    .replace(/\s+(?:so|because)\s+.*$/i, ".")
+    .replace(/\s+and your score is.*$/i, ".")
+    .replace(/\s+so your score is.*$/i, ".")
+    .replace(/\s*Your score is capped.*$/i, "")
+    .trim();
+}
+
+function positiveLineFromCoverage(feedback, focusAreas = []) {
+  const covered = coveredFeedbackTypes(feedback);
+  const focusKeys = new Set(focusAreas.map(normalizeClientText));
+  const safeCovered = covered.filter((type) => !focusKeys.has(normalizeClientText(typeLabelForFeedbackType(type))));
+  if (safeCovered.includes("background") || safeCovered.includes("setting")) {
+    return "you described the background and setting clearly.";
+  }
+  if (safeCovered.includes("main_subject") && safeCovered.includes("main_action")) {
+    return "you mentioned the main subject and action.";
+  }
+  if (safeCovered.includes("main_subject")) {
+    return "you mentioned the main subject.";
+  }
+  if (safeCovered.includes("foreground") || safeCovered.includes("detail")) {
+    return "you included a useful visible detail.";
+  }
+  return "";
+}
+
+function missingFeedbackTypes(feedback) {
+  const coverage = feedback?.coverage || {};
+  const parts = Array.isArray(coverage.imageParts) ? coverage.imageParts : [];
+  const types = [];
+  if (coverage.mainSubjectMentioned === false) types.push("main_subject");
+  if (coverage.mainActionMentioned === false) types.push("main_action");
+  parts.forEach((part) => {
+    const type = normalizeCoverageType(part?.type || part?.name || part?.description);
+    const status = String(part?.coverageStatus || "").toLowerCase();
+    const missing = part?.covered === false || ["missing", "inaccurate"].includes(status);
+    if (type && missing) {
+      types.push(type);
+    }
+  });
+  cleanUiList(feedback?.missing_details || coverage.missingMajorParts || [], 5).forEach((item) => {
+    const type = normalizeCoverageType(item);
+    if (type) types.push(type);
+  });
+  return uniqueWritingHints(types);
+}
+
+function coveredFeedbackTypes(feedback) {
+  const parts = Array.isArray(feedback?.coverage?.imageParts) ? feedback.coverage.imageParts : [];
+  return uniqueWritingHints(
+    parts
+      .filter(isCoveragePartCovered)
+      .map((part) => normalizeCoverageType(part?.type || part?.name || part?.description))
+      .filter(Boolean)
+  );
+}
+
+function normalizeCoverageType(value) {
+  const text = normalizeClientText(value);
+  if (!text) return "";
+  if (text.includes("main subject") || text.includes("person") || text.includes("people") || text.includes("subject")) return "main_subject";
+  if (text.includes("main action") || text.includes("action") || text.includes("doing") || text.includes("mowing") || text.includes("riding")) return "main_action";
+  if (text.includes("foreground") || text.includes("front")) return "foreground";
+  if (text.includes("background")) return "background";
+  if (text.includes("setting") || text.includes("environment") || text.includes("context")) return "setting";
+  if (text.includes("object") || text.includes("detail")) return "detail";
+  return "";
+}
+
+function focusAreasFromMissingTypes(types) {
+  const labels = types.map(typeLabelForFeedbackType).filter(Boolean);
+  return uniqueWritingHints(labels).slice(0, 3);
+}
+
+function typeLabelForFeedbackType(type) {
+  const labels = {
+    main_subject: "main subject",
+    main_action: "main action",
+    foreground: "foreground",
+    background: "background",
+    setting: "background",
+    detail: "visible detail",
+  };
+  return labels[type] || "";
+}
+
+function buildAdditiveSuggestions(feedback, session, missingTypes) {
+  const suggestions = [];
+  missingTypes.forEach((type) => {
+    const part = findMissingCoveragePart(feedback, type);
+    const fallback = additiveFallbackForType(type, session);
+    const detail = cleanUiText(part?.description || part?.name || fallback);
+    if (detail) {
+      suggestions.push(detail);
+    }
+  });
+  return uniqueWritingHints(suggestions).slice(0, 2);
+}
+
+function findMissingCoveragePart(feedback, normalizedType) {
+  const parts = Array.isArray(feedback?.coverage?.imageParts) ? feedback.coverage.imageParts : [];
+  return parts.find((part) => {
+    const type = normalizeCoverageType(part?.type || part?.name || part?.description);
+    const status = String(part?.coverageStatus || "").toLowerCase();
+    return type === normalizedType && (part?.covered === false || ["missing", "inaccurate"].includes(status));
+  });
+}
+
+function additiveFallbackForType(type, session) {
+  const analysis = session?.analysis || {};
+  if (type === "main_subject") {
+    return cleanUiText((analysis.objects || [])[0]?.name || (analysis.objects || [])[0]) || "the main subject";
+  }
+  if (type === "main_action") {
+    return cleanUiText((analysis.actions || [])[0]?.phrase || (analysis.actions || [])[0]?.verb || (analysis.actions || [])[0]) || "what the subject is doing";
+  }
+  if (type === "foreground") return "one foreground detail";
+  if (type === "background" || type === "setting") return cleanUiText(analysis.environment) || "the background";
+  return cleanUiText((analysis.environment_details || [])[0]) || "one visible detail";
+}
+
+function renderSpecificGuidance(guidance, revealIndex = 0, { showStructure = true } = {}) {
+  const words = cleanUiList(guidance?.words || [], 7);
+  const nouns = cleanUiList(guidance?.nouns || [], 5);
+  const verbs = cleanUiList(guidance?.verbs || [], 4);
+  const details = cleanUiList(guidance?.details || [], 5);
+  const hintChips = uniqueWritingHints([...details, ...words]).slice(0, 8);
+  const sentenceStarter = cleanUiText(guidance?.sentence_starter);
+  if (!words.length && !nouns.length && !verbs.length && !details.length && !sentenceStarter) {
+    return "";
+  }
+  return `
+    <section class="simple-feedback-section exact-guidance-section coach-reveal" ${coachRevealStyle(revealIndex)}>
+      <h4>Exact hints</h4>
+      ${
+        hintChips.length
+          ? `
+            <div>
+              <span class="field-label">Try adding</span>
+              <div class="exact-hint-row">
+                ${hintChips.map((item) => `<span class="exact-hint-chip">${escapeHtml(item)}</span>`).join("")}
+              </div>
+            </div>
+          `
+          : ""
+      }
+      ${
+        nouns.length || verbs.length
+          ? `
+            <div class="exact-hint-columns">
+              ${
+                nouns.length
+                  ? `<div><span class="field-label">Nouns</span><p>${escapeHtml(nouns.join(", "))}</p></div>`
+                  : ""
+              }
+              ${
+                verbs.length
+                  ? `<div><span class="field-label">Verbs</span><p>${escapeHtml(verbs.join(", "))}</p></div>`
+                  : ""
+              }
+            </div>
+          `
+          : ""
+      }
+      ${
+        showStructure && sentenceStarter
+          ? `
+            <div class="sentence-frame-box">
+              <span class="field-label">Try this structure</span>
+              <p>${escapeHtml(sentenceStarter)}</p>
+            </div>
+          `
+          : ""
+      }
+    </section>
+  `;
+}
+
+function renderDimensionTracker(items, revealIndex = 0) {
+  const tracker = Array.isArray(items) ? items : [];
+  if (!tracker.length) {
+    return "";
+  }
+  return `
+    <section class="simple-feedback-section dimension-tracker-section coach-reveal" ${coachRevealStyle(revealIndex)}>
+      <h4>Image explanation built so far</h4>
+      <div class="dimension-tracker-grid">
+        ${tracker
+          .map(
+            (item) => `
+              <span class="dimension-chip ${item.complete ? "complete" : ""}">
+                <span>${item.complete ? "✓" : "○"}</span>
+                ${escapeHtml(item.label || item.key || "")}
+              </span>
+            `
+          )
+          .join("")}
+      </div>
+    </section>
+  `;
+}
+
+function buildProgressiveSuggestions(feedback, session) {
+  const direct = cleanUiList(feedback?.actionable_suggestions || [], 2);
+  if (direct.length) {
+    return direct;
+  }
+  const challenge = cleanUiText(feedback?.specific_guidance?.next_challenge || feedback?.next_challenge);
+  if (challenge) {
+    return [challenge];
+  }
+  return buildGuidedNextSteps(feedback, session).slice(0, 2);
+}
+
+function articulationLevelFromScore(score) {
+  if (score < 45) return "Basic";
+  if (score < 60) return "Clear";
+  if (score < 75) return "Descriptive";
+  if (score < 88) return "Natural";
+  return "Fluent";
+}
+
+function buildQuickInlineUpgrade(learnerText, alternatives, betterVersion = "", fallbackFix = "") {
+  const directUpgrade = buildInlineUpgrades(learnerText, alternatives).slice(0, 1);
+  if (directUpgrade.length) {
+    return directUpgrade;
+  }
+
+  const original = firstSentence(learnerText);
+  const improved = firstSentence(betterVersion);
+  if (original && improved && normalizeClientText(original) !== normalizeClientText(improved)) {
+    return [
+      {
+        oldText: original,
+        newText: improved,
+      },
+    ];
+  }
+  const fix = firstSentence(fallbackFix);
+  if (!original || !fix) {
+    return [];
+  }
+  return [
+    {
+      oldText: original,
+      newText: fix,
+    },
+  ];
 }
 
 function buildInlineUpgrades(learnerText, alternatives) {
@@ -840,7 +1355,17 @@ function buildInlineUpgrades(learnerText, alternatives) {
     }))
     .filter((item) => item.oldText && item.newText)
     .filter((item) => !/^(simple wording|general word|short sentence|basic wording|instead)$/i.test(item.oldText))
-    .filter((item) => text.toLowerCase().includes(item.oldText.toLowerCase()))
+    .map((item) => {
+      const index = text.toLowerCase().indexOf(item.oldText.toLowerCase());
+      if (index === -1) {
+        return null;
+      }
+      return {
+        ...item,
+        oldText: text.slice(index, index + item.oldText.length),
+      };
+    })
+    .filter(Boolean)
     .filter((item) => {
       const key = normalizeClientText(item.oldText);
       if (!key || seen.has(key)) {
@@ -852,54 +1377,13 @@ function buildInlineUpgrades(learnerText, alternatives) {
     .sort((a, b) => b.oldText.length - a.oldText.length);
 }
 
-function renderInlineUpgradeText(learnerText, upgrades) {
-  const excerpt = sentenceForInlineUpgrades(learnerText, upgrades);
-  if (!excerpt) {
-    return "";
-  }
-  const matches = [];
-  const lowerExcerpt = excerpt.toLowerCase();
-  upgrades.forEach((upgrade) => {
-    const index = lowerExcerpt.indexOf(upgrade.oldText.toLowerCase());
-    if (index === -1) {
-      return;
-    }
-    const end = index + upgrade.oldText.length;
-    if (matches.some((match) => index < match.end && end > match.start)) {
-      return;
-    }
-    matches.push({ ...upgrade, start: index, end });
-  });
-  if (!matches.length) {
-    return escapeHtml(excerpt);
-  }
-  matches.sort((a, b) => a.start - b.start);
-
-  let html = "";
-  let cursor = 0;
-  matches.forEach((match) => {
-    html += escapeHtml(excerpt.slice(cursor, match.start));
-    html += `<span class="inline-upgrade-swap"><del>${escapeHtml(
-      excerpt.slice(match.start, match.end)
-    )}</del><span class="inline-upgrade-arrow">→</span><strong>${escapeHtml(
-      match.newText
-    )}</strong></span>`;
-    cursor = match.end;
-  });
-  html += escapeHtml(excerpt.slice(cursor));
-  return html;
-}
-
-function sentenceForInlineUpgrades(learnerText, upgrades) {
-  const text = String(learnerText || "").replace(/\s+/g, " ").trim();
+function firstSentence(value) {
+  const text = cleanUiText(value);
   if (!text) {
     return "";
   }
-  const sentences = text.match(/[^.!?]+[.!?]?/g) || [text];
-  const matchedSentence = sentences.find((sentence) =>
-    upgrades.some((upgrade) => sentence.toLowerCase().includes(upgrade.oldText.toLowerCase()))
-  );
-  return (matchedSentence || sentences[0] || text).trim();
+  const match = text.match(/^[^.!?]+[.!?]?/);
+  return (match ? match[0] : text).trim();
 }
 
 function renderReusableLanguageFeedback({ phraseUsage, used, suggested, partial, misused, revealIndex = 0 }) {
@@ -969,99 +1453,45 @@ function renderReusableLanguageFeedback({ phraseUsage, used, suggested, partial,
 function renderImproveStep(session) {
   const attempts = state.sessionFlow.attempts || [];
   const latestAttempt = attempts[attempts.length - 1] || null;
-  const previousAttempt = attempts[attempts.length - 2] || null;
   const latestFeedback = latestAttempt?.feedback || state.sessionFlow.feedback || {};
   const latestText = latestAttempt?.text || state.sessionFlow.explanation || "";
   const rewriteDraft = latestText;
-  const rewriteCount = Math.max(0, attempts.length - 1);
-  const shouldSuggestQuiz = attempts.length >= 2;
-  const latestScore = latestAttempt ? latestAttempt.score : feedbackTotalScore(latestFeedback);
-  const previousScore = previousAttempt ? previousAttempt.score : null;
-  const scoreDelta = previousScore === null ? 0 : latestScore - previousScore;
-  const phraseSuggestions = buildImprovePhraseSuggestions(session, latestFeedback, latestText).slice(0, 3);
-  const betterVersion = latestFeedback.better_version || "";
+  const attemptNumber = attempts.length;
+  const ready = isExplanationReady(latestFeedback);
+  const showMoveOption = ready;
+  const showEditor = !ready;
+  const issue = buildFeedbackIssue(latestFeedback, session);
+  const currentFocus = buildImproveCurrentFocus(issue);
+  const hintGroups = buildImproveHintGroups(session, latestFeedback, issue, latestText);
 
   els.sessionDetailPanel.innerHTML = `
     <div class="journey-shell focused-step-shell">
       ${renderStepProgress("improve")}
-      <section class="focused-writing-card">
-        <img class="focused-image-preview" src="${session.image_url}" alt="Image to describe">
+      <section class="focused-writing-card improve-action-card">
+        <div class="focused-image-frame">
+          <img class="focused-image-preview" src="${session.image_url}" alt="Image to describe">
+        </div>
         <div class="focused-copy">
-          <p class="eyebrow">Step 4: Improve</p>
-          <h3>Make your answer stronger</h3>
+          <p class="eyebrow">${ready ? "Ready for quiz" : `Refinement ${Math.max(1, attemptNumber)}`}</p>
+          <h3>${ready ? "Excellent articulation. Let’s reinforce it." : "Improve your answer"}</h3>
         </div>
-        ${renderScoreProgress(attempts)}
-        ${
-          attempts.length > 1
-            ? `
-              <div class="improvement-comparison-box">
-                <strong>${previousScore} → ${latestScore}</strong>
-                <span>${scoreDelta >= 0 ? `+${scoreDelta} points` : `${scoreDelta} points`}</span>
-              </div>
-            `
-            : ""
-        }
-        ${renderTargetedFeedback(latestFeedback, { scoreDelta, rewriteCount })}
-        ${
-          betterVersion
-            ? `
-              <section class="improved-version-box">
-                <h4>Reference version</h4>
-                <p>${highlightSessionPhrases(betterVersion, session)}</p>
-              </section>
-            `
-            : ""
-        }
-        <div class="previous-answer-box">
-          <span class="field-label">Previous answer</span>
-          <p>${escapeHtml(latestText)}</p>
-        </div>
-        ${
-          phraseSuggestions.length
-            ? `
-              <section class="phrase-reuse-panel">
-                <span class="field-label">Try to include at least 1–2 of these phrases</span>
-                <div class="mini-suggestion-row">
-                  ${phraseSuggestions
-                    .map(
-                      (phrase, index) => `
-                        <button class="phrase-chip phrase-insert-chip ${
-                          !latestFeedback?.phrase_usage?.used?.length && index < 2 ? "priority" : ""
-                        }" type="button" data-insert-phrase="${escapeHtml(phrase)}">
-                          ${escapeHtml(phrase)}
-                        </button>
-                      `
-                    )
-                    .join("")}
-                </div>
-              </section>
-            `
-            : ""
-        }
-        <textarea
-          id="learnerImproveInput"
-          class="focused-writing-input"
-          rows="10"
-          placeholder="Improve your answer here..."
-        >${escapeHtml(rewriteDraft)}</textarea>
-        ${
-          shouldSuggestQuiz
-            ? `
-              <div class="move-forward-box">
-                <strong>You’ve improved a lot.</strong>
-                <p>Want to move to quiz or keep refining?</p>
-                <div class="journey-choice-row">
-                  <button id="continueToQuizButton" class="primary-button" type="button">Continue to Quiz</button>
-                  <button id="submitImproveButton" class="ghost-button" type="button">Keep Improving</button>
-                </div>
-              </div>
-            `
-            : `
-              <button id="submitImproveButton" class="primary-button journey-primary-button" type="button">
-                Submit Improved Version
-              </button>
-            `
-        }
+        ${showEditor ? renderImproveEditor({ rewriteDraft, currentFocus, hintGroups }) : ""}
+        ${showEditor ? `
+          <button id="submitImproveButton" class="primary-button journey-primary-button" type="button">
+            Submit Improved Version
+          </button>
+        ` : ""}
+        ${showMoveOption ? `
+          <div class="move-forward-box">
+            <strong>${ready ? "Ready for the quiz" : "You can keep building or move on"}</strong>
+            <p class="muted">${
+              ready
+                ? "Your explanation covers the main image well enough to practice it."
+                : "Keep refining the current focus before the quiz."
+            }</p>
+            <button id="continueToQuizButton" class="primary-button" type="button">Continue to Quiz</button>
+          </div>
+        ` : ""}
       </section>
     </div>
   `;
@@ -1080,6 +1510,7 @@ function renderImproveStep(session) {
   els.sessionDetailPanel.querySelectorAll("[data-insert-phrase]").forEach((button) => {
     button.addEventListener("click", () => {
       insertPhraseIntoImproveInput(button.dataset.insertPhrase || "");
+      playTapAnimation(button);
       button.classList.add("selected");
     });
   });
@@ -1088,13 +1519,280 @@ function renderImproveStep(session) {
   }, 50);
 }
 
-function buildWritingSuggestions(session) {
-  const phrases = session.analysis.phrases || [];
-  const patterns = session.analysis.sentence_patterns || [];
+function renderImproveEditor({ rewriteDraft, currentFocus, hintGroups }) {
+  return `
+    <section class="improve-focus-card coach-reveal" ${coachRevealStyle(0)}>
+      <span class="field-label">Current Focus</span>
+      <p>${escapeHtml(currentFocus)}</p>
+    </section>
+    ${renderImproveHintsCard(hintGroups)}
+    <textarea
+      id="learnerImproveInput"
+      class="focused-writing-input guided-writing-input"
+      rows="6"
+      maxlength="900"
+      placeholder="Keep editing your explanation here..."
+    >${escapeHtml(rewriteDraft)}</textarea>
+  `;
+}
+
+function renderImproveHintsCard(groups) {
+  const visibleGroups = groups.filter((group) => group.items.length);
+  if (!visibleGroups.length) {
+    return "";
+  }
+  return `
+    <section class="improve-hints-card coach-reveal" ${coachRevealStyle(1)}>
+      <h4>Hints</h4>
+      <div class="improve-hint-grid">
+        ${visibleGroups
+          .map(
+            (group) => `
+              <div class="improve-hint-group">
+                <span class="field-label">${escapeHtml(group.label)}</span>
+                <div class="mini-suggestion-row">
+                  ${group.items
+                    .map(
+                      (item) => `
+                        <button class="phrase-chip phrase-insert-chip improve-hint-chip" type="button" data-insert-phrase="${escapeHtml(item)}">
+                          ${escapeHtml(item)}
+                        </button>
+                      `
+                    )
+                    .join("")}
+                </div>
+              </div>
+            `
+          )
+          .join("")}
+      </div>
+    </section>
+  `;
+}
+
+function buildImproveCurrentFocus(issue) {
+  const focus = normalizeClientText(issue?.focusAreas?.[0] || issue?.message || "");
+  if (focus.includes("main subject")) return "Describe the main subject";
+  if (focus.includes("main action")) return "Describe the action";
+  if (focus.includes("background")) return "Add background detail";
+  if (focus.includes("foreground")) return "Improve positioning";
+  if (focus.includes("visible detail") || focus.includes("object")) return "Mention important objects";
+  if (focus.includes("setting") || focus.includes("environment")) return "Explain the environment";
+  if (focus.includes("mood") || focus.includes("atmosphere")) return "Add atmosphere";
+  if (focus.includes("wording") || focus.includes("vocabulary")) return "Use stronger vocabulary";
+  return "Make the description more complete";
+}
+
+function buildImproveHintGroups(session, feedback, issue, currentText) {
+  const analysis = session?.analysis || {};
+  const guidance = feedback?.specific_guidance || {};
+  const focus = normalizeClientText(issue?.focusAreas?.join(" ") || issue?.message || "");
+  const objectHints = cleanReusableHints([
+    ...((analysis.objects || []).map((item) => item?.name || item)),
+    ...cleanUiList(guidance.nouns || [], 5),
+    ...(issue?.additions || []),
+  ], "noun");
+  const actionHints = cleanReusableHints([
+    ...((analysis.actions || []).map((item) => item?.verb || actionPhraseToVerb(item?.phrase || item))),
+    ...((analysis.actions || []).map((item) => item?.phrase || "")),
+    ...cleanUiList(guidance.verbs || [], 5),
+  ], "verb");
+  const adjectiveHints = cleanReusableHints([
+    ...((analysis.vocabulary || []).map((item) => item?.word || item?.phrase || item)),
+    ...cleanUiList(guidance.words || [], 5),
+  ], "adjective").filter((item) => !objectHints.some((noun) => normalizeClientText(noun).includes(normalizeClientText(item))));
+  const phraseHints = cleanReusableHints([
+    ...cleanUiList(guidance.details || [], 5),
+    ...cleanUiList(guidance.words || [], 5),
+    ...buildImprovePhraseSuggestions(session, feedback, currentText),
+    ...buildStructureHints(analysis),
+  ], "phrase");
+  const structures = cleanSentenceFrames([
+    cleanUiText(guidance.sentence_starter),
+    ...cleanUiList(feedback?.reusable_sentence_structures || [], 2),
+    ...((analysis.sentence_patterns || []).map((item) => item?.pattern || "")),
+    defaultImproveStructureForFocus(focus),
+  ]);
+
+  const nounLimit = focus.includes("subject") || focus.includes("object") ? 5 : 3;
+  const verbLimit = focus.includes("action") || focus.includes("happening") ? 5 : 3;
+  const phraseLimit = focus.includes("background") || focus.includes("foreground") ? 4 : 3;
+  const structureLimit = focus.includes("wording") || focus.includes("vocabulary") ? 2 : 1;
+  const adjectiveLimit = focus.includes("wording") || focus.includes("vocabulary") || focus.includes("atmosphere") ? 4 : 2;
+
   return [
-    ...phrases.slice(0, 2).map((item) => item.phrase),
-    ...patterns.slice(0, 1).map((item) => item.pattern),
-  ].filter(Boolean);
+    { label: "Nouns", items: objectHints.slice(0, nounLimit) },
+    { label: "Verbs", items: actionHints.slice(0, verbLimit) },
+    { label: "Adjectives", items: adjectiveHints.slice(0, adjectiveLimit) },
+    { label: "Useful phrases", items: phraseHints.slice(0, phraseLimit) },
+    { label: "Structures", items: structures.slice(0, structureLimit) },
+  ];
+}
+
+function defaultImproveStructureForFocus(focus) {
+  if (focus.includes("action") || focus.includes("happening")) {
+    return "The person is ___";
+  }
+  if (focus.includes("background")) {
+    return "In the background, there are ___";
+  }
+  if (focus.includes("subject")) {
+    return "The main subject is ___";
+  }
+  return "The scene shows ___";
+}
+
+function buildImproveStructureSuggestion(feedback, guidance = {}) {
+  return (
+    cleanUiText(guidance?.sentence_starter) ||
+    cleanUiList(feedback?.reusable_sentence_structures || [], 1)[0] ||
+    "In the foreground, there is ..., while the background shows ..."
+  );
+}
+
+function simplifyHintChip(value) {
+  return cleanUiText(value)
+    .replace(/^(mention|add|use|try|include)\s+(this\s+)?/i, "")
+    .replace(/^(the\s+)?(main\s+)?(subject|action|setting|context):\s*/i, "")
+    .replace(/[.!?]+$/, "");
+}
+
+function cleanReusableHints(values, kind = "phrase") {
+  return uniqueWritingHints(values.flatMap((value) => reusableHintChunks(value, kind)));
+}
+
+function reusableHintChunks(value, kind) {
+  const text = simplifyHintChip(value)
+    .replace(/^there (is|are)\s+/i, "")
+    .replace(/^a\s+|^an\s+|^the\s+/i, "")
+    .trim();
+  if (!text) {
+    return [];
+  }
+  if (kind === "phrase") {
+    const positioning = extractPositioningPhrases(text);
+    if (positioning.length) {
+      return positioning;
+    }
+  }
+  const chunks = text
+    .split(/\s*(?:,|;|\band\b|\bwhile\b|\bwith\b)\s*/i)
+    .map((item) => item.trim())
+    .filter(Boolean);
+  return chunks
+    .map((item) => item.replace(/^a\s+|^an\s+|^the\s+/i, "").replace(/[.!?]+$/g, "").trim())
+    .filter((item) => isReusableHint(item, kind));
+}
+
+function extractPositioningPhrases(value) {
+  const text = cleanUiText(value).toLowerCase();
+  const matches = text.match(/\b(?:in|on|near|along|beside|behind|around|across|through|under|next to)\s+(?:the\s+)?[a-z]+(?:\s+[a-z]+){0,3}/g) || [];
+  return matches
+    .map((item) => item.trim())
+    .filter((item) => isReusableHint(item, "phrase"));
+}
+
+function isReusableHint(value, kind) {
+  const text = cleanUiText(value);
+  const words = text.split(/\s+/).filter(Boolean);
+  if (!text || words.length > 6) {
+    return false;
+  }
+  if (/[.!?]/.test(text) || /\b(the image|the scene|this picture|there is|there are)\b/i.test(text)) {
+    return false;
+  }
+  if (kind === "verb" && words.length > 4) {
+    return false;
+  }
+  if (kind === "adjective" && (words.length > 2 || /\b(in|on|near|along|with|the)\b/i.test(text))) {
+    return false;
+  }
+  return true;
+}
+
+function cleanSentenceFrames(values) {
+  return uniqueWritingHints(values.map(normalizeSentenceFrame).filter(Boolean));
+}
+
+function normalizeSentenceFrame(value) {
+  const text = cleanUiText(value).replace(/[.!?]+$/g, "").trim();
+  if (!text) {
+    return "";
+  }
+  if (!/_{2,}|\.{3}|\[[^\]]+\]/.test(text)) {
+    return "";
+  }
+  const frame = text.replace(/\.{3}|\[[^\]]+\]/g, "___");
+  const words = frame.split(/\s+/).filter(Boolean);
+  if (words.length > 10 || !frame.includes("___")) {
+    return "";
+  }
+  return frame;
+}
+
+function uniqueWritingHints(values) {
+  const seen = new Set();
+  const blocked = new Set(["image", "photo", "picture", "thing", "something"]);
+  const hints = [];
+  values.forEach((value) => {
+    const text = cleanUiText(value).replace(/[.!?]+$/, "");
+    const key = normalizeClientText(text);
+    if (!text || !key || blocked.has(key) || seen.has(key)) {
+      return;
+    }
+    seen.add(key);
+    hints.push(text);
+  });
+  return hints;
+}
+
+function insertWritingHint(hint) {
+  const input = document.getElementById("learnerExplanationInput");
+  const text = cleanUiText(hint);
+  if (!input || !text) {
+    return;
+  }
+  if (normalizeClientText(input.value).startsWith(normalizeClientText(text))) {
+    input.focus();
+    return;
+  }
+  const value = input.value.trimEnd();
+  const needsSpace = value && !/[\s-]$/.test(input.value);
+  input.value = `${value}${needsSpace ? " " : ""}${text}`;
+  limitWritingInput({ target: input });
+  input.focus();
+}
+
+function replaceWritingStarter(starter) {
+  const input = document.getElementById("learnerExplanationInput");
+  const text = normalizeSentenceStarter(starter);
+  if (!input || !text) {
+    return;
+  }
+  const knownStarters = getWritingStarters(state.currentSession || {})
+    .map((item) => normalizeClientText(item))
+    .filter(Boolean);
+  const currentValue = input.value || "";
+  const currentKey = normalizeClientText(currentValue);
+  const currentStarter = knownStarters.find((item) => currentKey.startsWith(item));
+  if (!currentStarter) {
+    insertWritingHint(text);
+    return;
+  }
+  const rawStarter = getWritingStarters(state.currentSession || {}).find(
+    (item) => normalizeClientText(item) === currentStarter
+  );
+  input.value = `${text}${currentValue.slice((rawStarter || "").length).trimStart()}`;
+  input.focus();
+}
+
+function limitWritingInput(event) {
+  const input = event.target;
+  const sentences = String(input.value || "").match(/[^.!?]+[.!?]*/g) || [];
+  if (sentences.length <= 6) {
+    return;
+  }
+  input.value = sentences.slice(0, 6).join("").trimStart();
 }
 
 function buildImprovePhraseSuggestions(session, feedback, currentText) {
@@ -1108,6 +1806,212 @@ function buildImprovePhraseSuggestions(session, feedback, currentText) {
     .filter((phrase, index, list) => list.findIndex((item) => normalizeClientText(item) === normalizeClientText(phrase)) === index)
     .filter((phrase) => !normalizeClientText(currentText).includes(normalizeClientText(phrase)))
     .slice(0, 5);
+}
+
+function buildImproveHints(feedback) {
+  const upgrades = Array.isArray(feedback?.word_phrase_upgrades)
+    ? feedback.word_phrase_upgrades
+    : Array.isArray(feedback?.alternatives)
+    ? feedback.alternatives
+    : [];
+  const upgradeHints = upgrades
+    .map((item) => cleanUiText(item?.use || item?.new || item?.strong))
+    .filter(Boolean);
+  const phraseHints = cleanUiList(feedback?.phrase_usage?.suggested || [], 2);
+  return uniqueWritingHints([...upgradeHints, ...phraseHints]).slice(0, 2);
+}
+
+function buildImproveSuggestionItems(feedback) {
+  const fixes = cleanUiList(feedback?.fix_this_to_improve || feedback?.improvements || [], 3);
+  const missing = cleanUiList(feedback?.missing_details || [], 2).map(
+    (item) => `Add ${item}.`
+  );
+  return uniqueWritingHints([...fixes, ...missing])
+    .map(firstSentence)
+    .filter(Boolean)
+    .slice(0, 2);
+}
+
+function isExplanationReady(feedback) {
+  if (!feedback) {
+    return false;
+  }
+  if (typeof feedback.is_ready === "boolean") {
+    return feedback.is_ready;
+  }
+  if (typeof feedback?.readiness?.ready === "boolean") {
+    return feedback.readiness.ready;
+  }
+  const state = getProgressiveCoverageState(feedback);
+  const coverage = feedback.coverage || {};
+  const coveragePercent = Number(coverage.coveragePercent || coverage.coverageScore || 0);
+  const score = feedbackTotalScore(feedback);
+  return (
+    state.subjectOk &&
+    state.actionOk &&
+    state.settingOk &&
+    state.detailCount >= 2 &&
+    state.naturalOk &&
+    state.notListOk &&
+    coveragePercent >= 70 &&
+    score >= 65
+  );
+}
+
+function getProgressiveCoverageState(feedback) {
+  const coverage = feedback?.coverage || {};
+  const readinessCriteria = feedback?.readiness?.criteria || {};
+  const imageParts = Array.isArray(coverage.imageParts) ? coverage.imageParts : [];
+  const missing = cleanUiList(feedback?.missing_details || coverage.missingMajorParts || [], 6)
+    .filter((item) => !/no major visual detail/i.test(item));
+  const coveredParts = imageParts.filter((part) => isCoveragePartCovered(part));
+  const detailCount = coveredParts.filter((part) => {
+    const type = String(part.type || "").toLowerCase();
+    return ["important", "object", "foreground", "detail"].some((key) => type.includes(key));
+  }).length;
+  const settingCovered = coveredParts.some((part) => /setting|background|environment|context/.test(String(part.type || "").toLowerCase()));
+  const language = feedback?.language_quality || {};
+  const score = feedbackTotalScore(feedback);
+  return {
+    missing,
+    imageParts,
+    subjectOk: Boolean(readinessCriteria.mainSubject ?? (coverage.mainSubjectMentioned !== false)),
+    actionOk: Boolean(readinessCriteria.mainAction ?? (coverage.mainActionMentioned !== false)),
+    settingOk: Boolean(readinessCriteria.settingBackground ?? (settingCovered || !missing.some((item) => /setting|background|environment|context/i.test(item)))),
+    detailCount,
+    naturalOk: Boolean(readinessCriteria.naturalEnglish ?? (Number(language.naturalness || language.score || 0) >= 55 || score >= 65)),
+    notListOk: Boolean(readinessCriteria.notAWordList ?? !looksLikeWordListFeedback(feedback)),
+  };
+}
+
+function isCoveragePartCovered(part) {
+  const status = String(part?.coverageStatus || "").toLowerCase();
+  return part?.covered === true || status === "covered" || status === "partially_covered";
+}
+
+function looksLikeWordListFeedback(feedback) {
+  const issueText = cleanUiText([
+    feedback?.main_issue,
+    ...(feedback?.fix_this_to_improve || []),
+    ...(feedback?.next_step_instructions || []),
+  ].join(" "));
+  return /\blist of words\b|\bcomplete sentence\b|\bsentence structure\b/i.test(issueText);
+}
+
+function buildGuidedNextSteps(feedback, session) {
+  const state = getProgressiveCoverageState(feedback);
+  const analysis = session?.analysis || {};
+  const steps = [];
+  if (!state.subjectOk || !state.actionOk) {
+    if (!state.subjectOk) steps.push(subjectStep(feedback, analysis));
+    if (!state.actionOk) steps.push(actionStep(feedback, analysis));
+    return cleanProgressiveSteps(steps);
+  }
+  if (!state.settingOk) {
+    return cleanProgressiveSteps([
+      settingStep(feedback, analysis),
+      "Add it after the subject/action using a phrase like “in the background” or “on the grass.”",
+    ]);
+  }
+  if (state.detailCount < 2) {
+    return cleanProgressiveSteps([
+      detailStep(feedback, analysis, 0),
+      detailStep(feedback, analysis, 1),
+    ]);
+  }
+  if (!state.naturalOk || !state.notListOk) {
+    return cleanProgressiveSteps([
+      wordingStep(feedback, analysis),
+      structureStep(feedback),
+    ]);
+  }
+  return cleanProgressiveSteps([
+    wordingStep(feedback, analysis),
+  ]);
+}
+
+function cleanProgressiveSteps(values) {
+  return uniqueWritingHints(values)
+    .map(firstSentence)
+    .filter(Boolean)
+    .slice(0, 2);
+}
+
+function subjectStep(feedback, analysis) {
+  const part = findCoveragePart(feedback, "main_subject");
+  const subject = cleanUiText(part?.name || part?.description || (analysis.objects || [])[0]?.name || (analysis.objects || [])[0]);
+  return subject ? `Mention the main subject: ${subject}.` : "Mention the main person, animal, or object in the image.";
+}
+
+function actionStep(feedback, analysis) {
+  const part = findCoveragePart(feedback, "main_action");
+  const action = cleanUiText(part?.name || part?.description || (analysis.actions || [])[0]?.phrase || (analysis.actions || [])[0]?.verb || (analysis.actions || [])[0]);
+  return action ? `Add the main action: ${action}.` : "Add what the main subject is doing.";
+}
+
+function settingStep(feedback, analysis) {
+  const part = findCoveragePart(feedback, "setting") || findCoveragePart(feedback, "background");
+  const setting = cleanUiText(part?.description || part?.name || analysis.environment || (analysis.environment_details || [])[0]);
+  return setting ? `Mention the setting/context: ${setting}.` : "Mention where the scene is happening.";
+}
+
+function detailStep(feedback, analysis, index = 0) {
+  const parts = (feedback?.coverage?.imageParts || [])
+    .filter((part) => {
+      const type = String(part.type || "").toLowerCase();
+      return !isCoveragePartCovered(part) && ["important", "object", "foreground", "detail"].some((key) => type.includes(key));
+    });
+  const analysisDetails = [
+    ...(analysis.objects || []).map((item) => item?.name || item),
+    ...(analysis.environment_details || []),
+  ];
+  const detail = cleanUiText(parts[index]?.description || parts[index]?.name || analysisDetails[index]);
+  return detail ? `Add a visible detail: ${detail}.` : "Add one more visible detail from the image.";
+}
+
+function wordingStep(feedback, analysis) {
+  const upgrade = buildImproveHints(feedback)[0]
+    || cleanUiText((analysis.phrases || [])[0]?.phrase)
+    || cleanUiText((analysis.vocabulary || [])[0]?.word);
+  return upgrade ? `Upgrade the wording with “${upgrade}” if it fits.` : "Make the sentence sound natural and complete.";
+}
+
+function structureStep(feedback) {
+  const structure = cleanUiList(feedback?.reusable_sentence_structures || [], 1)[0]
+    || "The main subject is ..., while the background shows ...";
+  return `Use this structure: ${structure}`;
+}
+
+function findCoveragePart(feedback, typeNeedle) {
+  return (feedback?.coverage?.imageParts || []).find((part) => {
+    const type = String(part.type || "").toLowerCase();
+    return type.includes(typeNeedle.toLowerCase());
+  });
+}
+
+function concreteObservationStep(detail) {
+  const text = cleanUiText(detail);
+  if (!text) return "";
+  if (/^mention|^add|^describe/i.test(text)) return text;
+  return `Mention this missing part: ${text}.`;
+}
+
+function concreteVocabularyStep(upgrade) {
+  const text = cleanUiText(upgrade);
+  if (!text) return "";
+  if (/use\b/i.test(text)) return text;
+  return `Try the phrase "${text}" if it fits the image.`;
+}
+
+function concreteStructureStep(structure) {
+  const text = cleanUiText(structure);
+  if (!text) return "";
+  if (/^use/i.test(text)) return text;
+  return `Use this structure: ${text}`;
+}
+
+function buildImproveChipItems(improveHints, phraseSuggestions) {
+  return uniqueWritingHints([...improveHints, ...phraseSuggestions]).slice(0, 3);
 }
 
 function insertPhraseIntoImproveInput(phrase) {
@@ -1275,7 +2179,7 @@ function renderTargetedFeedback(feedback, { scoreDelta = 0, rewriteCount = 0 } =
       <h4>Latest guidance</h4>
       <ul class="compact-list">
         ${(messages.length ? messages : ["Add one clearer detail and improve sentence structure."])
-          .slice(0, 3)
+          .slice(0, 2)
           .map((item) => `<li>${escapeHtml(item)}</li>`)
           .join("")}
       </ul>
@@ -1511,18 +2415,18 @@ async function onAnalyze(event) {
 
   const imageFile = els.imageInput.files[0];
   if (!imageFile) {
-    showToast("Choose an image before generating an explanation.", true);
+    showToast("Choose an image before starting guided writing.", true);
     return;
   }
 
   const formData = new FormData();
   formData.append("image", imageFile);
 
-  setButtonBusy(els.analyzeButton, true, "Generating...");
-  showSessionThinkingState("Generating your lesson...", [
+  setButtonBusy(els.analyzeButton, true, "Preparing...");
+  showSessionThinkingState("Preparing guided writing...", [
     "Analyzing the image",
-    "Finding reusable phrases",
-    "Preparing sentence structures",
+    "Finding visible objects",
+    "Preparing beginner hints",
   ]);
   try {
     const data = await api("/api/analyze", {
@@ -1564,7 +2468,7 @@ async function onAnalyze(event) {
     els.analyzeButton.disabled = true;
     await Promise.all([fetchReviewDashboard(), fetchProgressDashboard(), fetchChallenge()]);
     startQuizPolling();
-    showToast("Session ready. Write your explanation to begin.");
+    showToast("Image ready. Write one sentence to begin.");
   } catch (error) {
     showToast(error.message, true);
     if (state.currentSession) {
@@ -1574,7 +2478,7 @@ async function onAnalyze(event) {
       renderLearnPlaceholder();
     }
   } finally {
-    setButtonBusy(els.analyzeButton, false, "Generate Explanation");
+    setButtonBusy(els.analyzeButton, false, "Start Guided Write");
   }
 }
 
@@ -1583,7 +2487,10 @@ async function submitExplanationFeedback(session) {
   const button = document.getElementById("submitWritingButton");
   const explanation = input?.value?.trim() || "";
 
-  if (!explanation) {
+  if (
+    !explanation ||
+    normalizeClientText(explanation) === normalizeClientText(getWritingStarter(session))
+  ) {
     showToast("Write your explanation first.", true);
     return;
   }
@@ -1598,7 +2505,7 @@ async function submitExplanationFeedback(session) {
     const data = await api(`/api/sessions/${session.id}/feedback`, {
       method: "POST",
       headers: jsonHeaders(),
-      body: JSON.stringify({ explanation }),
+      body: JSON.stringify({ explanation, attempt_index: 1 }),
     });
     state.progress = data.progress || state.progress;
     state.stats = data.stats || state.stats;
@@ -1629,15 +2536,19 @@ async function requestImprovementFeedback(session, explanation, improvedText) {
   const button = document.getElementById("submitImproveButton");
   setButtonBusy(button, true, "Checking...");
   showSessionThinkingState("Reviewing your improved answer...", [
-    "Comparing your rewrite",
-    "Checking phrase use",
-    "Updating your score",
+    "Comparing with the image reference",
+    "Finding the next missing details",
+    "Checking readiness for quiz",
   ]);
   try {
     const data = await api(`/api/sessions/${session.id}/feedback`, {
       method: "POST",
       headers: jsonHeaders(),
-      body: JSON.stringify({ explanation, rewrite: improvedText }),
+      body: JSON.stringify({
+        explanation,
+        rewrite: improvedText,
+        attempt_index: (state.sessionFlow.attempts || []).length + 1,
+      }),
     });
     state.progress = data.progress || state.progress;
     state.stats = data.stats || state.stats;
@@ -1654,29 +2565,35 @@ async function requestImprovementFeedback(session, explanation, improvedText) {
     ];
     renderSessionStep("improve", {
       attempts,
+      polishMode: false,
     });
     window.scrollTo({ top: 0, behavior: "smooth" });
   } catch (error) {
     showToast(error.message, true);
     renderSessionStep("improve");
   } finally {
-    setButtonBusy(button, false, "Submit Improved Version");
+    setButtonBusy(button, false, "Check Again");
   }
 }
 
 async function startPostImproveQuiz(session) {
+  if (state.sessionFlow.quizLaunchStarted) {
+    return;
+  }
+  state.sessionFlow.quizLaunchStarted = true;
   const button = document.getElementById("continueToQuizButton");
   const attempts = state.sessionFlow.attempts || [];
   const firstAttempt = attempts[0] || {};
   const latestAttempt = attempts[attempts.length - 1] || {};
+  const scoreImprovement = Math.max(0, (latestAttempt.score || 0) - (firstAttempt.score || 0));
   setButtonBusy(button, true, "Building quiz...");
   els.quizModal.classList.remove("hidden");
-  els.quizModalLabel.textContent = "Post-Improve Quiz";
-  els.quizModalTitle.textContent = "Building targeted questions";
+  els.quizModalLabel.textContent = "Micro Quiz";
+  els.quizModalTitle.textContent = "Building 3 quick questions";
   els.quizContent.innerHTML = renderAiThinkingState("Creating your quiz...", [
     "Using your image explanation",
-    "Checking reusable phrases",
-    "Turning feedback into questions",
+    "Checking feedback and hint words",
+    "Making short reinforcement questions",
   ]);
   try {
     const data = await api(`/api/sessions/${session.id}/post-improve-quiz`, {
@@ -1687,6 +2604,7 @@ async function startPostImproveQuiz(session) {
         learner_text: firstAttempt.text || state.sessionFlow.explanation || "",
         improved_text: latestAttempt.text || "",
         feedback: latestAttempt.feedback || state.sessionFlow.feedback || {},
+        score_improvement: scoreImprovement,
       }),
     });
     state.quizDashboard = data.dashboard || state.quizDashboard;
@@ -1694,6 +2612,7 @@ async function startPostImproveQuiz(session) {
     renderQuizButton();
     renderQuizRun(data.run);
   } catch (error) {
+    state.sessionFlow.quizLaunchStarted = false;
     showToast(error.message, true);
     closeQuizModal();
   } finally {
@@ -1864,7 +2783,7 @@ function renderDashboardContent() {
   if (!state.user) {
     els.dashboardContent.innerHTML = `
       <div class="empty-copy">
-        Sign in to see your progress, due review, and daily challenge.
+        Sign in to save XP, streaks, and recent image sessions.
       </div>
     `;
     return;
@@ -1883,17 +2802,14 @@ function renderDashboardContent() {
     recent_runs: [],
     weekly_summary: { accuracy_percent: 0, improvement_percent: 0 },
   };
-  const review = state.review || { due_count: 0, weak_items: 0, items: [] };
-  const challenge = state.challenge || null;
   const recentSessions = state.sessions.slice(0, 3);
-  const recentRuns = Array.isArray(progress.recent_runs) ? progress.recent_runs.slice(0, 4) : [];
 
   els.dashboardContent.innerHTML = `
     <div class="dashboard-stack">
       <section class="dashboard-section">
         <div class="section-head">
           <div>
-            <p class="eyebrow">Profile</p>
+            <p class="eyebrow">Progress</p>
             <h4>${escapeHtml(state.user.full_name)}</h4>
           </div>
           <button id="logoutButton" class="text-button" type="button">Log out</button>
@@ -1908,28 +2824,8 @@ function renderDashboardContent() {
             <strong class="status-value">${progress.streak_days || 0}</strong>
           </article>
           <article class="status-pill">
-            <span class="status-label">Level</span>
-            <strong class="status-value">${progress.learner_level || 1}</strong>
-          </article>
-          <article class="status-pill">
-            <span class="status-label">Words</span>
-            <strong class="status-value">${progress.words_learned || 0}</strong>
-          </article>
-          <article class="status-pill">
-            <span class="status-label">Accuracy</span>
-            <strong class="status-value">${progress.overall_accuracy_percent || 0}%</strong>
-          </article>
-          <article class="status-pill">
-            <span class="status-label">Weak Items</span>
-            <strong class="status-value">${progress.weak_items || 0}</strong>
-          </article>
-          <article class="status-pill">
             <span class="status-label">Combo</span>
-            <strong class="status-value">${progress.combo_streak || 0}</strong>
-          </article>
-          <article class="status-pill">
-            <span class="status-label">Mastery</span>
-            <strong class="status-value">${progress.overall_mastery_percent || 0}%</strong>
+            <strong class="status-value">${progress.best_combo || progress.combo_streak || 0}</strong>
           </article>
         </div>
       </section>
@@ -1937,95 +2833,22 @@ function renderDashboardContent() {
       <section class="dashboard-section">
         <div class="section-head">
           <div>
-            <p class="eyebrow">Quick Access</p>
-            <h4>Review and challenge</h4>
+            <p class="eyebrow">Quick Loop</p>
+            <h4>One image, one sentence</h4>
           </div>
         </div>
-        <div class="dashboard-action-grid">
-          <button class="dashboard-action-card" type="button" data-dashboard-action="review" ${
-            !review.due_count ? "disabled" : ""
-          }>
-            <span class="mini-pill">Review</span>
-            <strong>${review.due_count || 0} due</strong>
-            <span class="muted">${review.weak_items || 0} weak area${pluralize(review.weak_items || 0)}</span>
-          </button>
-          <button class="dashboard-action-card" type="button" data-dashboard-action="challenge" ${
-            !challenge?.can_start ? "disabled" : ""
-          }>
-            <span class="mini-pill">Challenge</span>
-            <strong>${challenge?.total_questions || 0} questions</strong>
-            <span class="muted">${
-              challenge
-                ? challenge.status === "completed"
-                  ? `Completed ${challenge.correct_count}/${challenge.total_questions}`
-                  : "Today's 5-minute challenge"
-                : "Unlock with more lessons"
-            }</span>
-          </button>
+        <div class="empty-copy compact-empty-copy">
+          Upload an image, write one sentence, improve it once, then finish a 2-3 question micro quiz.
         </div>
       </section>
 
       <section class="dashboard-section">
         <div class="section-head">
           <div>
-            <p class="eyebrow">Today’s Review</p>
-            <h4>Due now</h4>
+            <p class="eyebrow">Recent</p>
+            <h4>Image sessions</h4>
           </div>
         </div>
-        ${
-          review.items?.length
-            ? `
-            <div class="review-preview-grid">
-              ${review.items
-                .map(
-                  (item) => `
-                    <article class="review-preview-card">
-                      <div class="session-row">
-                        <strong>${escapeHtml(item.session_title || "Lesson review")}</strong>
-                        <span class="mini-pill">${item.is_weak ? "Weak" : `${item.mastery_percent || 0}%`}</span>
-                      </div>
-                      <p>${escapeHtml(item.prompt)}</p>
-                      ${
-                        item.context_note
-                          ? `<p class="muted">${escapeHtml(item.context_note)}</p>`
-                          : ""
-                      }
-                    </article>
-                  `
-                )
-                .join("")}
-            </div>
-          `
-            : `<div class="empty-copy">No review items are due right now.</div>`
-        }
-      </section>
-
-      <section class="dashboard-section">
-        <div class="section-head">
-          <div>
-            <p class="eyebrow">History</p>
-            <h4>Recent activity</h4>
-          </div>
-        </div>
-        ${
-          recentRuns.length
-            ? `
-            <div class="review-preview-grid">
-              ${recentRuns
-                .map(
-                  (run) => `
-                    <article class="review-preview-card">
-                      <strong>${escapeHtml(run.source_label || prettyQuizType(run.run_mode))}</strong>
-                      <p>${run.correct_count}/${run.total_questions} correct</p>
-                      <p class="muted">${escapeHtml(formatDate(run.completed_at))}</p>
-                    </article>
-                  `
-                )
-                .join("")}
-            </div>
-          `
-            : `<div class="empty-copy">Complete a quiz or challenge to start building history.</div>`
-        }
         ${
           recentSessions.length
             ? `
@@ -2035,7 +2858,6 @@ function renderDashboardContent() {
                   (session) => `
                     <article class="review-preview-card">
                       <strong>${escapeHtml(session.title)}</strong>
-                      <p>Mastery ${Math.round(session.mastery_percent || 0)}%</p>
                       <p class="muted">${escapeHtml(formatDate(session.created_at))}</p>
                     </article>
                   `
@@ -2043,7 +2865,7 @@ function renderDashboardContent() {
                 .join("")}
             </div>
           `
-            : ""
+            : `<div class="empty-copy">Your latest image sessions will appear here.</div>`
         }
       </section>
     </div>
@@ -2053,20 +2875,6 @@ function renderDashboardContent() {
   if (logoutButton) {
     logoutButton.addEventListener("click", onLogout);
   }
-
-  els.dashboardContent.querySelectorAll("[data-dashboard-action]").forEach((button) => {
-    button.addEventListener("click", () => {
-      const action = button.dataset.dashboardAction;
-      closeDashboardModal();
-      if (action === "review") {
-        openReviewModal();
-        return;
-      }
-      if (action === "challenge") {
-        openQuizModal({ mode: "daily_challenge" });
-      }
-    });
-  });
 }
 
 function renderLearnMode() {
@@ -2077,7 +2885,7 @@ function renderLearnMode() {
   els.composePanel.classList.toggle("hidden", !showCompose);
   els.sessionWorkspace.classList.toggle("hidden", !showSession);
   els.newSessionButton.classList.toggle("hidden", !state.user);
-  els.quizLauncherButton.classList.toggle("hidden", showSession);
+  els.quizLauncherButton.classList.add("hidden");
 }
 
 function renderSessionLibrary() {
@@ -2447,15 +3255,14 @@ function renderQuizRun(run) {
   els.quizModalLabel.textContent = run.source_label || (run.answered_count > 0 ? "Resume Quiz" : "Quiz Mode");
   els.quizModalTitle.textContent = `Question ${question.question_index} of ${question.total_questions}`;
   els.quizContent.innerHTML = `
-    <div class="quiz-flow">
+    <div class="quiz-flow quiz-question-enter">
       <div class="quiz-progress-track">
         <span class="quiz-progress-bar" style="width: ${progressPercent}%"></span>
       </div>
       <div class="quiz-top-stats">
         <span>Progress <strong>${question.question_index}/${question.total_questions}</strong></span>
-        <span>XP <strong>${state.progress?.xp_points || 0}</strong></span>
-        <span>Combo <strong>x${state.progress?.combo_streak || 0}</strong></span>
-        <span>Best <strong>x${state.progress?.best_combo || 0}</strong></span>
+        <span>Earned <strong>+${run.summary?.xp_earned || 0} XP</strong></span>
+        <span>Combo <strong>${state.progress?.combo_streak >= 2 ? "🔥 " : ""}x${state.progress?.combo_streak || 0}</strong></span>
       </div>
       <section class="quiz-question-card quiz-type-${escapeHtml(question.quiz_type)}">
         <div class="quiz-type-row">
@@ -2499,6 +3306,10 @@ function renderQuizRun(run) {
     renderReorderAnswer(question, answerZone);
     return;
   }
+  if (question.answer_mode === "matching") {
+    renderMatchingPairsAnswer(question, answerZone);
+    return;
+  }
   renderMultipleChoiceAnswer(question, answerZone);
 }
 
@@ -2516,14 +3327,15 @@ function bindConfidenceButtons() {
 function renderMultipleChoiceAnswer(question, container) {
   let selectedOption = "";
   const duel = question.quiz_type === "phrase_duel";
+  const chooseBetter = question.quiz_type === "choose_better";
   const snap = question.quiz_type === "phrase_snap";
   container.innerHTML = `
-    <div class="answer-options ${duel ? "phrase-duel-options" : snap ? "phrase-snap-options" : ""}">
+    <div class="answer-options ${duel || chooseBetter ? "phrase-duel-options" : snap ? "phrase-snap-options" : ""}">
       ${question.options
         .map(
           (option, index) => `
             <button class="answer-button quiz-answer-button ${
-              duel ? "phrase-duel-card" : snap ? "phrase-snap-option" : ""
+              duel || chooseBetter ? "phrase-duel-card" : snap ? "phrase-snap-option" : ""
             }" type="button" data-option-index="${index}">
               ${escapeHtml(option)}
             </button>
@@ -2539,6 +3351,7 @@ function renderMultipleChoiceAnswer(question, container) {
   container.querySelectorAll("[data-option-index]").forEach((button) => {
     button.addEventListener("click", () => {
       selectedOption = question.options[Number(button.dataset.optionIndex)];
+      playTapAnimation(button);
       container.querySelectorAll("[data-option-index]").forEach((item) => {
         item.classList.toggle("selected", item === button);
       });
@@ -2556,7 +3369,9 @@ function renderMultipleChoiceAnswer(question, container) {
 
 function renderTypingAnswer(question, container) {
   const relatedPhrase = question.related_reusable_phrase || question.metadata?.related_reusable_phrase || "";
-  const starterText = question.quiz_type === "fix_the_mistake" ? extractBrokenSentence(question.prompt) : "";
+  const starterText = ["fix_the_mistake", "fix_the_sentence"].includes(question.quiz_type)
+    ? extractBrokenSentence(question.prompt)
+    : "";
   container.innerHTML = `
     <div class="typing-answer-shell">
       ${
@@ -2565,7 +3380,7 @@ function renderTypingAnswer(question, container) {
           : ""
       }
       <textarea id="typingAnswerInput" class="quiz-text-input" rows="4" placeholder="${escapeHtml(
-        question.quiz_type === "fix_the_mistake" ? "Edit the sentence here..." : "Type your answer here..."
+        ["fix_the_mistake", "fix_the_sentence"].includes(question.quiz_type) ? "Edit the sentence here..." : "Type your answer here..."
       )}">${escapeHtml(starterText)}</textarea>
       ${
         question.metadata?.keywords?.length
@@ -2666,6 +3481,77 @@ function renderReorderAnswer(question, container) {
   draw();
 }
 
+function renderMatchingPairsAnswer(question, container) {
+  const pairs = Array.isArray(question.metadata?.pairs) ? question.metadata.pairs : [];
+  const leftItems = pairs.map((pair) => String(pair.left || "").trim()).filter(Boolean);
+  const rightItems = pairs
+    .map((pair) => String(pair.right || "").trim())
+    .filter(Boolean)
+    .sort((a, b) => normalizeClientText(a).localeCompare(normalizeClientText(b)));
+  const selected = {};
+  let activeLeft = "";
+
+  const draw = () => {
+    const complete = leftItems.length > 0 && leftItems.every((item) => selected[item]);
+    container.innerHTML = `
+      <div class="matching-shell">
+        <div class="matching-column">
+          ${leftItems
+            .map(
+              (item) => `
+                <button class="answer-button matching-card ${activeLeft === item ? "selected" : ""} ${selected[item] ? "matched" : ""}" type="button" data-match-left="${escapeHtml(item)}">
+                  <span>${escapeHtml(item)}</span>
+                  ${selected[item] ? `<strong>${escapeHtml(selected[item])}</strong>` : ""}
+                </button>
+              `
+            )
+            .join("")}
+        </div>
+        <div class="matching-column">
+          ${rightItems
+            .map(
+              (item) => `
+                <button class="answer-button matching-card ${Object.values(selected).includes(item) ? "matched" : ""}" type="button" data-match-right="${escapeHtml(item)}">
+                  ${escapeHtml(item)}
+                </button>
+              `
+            )
+            .join("")}
+        </div>
+        <div class="quiz-submit-bar">
+          <button id="submitMatchingAnswer" class="primary-button quiz-submit-button" type="button" ${complete ? "" : "disabled"}>Submit answer</button>
+        </div>
+      </div>
+    `;
+
+    container.querySelectorAll("[data-match-left]").forEach((button) => {
+      button.addEventListener("click", () => {
+        activeLeft = button.dataset.matchLeft || "";
+        playTapAnimation(button);
+        draw();
+      });
+    });
+    container.querySelectorAll("[data-match-right]").forEach((button) => {
+      button.addEventListener("click", () => {
+        if (!activeLeft) {
+          showToast("Choose a word or phrase first.", true);
+          return;
+        }
+        selected[activeLeft] = button.dataset.matchRight || "";
+        activeLeft = "";
+        playTapAnimation(button);
+        draw();
+      });
+    });
+    document.getElementById("submitMatchingAnswer")?.addEventListener("click", () => {
+      const answer = leftItems.map((left) => `${left}=>${selected[left] || ""}`).join("||");
+      submitQuizAnswer(answer);
+    });
+  };
+
+  draw();
+}
+
 async function submitQuizAnswer(selectedAnswer) {
     if (!state.currentQuizRun || !state.currentQuizRun.question) {
       return;
@@ -2710,58 +3596,27 @@ async function submitQuizAnswer(selectedAnswer) {
     }
 
     const feedback = data.result?.feedback || {};
-    els.quizModalLabel.textContent = data.result.result_type || (data.result.correct ? "Correct" : "Checked");
-    els.quizModalTitle.textContent = `Answer ${data.result.question_index} checked`;
     const resultType = data.result.result_type || (data.result.correct ? "Correct" : "Incorrect");
-    const almostCorrect = resultType === "Almost Correct";
+    const resultLabel = resultType === "Almost Correct" ? "Almost" : resultType === "Incorrect" ? "Wrong" : resultType;
+    els.quizModalLabel.textContent = resultLabel;
+    els.quizModalTitle.textContent = `Answer ${data.result.question_index} checked`;
+    const comboBonus = data.result.combo_bonus || 0;
+    const shortExplanation = quizShortExplanation(data.result, feedback);
+    const comboStreak = data.result.combo_streak || 0;
     const xpBreakdown = data.result.xp_breakdown || {};
-    const phraseMastery = data.result.phrase_mastery || null;
-    const resultDetail = renderQuizResultDetail(data.result, answeredQuestion);
     els.quizContent.innerHTML = `
       <div class="quiz-feedback-card">
-        <div class="quiz-result-card ${resultClassForType(resultType)} ${resultMotionClassForType(resultType)}">
-          <span class="quiz-result-label">${escapeHtml(resultType)}</span>
-          ${resultDetail}
-          ${
-            feedback.good
-              ? `<p class="muted">${escapeHtml(feedback.good)}</p>`
-              : ""
-          }
-          ${
-            feedback.improve
-              ? `<p class="muted">${escapeHtml(feedback.improve)}</p>`
-              : ""
-          }
-          ${
-            feedback.corrected_example
-              ? `<p class="muted"><strong>Model answer:</strong> ${escapeHtml(feedback.corrected_example)}</p>`
-              : ""
-          }
-          ${
-            data.result.next_due_at
-              ? `<p class="muted">Next review: ${escapeHtml(formatDate(data.result.next_due_at))}</p>`
-              : ""
-          }
-          <div class="quiz-xp-panel">
-            <div class="reward-stat-row">
-              <span class="score-pop">Score <strong id="quizScoreValue">0%</strong></span>
-              <span class="xp-pop">XP gained <strong id="quizXpGainedValue">0</strong></span>
-              <span>Current XP <strong>${state.progress?.xp_points || 0}</strong></span>
-              <span class="combo-pop">Combo <strong>x${data.result.combo_streak || 0}</strong></span>
-              <span>Max combo <strong>x${data.result.best_combo || state.progress?.best_combo || 0}</strong></span>
-            </div>
-            <p class="muted">${formatXpBreakdown(xpBreakdown)}</p>
+        <div class="quiz-result-card clean-result-card ${resultClassForType(resultType)} ${resultMotionClassForType(resultType)}">
+          <span class="quiz-result-label">${escapeHtml(resultLabel)}</span>
+          <div class="answer-reward-row">
+            <span class="xp-pop">+<strong id="quizXpGainedValue">0</strong> XP</span>
+            ${comboStreak >= 2 ? `<span class="combo-pop">🔥 Combo <strong>x${comboStreak}</strong></span>` : ""}
+            ${comboBonus ? `<span class="combo-bonus-pop">Combo bonus +${comboBonus}</span>` : ""}
+            ${xpBreakdown.fast_bonus ? `<span>Fast +${xpBreakdown.fast_bonus}</span>` : ""}
+            ${xpBreakdown.perfect_quiz_bonus ? `<span>Perfect streak +${xpBreakdown.perfect_quiz_bonus}</span>` : ""}
           </div>
-          ${
-            phraseMastery
-              ? `
-                <div class="quiz-xp-panel">
-                  <span class="field-label">Phrase mastery</span>
-                  <p><strong>${escapeHtml(phraseMastery.phrase)}</strong> — ${escapeHtml(phraseMastery.state)}</p>
-                </div>
-              `
-              : ""
-          }
+          ${renderAnsweredSnapshot(data.result, answeredQuestion)}
+          <p class="result-explanation">${escapeHtml(shortExplanation)}</p>
         </div>
         <div class="quiz-submit-bar">
           <button id="nextQuizButton" class="primary-button quiz-submit-button" type="button">Next question</button>
@@ -2772,12 +3627,49 @@ async function submitQuizAnswer(selectedAnswer) {
       renderQuizRun(data.run);
     });
     animateNumber("quizXpGainedValue", data.result.xp_awarded || 0);
-    animateNumber("quizScoreValue", Math.round((Number(data.result.score) || 0) * 100), { suffix: "%" });
     await Promise.all([fetchReviewDashboard({ silent: true }), fetchProgressDashboard({ silent: true })]);
   } catch (error) {
     showToast(error.message, true);
     renderQuizRun(state.currentQuizRun);
   }
+}
+
+function renderAnsweredSnapshot(result, question) {
+  const selected = cleanUiText(result?.selected_answer);
+  const correct = cleanUiText(result?.correct_answer);
+  if (!selected && !correct) {
+    return "";
+  }
+  const isCorrect = Boolean(result?.correct);
+  const label = question?.answer_mode === "matching"
+    ? "Pairs"
+    : question?.answer_mode === "reorder"
+      ? "Sentence"
+      : question?.answer_mode === "typing"
+        ? "Answer"
+        : "Choice";
+  return `
+    <div class="answered-snapshot ${isCorrect ? "is-correct" : "is-wrong"}">
+      <div>
+        <span class="field-label">Your ${escapeHtml(label)}</span>
+        <p>${escapeHtml(formatSnapshotAnswer(selected))}</p>
+      </div>
+      ${
+        !isCorrect && correct
+          ? `
+            <div>
+              <span class="field-label">Correct</span>
+              <p>${escapeHtml(formatSnapshotAnswer(correct))}</p>
+            </div>
+          `
+          : ""
+      }
+    </div>
+  `;
+}
+
+function formatSnapshotAnswer(value) {
+  return cleanUiText(value).replaceAll("||", " · ").replaceAll("=>", " → ");
 }
 
 async function submitReviewAnswer(selectedAnswer) {
@@ -2895,6 +3787,22 @@ function renderQuizSummary(run, lastResult = null) {
     return;
   }
 
+  const summary = run.summary || {};
+  const totalXp = summary.xp_earned || 0;
+  const maxCombo = summary.max_combo || 0;
+  const correctAnswers = summary.correct_answers ?? summary.correct_count ?? 0;
+  const answeredCount = summary.answered_count ?? run.total_questions ?? 0;
+  const phrasesPracticed = uniqueWritingHints([
+    ...(summary.phrases_practiced || []),
+    summary.phrase_practiced,
+    lastResult?.phrase_mastery?.phrase,
+    lastResult?.metadata?.related_reusable_phrase,
+  ]).slice(0, 3);
+  const scoreImprovement = summary.score_improvement || lastResult?.metadata?.score_improvement || 0;
+  const finalExplanation = lastResult
+    ? quizShortExplanation(lastResult, lastResult.feedback || {})
+    : "";
+  const streakDays = state.progress?.streak_days || 0;
   els.quizModalLabel.textContent =
     run.run_mode === "daily_challenge"
       ? "Challenge Complete"
@@ -2903,52 +3811,32 @@ function renderQuizSummary(run, lastResult = null) {
       : run.run_mode === "session"
       ? "Quick Challenge Complete"
       : "Quiz Complete";
-  els.quizModalTitle.textContent = "Round finished";
+  els.quizModalTitle.textContent = "Nice work";
   els.quizContent.innerHTML = `
-    <div class="quiz-summary-shell">
-      ${
-        lastResult
-          ? `
-          <div class="feedback-box ${lastResult.correct ? "feedback-success" : ""}">
-            <strong>${lastResult.correct ? "Final answer correct." : "Final answer checked."}</strong>
-            <p>The answer is: ${escapeHtml(lastResult.correct_answer)}</p>
-            <p class="muted">XP earned: ${lastResult.xp_awarded || 0}${
-              lastResult.combo_bonus ? ` · Combo +${lastResult.combo_bonus}` : ""
-            }${lastResult.daily_bonus ? ` · Challenge +${lastResult.daily_bonus}` : ""}</p>
-          </div>
-        `
-          : ""
-      }
-      <div class="quiz-summary-grid">
-        <article class="status-pill">
-          <span class="status-label">Correct</span>
-          <strong class="status-value">${run.summary.correct_count}</strong>
-        </article>
-        <article class="status-pill">
-          <span class="status-label">Wrong</span>
-          <strong class="status-value">${run.summary.wrong_count}</strong>
-        </article>
-        <article class="status-pill">
-          <span class="status-label">Accuracy</span>
-          <strong class="status-value">${run.summary.accuracy_percent}%</strong>
-        </article>
+    <div class="quiz-summary-shell reward-screen">
+      <div class="reward-hero-card">
+        <span class="field-label">Total earned</span>
+        <strong class="reward-xp-total">+<span id="rewardXpValue">0</span> XP</strong>
       </div>
-      <div class="feedback-box feedback-success reward-card">
-        <strong>Rewards saved</strong>
-        <div class="reward-stat-row">
-          <span>XP <strong id="rewardXpValue">${state.progress?.xp_points || 0}</strong></span>
-          <span>Streak <strong id="rewardStreakValue">${state.progress?.streak_days || 0}</strong></span>
-          <span>Level <strong>${state.progress?.learner_level || 1}</strong></span>
-        </div>
-        <p class="muted">Saved phrases ${state.progress?.phrases_mastered || 0}</p>
+      <div class="reward-stat-row reward-stat-grid">
+        <span>Correct <strong>${correctAnswers}/${answeredCount}</strong></span>
+        <span>🔥 Max Combo <strong id="rewardComboValue">x0</strong></span>
+        ${phrasesPracticed.length ? `<span>🧠 Phrases <strong>${escapeHtml(phrasesPracticed.join(", "))}</strong></span>` : ""}
+        ${summary.perfect_quiz ? `<span>Perfect streak <strong>+20 XP</strong></span>` : ""}
+        ${scoreImprovement ? `<span>Score <strong>+${escapeHtml(scoreImprovement)} points</strong></span>` : ""}
+        <span>Streak <strong>${streakDays ? `Day ${streakDays}` : "Started"}</strong></span>
       </div>
-      <button id="closeQuizSummaryButton" class="primary-button" type="button">Back to learn</button>
+      ${finalExplanation ? `<p class="result-explanation">${escapeHtml(finalExplanation)}</p>` : ""}
+      <button id="closeQuizSummaryButton" class="primary-button reward-next-button" type="button">Next Image</button>
     </div>
   `;
 
-  document.getElementById("closeQuizSummaryButton").addEventListener("click", closeQuizModal);
-  animateNumber("rewardXpValue", state.progress?.xp_points || 0);
-  animateNumber("rewardStreakValue", state.progress?.streak_days || 0);
+  document.getElementById("closeQuizSummaryButton").addEventListener("click", () => {
+    closeQuizModal();
+    openNewSessionComposer();
+  });
+  animateNumber("rewardXpValue", totalXp);
+  animateNumber("rewardComboValue", maxCombo, { prefix: "x" });
 }
 
 function setButtonBusy(button, busy, label) {
@@ -3004,20 +3892,25 @@ function pluralize(count) {
 
 function prettyQuizType(value) {
   const mapping = {
+    multiple_choice_comprehension: "Multiple Choice",
+    matching_pairs: "Matching Pairs",
+    sentence_reconstruction: "Sentence Reconstruction",
     recognition: "Recognition",
     phrase_completion: "Phrase Completion",
     expression_training: "Expression Training",
     situation_understanding: "Situation",
     sentence_building: "Sentence Building",
-    fill_blank: "Fill Blank",
+    fill_blank: "Fill in the Blank",
     typing: "Typing",
     memory_recall: "Memory Recall",
     error_focus: "Error Focus",
     sentence_upgrade_battle: "Sentence Upgrade Battle",
     phrase_snap: "Phrase Snap",
+    choose_better: "Choose Better",
     phrase_duel: "Phrase Duel",
     fix_the_mistake: "Fix the Mistake",
-    use_it_or_lose_it: "Use It or Lose It",
+    fix_the_sentence: "Fix the Sentence",
+    use_it_or_lose_it: "Use the Word/Phrase",
   };
   return mapping[value] || formatBand(String(value || "").replaceAll("_", " "));
 }
@@ -3025,6 +3918,7 @@ function prettyQuizType(value) {
 function prettyAnswerMode(value) {
   const mapping = {
     multiple_choice: "Multiple choice",
+    matching: "Matching",
     typing: "Typing",
     reorder: "Sentence order",
   };
@@ -3032,17 +3926,27 @@ function prettyAnswerMode(value) {
 }
 
 function formatXpBreakdown(breakdown) {
-  const parts = [];
-  if (breakdown.base_xp) parts.push(`${formatBand(breakdown.difficulty || "base")} +${breakdown.base_xp}`);
-  if (breakdown.first_try_bonus) parts.push(`First try +${breakdown.first_try_bonus}`);
-  if (breakdown.phrase_bonus) parts.push(`Phrase +${breakdown.phrase_bonus}`);
-  if (breakdown.fast_bonus) parts.push(`Fast +${breakdown.fast_bonus}`);
-  if (breakdown.complete_all_types_bonus) parts.push(`All types +${breakdown.complete_all_types_bonus}`);
-  if (breakdown.perfect_quiz_bonus) parts.push(`Perfect quiz +${breakdown.perfect_quiz_bonus}`);
-  if (breakdown.weak_item_bonus) parts.push(`Weak item +${breakdown.weak_item_bonus}`);
-  if (breakdown.combo_bonus) parts.push(`Combo +${breakdown.combo_bonus}`);
-  if (breakdown.daily_bonus) parts.push(`Challenge +${breakdown.daily_bonus}`);
-  return parts.length ? parts.join(" · ") : "No XP gained this time.";
+  const base = Number(breakdown?.base_xp || 0);
+  const firstTry = Number(breakdown?.first_try_bonus || 0);
+  const fast = Number(breakdown?.fast_bonus || 0);
+  const perfect = Number(breakdown?.perfect_quiz_bonus || 0);
+  const combo = Number(breakdown?.combo_bonus || 0);
+  if (!base && !firstTry && !fast && !perfect && !combo) return "No XP gained this time.";
+  return [
+    base ? `Answer +${base}` : "",
+    firstTry ? `First try +${firstTry}` : "",
+    fast ? `Fast +${fast}` : "",
+    perfect ? `Perfect +${perfect}` : "",
+    combo ? `Combo +${combo}` : "",
+  ].filter(Boolean).join(" · ");
+}
+
+function quizShortExplanation(result, feedback) {
+  if (feedback?.good) return feedback.good;
+  if (feedback?.improve) return feedback.improve;
+  if (result?.result_type === "Correct") return "That reinforces the image phrase.";
+  if (result?.result_type === "Almost Correct") return "Close. Keep the meaning and make it smoother.";
+  return "Review the image phrase, then try the next one.";
 }
 
 function resultClassForType(resultType) {
@@ -3066,7 +3970,7 @@ function renderQuizTypeDetail(question) {
       ? `<div class="quote-card"><span class="field-label">Weak sentence</span><p>${escapeHtml(weak)}</p></div>`
       : "";
   }
-  if (question.quiz_type === "fix_the_mistake") {
+  if (["fix_the_mistake", "fix_the_sentence"].includes(question.quiz_type)) {
     const broken = extractBrokenSentence(question.prompt);
     return broken
       ? `<div class="broken-sentence-card"><span class="field-label">Broken sentence</span><p>${escapeHtml(broken)}</p></div>`
@@ -3075,8 +3979,20 @@ function renderQuizTypeDetail(question) {
   if (question.quiz_type === "use_it_or_lose_it" && phrase) {
     return `<div class="phrase-focus-chip">${escapeHtml(phrase)}</div>`;
   }
-  if (question.quiz_type === "phrase_snap") {
-    return `<div class="quick-action-note">Fill the blank with the reusable phrase.</div>`;
+  if (["phrase_snap", "fill_blank"].includes(question.quiz_type)) {
+    return `<div class="quick-action-note">Fill the blank with the missing word.</div>`;
+  }
+  if (question.quiz_type === "multiple_choice_comprehension") {
+    return `<div class="quick-action-note">Choose the answer from this image session.</div>`;
+  }
+  if (question.quiz_type === "matching_pairs") {
+    return `<div class="quick-action-note">Tap a word, then tap its matching meaning.</div>`;
+  }
+  if (question.quiz_type === "sentence_reconstruction") {
+    return `<div class="quick-action-note">Tap the words to rebuild the sentence.</div>`;
+  }
+  if (question.quiz_type === "choose_better") {
+    return `<div class="quick-action-note">Pick the sentence that sounds clearer for this image.</div>`;
   }
   return "";
 }
@@ -3088,6 +4004,14 @@ function renderQuizResultDetail(result, question) {
   const metadata = result.metadata || question?.metadata || {};
   const phrase = result.phrase_mastery?.phrase || metadata.related_reusable_phrase || question?.related_reusable_phrase || "";
 
+  if (quizType === "choose_better") {
+    return `
+      <div class="before-after-grid">
+        <div><span class="field-label">Your choice</span><p>${escapeHtml(selected)}</p></div>
+        <div><span class="field-label">Better version</span><p>${escapeHtml(correct)}</p></div>
+      </div>
+    `;
+  }
   if (quizType === "sentence_upgrade_battle") {
     const weak = metadata.weak_sentence || question?.metadata?.weak_sentence || "";
     return `
@@ -3098,7 +4022,7 @@ function renderQuizResultDetail(result, question) {
       </div>
     `;
   }
-  if (quizType === "fix_the_mistake") {
+  if (["fix_the_mistake", "fix_the_sentence"].includes(quizType)) {
     return `
       <div class="before-after-grid">
         <div><span class="field-label">Your fix</span><p>${highlightChangedWords(selected, correct)}</p></div>
@@ -3123,6 +4047,7 @@ function renderQuizResultDetail(result, question) {
 function extractBrokenSentence(prompt) {
   return String(prompt || "")
     .replace(/^Fix the Mistake:\s*/i, "")
+    .replace(/^Fix the Sentence:\s*/i, "")
     .replace(/^Sentence Upgrade Battle:\s*Rewrite this sentence stronger:\s*/i, "")
     .trim();
 }
