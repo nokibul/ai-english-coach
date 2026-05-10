@@ -12,6 +12,7 @@ const state = {
     review_prompt_interval_seconds: 90,
     quiz_retake_minutes: 20,
     first_review_minutes: 60,
+    max_upload_bytes: 25 * 1024 * 1024,
   },
   pendingVerificationEmail: "",
   quizTimer: null,
@@ -23,18 +24,22 @@ const state = {
   challenge: null,
   review: null,
   quizQuestionStartedAt: null,
-  quizConfidence: 2,
   uploadPreviewUrl: "",
   sessionFlow: {
     step: "learn",
     explanation: "",
     feedback: null,
     attempts: [],
+    articulationUpgrade: null,
+    layerRewards: [],
+    allLayersBonusAwarded: false,
   },
 };
 
 const els = {};
 const SESSION_CHUNK_SIZE = 6;
+const IMAGE_UPLOAD_TARGET_BYTES = 4 * 1024 * 1024;
+const IMAGE_UPLOAD_MAX_DIMENSION = 1920;
 let sessionListObserver = null;
 
 document.addEventListener("DOMContentLoaded", () => {
@@ -296,6 +301,9 @@ function renderSession(session) {
     explanation: "",
     feedback: null,
     attempts: [],
+    articulationUpgrade: null,
+    layerRewards: [],
+    allLayersBonusAwarded: false,
   };
   renderSessionStep("write");
 }
@@ -357,8 +365,8 @@ function renderStepProgress(activeStep) {
     : [
         ["image", "Image"],
         ["write", "Write"],
-        ["feedback", "Feedback"],
-        ["improve", "Improve"],
+        ["improve", "Layers"],
+        ["upgrade", "Upgrade"],
         ["quiz", "Quiz"],
         ["reward", "Reward"],
       ];
@@ -864,7 +872,6 @@ function renderFeedbackStep(session, feedback) {
   const latestText = latestAttempt?.text || state.sessionFlow.explanation || "";
   const issue = buildFeedbackIssue(feedback, session);
   const positive = buildFeedbackPositiveLine(feedback, totalScore, issue.focusAreas);
-  const inlineUpgrades = buildFeedbackInlineUpgrades(feedback, latestText, issue);
 
   els.sessionDetailPanel.innerHTML = `
     <div class="journey-shell focused-step-shell diagnosis-shell">
@@ -893,10 +900,8 @@ function renderFeedbackStep(session, feedback) {
           </div>
         </section>
 
-        ${renderInlineUpgradeSection(inlineUpgrades, 4)}
-
-        <button id="feedbackPrimaryButton" class="primary-button journey-primary-button diagnosis-cta coach-reveal" ${coachRevealStyle(5)} type="button">
-          Improve My Answer
+        <button id="feedbackPrimaryButton" class="primary-button journey-primary-button diagnosis-cta coach-reveal" ${coachRevealStyle(4)} type="button">
+          Continue Building Layers
         </button>
       </section>
     </div>
@@ -1457,38 +1462,68 @@ function renderImproveStep(session) {
   const latestText = latestAttempt?.text || state.sessionFlow.explanation || "";
   const rewriteDraft = latestText;
   const attemptNumber = attempts.length;
-  const ready = isExplanationReady(latestFeedback);
-  const showMoveOption = ready;
-  const showEditor = !ready;
-  const issue = buildFeedbackIssue(latestFeedback, session);
-  const currentFocus = buildImproveCurrentFocus(issue);
-  const hintGroups = buildImproveHintGroups(session, latestFeedback, issue, latestText);
+  const articulation = buildArticulationState(latestFeedback, session, latestText);
+  const upgradeSuggestions = buildArticulationUpgradeSuggestions(session, latestFeedback, latestText);
+  const upgradeState = normalizeArticulationUpgradeState(
+    state.sessionFlow.articulationUpgrade,
+    latestText,
+    upgradeSuggestions
+  );
+  state.sessionFlow.articulationUpgrade = upgradeState;
+  const showUpgrade = articulation.complete && !upgradeState.finalized;
+  const showMoveOption = articulation.complete && upgradeState.finalized;
+  const showEditor = !articulation.complete;
+  const ready = showMoveOption;
+  const issue = articulation.currentLayer
+    ? buildLayerFeedbackIssue(articulation.currentLayer, latestFeedback, session)
+    : buildFeedbackIssue(latestFeedback, session);
+  const escalation = buildImproveEscalationContext(session, attempts, issue, articulation.currentLayer);
+  const currentFocus = articulation.currentLayer
+    ? buildLayerCurrentFocus(articulation.currentLayer, session, escalation)
+    : buildImproveCurrentFocus(issue, session, escalation);
+  const hintGroups = buildImproveHintGroups(session, latestFeedback, issue, latestText, escalation);
 
   els.sessionDetailPanel.innerHTML = `
     <div class="journey-shell focused-step-shell">
-      ${renderStepProgress("improve")}
+      ${renderStepProgress(showUpgrade || showMoveOption ? "upgrade" : "improve")}
       <section class="focused-writing-card improve-action-card">
         <div class="focused-image-frame">
           <img class="focused-image-preview" src="${session.image_url}" alt="Image to describe">
         </div>
         <div class="focused-copy">
-          <p class="eyebrow">${ready ? "Ready for quiz" : `Refinement ${Math.max(1, attemptNumber)}`}</p>
-          <h3>${ready ? "Excellent articulation. Let’s reinforce it." : "Improve your answer"}</h3>
+          <p class="eyebrow">${
+            articulation.complete
+              ? showUpgrade
+                ? "Articulation upgrade"
+                : "Description complete"
+              : `Layer ${articulation.currentIndex + 1 || Math.max(1, attemptNumber)}`
+          }</p>
+          <h3>${
+            showUpgrade
+              ? "✅ Scene covered"
+              : ready
+                ? "You built a complete description"
+                : "Explore the image"
+          }</h3>
+          ${
+            showUpgrade
+              ? `<p class="muted">✨ Want to make it sound more natural?</p>`
+              : ""
+          }
         </div>
-        ${showEditor ? renderImproveEditor({ rewriteDraft, currentFocus, hintGroups }) : ""}
+        ${renderArticulationProgress(articulation)}
+        ${showEditor ? renderImproveEditor({ rewriteDraft, currentFocus, hintGroups, articulation, escalation }) : ""}
+        ${showUpgrade ? renderArticulationUpgradeStage(upgradeState, upgradeSuggestions) : ""}
+        ${showMoveOption && upgradeState.finalized ? renderUpgradedAnswerPreview(upgradeState) : ""}
         ${showEditor ? `
           <button id="submitImproveButton" class="primary-button journey-primary-button" type="button">
-            Submit Improved Version
+            Add This Layer
           </button>
         ` : ""}
         ${showMoveOption ? `
           <div class="move-forward-box">
-            <strong>${ready ? "Ready for the quiz" : "You can keep building or move on"}</strong>
-            <p class="muted">${
-              ready
-                ? "Your explanation covers the main image well enough to practice it."
-                : "Keep refining the current focus before the quiz."
-            }</p>
+            <strong>Ready for quiz?</strong>
+            <p class="muted">Review your original and upgraded versions, then continue to the quiz.</p>
             <button id="continueToQuizButton" class="primary-button" type="button">Continue to Quiz</button>
           </div>
         ` : ""}
@@ -1504,6 +1539,28 @@ function renderImproveStep(session) {
     }
     requestImprovementFeedback(session, state.sessionFlow.explanation, improvedText);
   });
+  document.getElementById("finishArticulationUpgradeButton")?.addEventListener("click", () => {
+    finalizeArticulationUpgrade(upgradeState, upgradeSuggestions);
+  });
+  els.sessionDetailPanel.querySelectorAll("[data-apply-upgrade]").forEach((button) => {
+    button.addEventListener("click", () => {
+      applyArticulationUpgrade(button.dataset.applyUpgrade || "", upgradeSuggestions);
+      playTapAnimation(button);
+    });
+  });
+  els.sessionDetailPanel.querySelectorAll("[data-skip-upgrade]").forEach((button) => {
+    button.addEventListener("click", () => {
+      skipArticulationUpgrade(button.dataset.skipUpgrade || "", upgradeSuggestions);
+      playTapAnimation(button);
+    });
+  });
+  document.getElementById("articulationUpgradeInput")?.addEventListener("input", (event) => {
+    const upgradeState = state.sessionFlow.articulationUpgrade;
+    if (upgradeState) {
+      upgradeState.answer = event.target.value;
+      upgradeState.justApplied = false;
+    }
+  });
   document.getElementById("continueToQuizButton")?.addEventListener("click", () => {
     startPostImproveQuiz(session);
   });
@@ -1514,30 +1571,401 @@ function renderImproveStep(session) {
       button.classList.add("selected");
     });
   });
+  els.sessionDetailPanel.querySelectorAll("[data-stuck-upgrade-old]").forEach((button) => {
+    button.addEventListener("click", () => {
+      applyStuckLayerUpgrade(button.dataset.stuckUpgradeOld || "", button.dataset.stuckUpgradeNew || "");
+      playTapAnimation(button);
+      button.classList.add("selected");
+    });
+  });
+  els.sessionDetailPanel.querySelectorAll(".inline-upgrade-target").forEach((target) => {
+    target.addEventListener("click", (event) => {
+      if (event.target.closest(".inline-upgrade-popover")) {
+        return;
+      }
+      event.preventDefault();
+      openInlineUpgradePopover(target);
+    });
+  });
   window.setTimeout(() => {
     document.getElementById("learnerImproveInput")?.focus();
+    positionInlineUpgradePopovers();
   }, 50);
 }
 
-function renderImproveEditor({ rewriteDraft, currentFocus, hintGroups }) {
+function openInlineUpgradePopover(target) {
+  els.sessionDetailPanel.querySelectorAll(".inline-upgrade-target.active").forEach((item) => {
+    if (item !== target) item.classList.remove("active", "show-below", "align-left", "align-right");
+  });
+  target.classList.toggle("active");
+  if (target.classList.contains("active")) {
+    positionInlineUpgradePopover(target);
+    window.setTimeout(() => {
+      document.addEventListener("click", closeInlineUpgradePopoverOnOutside, { once: true });
+    }, 0);
+  }
+}
+
+function closeInlineUpgradePopoverOnOutside(event) {
+  if (event.target.closest?.(".inline-upgrade-target")) {
+    document.addEventListener("click", closeInlineUpgradePopoverOnOutside, { once: true });
+    return;
+  }
+  els.sessionDetailPanel?.querySelectorAll(".inline-upgrade-target.active").forEach((item) => {
+    item.classList.remove("active", "show-below", "align-left", "align-right");
+  });
+}
+
+function positionInlineUpgradePopovers() {
+  els.sessionDetailPanel.querySelectorAll(".inline-upgrade-target.active").forEach(positionInlineUpgradePopover);
+}
+
+function positionInlineUpgradePopover(target) {
+  const popover = target.querySelector(".inline-upgrade-popover");
+  const container = target.closest(".inline-upgrade-answer");
+  if (!popover || !container) return;
+  target.classList.remove("show-below", "align-left", "align-right");
+  let rect = popover.getBoundingClientRect();
+  const containerRect = container.getBoundingClientRect();
+  if (rect.top < containerRect.top + 6 || rect.top < 8) {
+    target.classList.add("show-below");
+    rect = popover.getBoundingClientRect();
+  }
+  if (rect.left < containerRect.left + 6 || rect.left < 8) {
+    target.classList.add("align-left");
+  } else if (rect.right > containerRect.right - 6 || rect.right > window.innerWidth - 8) {
+    target.classList.add("align-right");
+  }
+}
+
+function renderImproveEditor({ rewriteDraft, currentFocus, hintGroups, articulation, escalation = {} }) {
+  const focus = buildLayerFocusDisplay(articulation?.currentLayer, currentFocus, escalation);
+  const stuckUpgrade = buildStuckLayerUpgrade(rewriteDraft, articulation?.currentLayer, escalation);
   return `
     <section class="improve-focus-card coach-reveal" ${coachRevealStyle(0)}>
-      <span class="field-label">Current Focus</span>
-      <p>${escapeHtml(currentFocus)}</p>
+      <span class="field-label">Current focus</span>
+      <h4>${escapeHtml(focus.title)}</h4>
+      <p>${escapeHtml(focus.support)}</p>
+      ${renderLayerSupportMessage(escalation)}
+      <small>${escapeHtml(focus.microPrompt)}</small>
     </section>
     ${renderImproveHintsCard(hintGroups)}
+    ${renderStuckLayerUpgrade(stuckUpgrade)}
     <textarea
       id="learnerImproveInput"
       class="focused-writing-input guided-writing-input"
       rows="6"
       maxlength="900"
-      placeholder="Keep editing your explanation here..."
+      placeholder="Keep your answer and add this layer..."
     >${escapeHtml(rewriteDraft)}</textarea>
   `;
 }
 
+function renderStuckLayerUpgrade(upgrade) {
+  if (!upgrade) return "";
+  return `
+    <section class="layer-upgrade-nudge coach-reveal" ${coachRevealStyle(2)}>
+      <span class="field-label">Try a quick upgrade</span>
+      <div class="layer-upgrade-row">
+        <span class="layer-upgrade-before">${escapeHtml(upgrade.oldText)}</span>
+        <span aria-hidden="true">→</span>
+        <button class="phrase-chip phrase-insert-chip improve-hint-chip" type="button" data-stuck-upgrade-old="${escapeHtml(upgrade.oldText)}" data-stuck-upgrade-new="${escapeHtml(upgrade.newText)}">
+          ${escapeHtml(upgrade.newText)}
+        </button>
+      </div>
+    </section>
+  `;
+}
+
+function renderLayerSupportMessage(escalation = {}) {
+  const message = cleanUiText(escalation.message);
+  if (!message || (escalation.level || 1) <= 1) {
+    return "";
+  }
+  return `<div class="layer-support-message">${escapeHtml(message)}</div>`;
+}
+
+function renderArticulationUpgradeStage(upgradeState, suggestions) {
+  const answer = upgradeState.answer || upgradeState.original || "";
+  const handled = new Set([...(upgradeState.applied || []), ...(upgradeState.skipped || [])]);
+  const activeSuggestions = suggestions.filter((item) => !handled.has(item.id));
+  const annotated = buildInlineUpgradeMarkup(answer, activeSuggestions);
+  const richnessTypes = richnessUpgradeTypes(activeSuggestions.length ? activeSuggestions : suggestions);
+  return `
+    <section class="articulation-upgrade-card richness-upgrade-card coach-reveal" ${coachRevealStyle(1)}>
+      <div class="upgrade-heading">
+        <span class="field-label">Richness upgrade</span>
+        <h4>Simple observation → richer visual articulation</h4>
+        <p class="muted">Tap only the upgrades you like. Your meaning stays yours.</p>
+      </div>
+      ${
+        richnessTypes.length
+          ? `<div class="richness-type-row">${richnessTypes.map((type) => `<span>${escapeHtml(type)}</span>`).join("")}</div>`
+          : ""
+      }
+      <div class="inline-upgrade-editor">
+        <span class="field-label">Tap a suggestion to replace the highlighted words</span>
+        <div class="inline-upgrade-answer ${upgradeState.justApplied ? "replacement-flash" : ""}" aria-live="polite">
+          ${annotated.markup || escapeHtml(answer)}
+        </div>
+        ${
+          annotated.count
+            ? `<p class="muted inline-upgrade-help">${annotated.count} suggestion${pluralize(annotated.count)} available. Use X to dismiss one.</p>`
+            : `<p class="muted inline-upgrade-help">No exact upgrade targets remain. You can manually edit before previewing.</p>`
+        }
+      </div>
+      <div class="upgrade-answer-panel">
+        <label class="field-label" for="articulationUpgradeInput">Manual edit</label>
+        <textarea
+          id="articulationUpgradeInput"
+          class="focused-writing-input articulation-upgrade-input"
+          rows="4"
+          maxlength="900"
+          placeholder="Edit your upgraded answer..."
+        >${escapeHtml(answer)}</textarea>
+      </div>
+      <button id="finishArticulationUpgradeButton" class="secondary-button" type="button">
+        ${annotated.count ? "Skip remaining and preview" : "Keep my version and preview"}
+      </button>
+    </section>
+  `;
+}
+
+function richnessUpgradeTypes(suggestions = []) {
+  const labels = {
+    visual_quality: "Visual quality",
+    composition: "Composition",
+    atmosphere: "Atmosphere",
+    impression: "Impression",
+    flow: "Sentence flow",
+    vocabulary: "Stronger vocabulary",
+    verb: "Better verbs",
+    positioning: "Positioning",
+  };
+  return uniqueWritingHints((suggestions || []).map((item) => labels[item.type] || upgradeTypeLabel(item.type))).slice(0, 5);
+}
+
+function buildInlineUpgradeMarkup(answer, suggestions) {
+  const text = String(answer || "");
+  if (!text) {
+    return { markup: "", count: 0 };
+  }
+  const targets = nonOverlappingUpgradeTargets(text, suggestions);
+  if (!targets.length) {
+    return { markup: escapeHtml(text), count: 0 };
+  }
+
+  let cursor = 0;
+  const pieces = [];
+  targets.forEach((target) => {
+    const item = target.item;
+    pieces.push(escapeHtml(text.slice(cursor, target.start)));
+    pieces.push(`
+      <span class="inline-upgrade-target" data-upgrade-id="${escapeHtml(item.id)}">
+        <span class="inline-upgrade-popover">
+          <button class="inline-upgrade-choice" type="button" data-apply-upgrade="${escapeHtml(item.id)}">
+            ${escapeHtml(item.newText)}
+            <small>${escapeHtml(upgradeTypeLabel(item.type))} · +${item.xp} XP</small>
+          </button>
+          <button class="inline-upgrade-dismiss" type="button" data-skip-upgrade="${escapeHtml(item.id)}" aria-label="Dismiss upgrade">×</button>
+        </span>
+        <span class="inline-upgrade-original">${escapeHtml(text.slice(target.start, target.end))}</span>
+      </span>
+    `);
+    cursor = target.end;
+  });
+  pieces.push(escapeHtml(text.slice(cursor)));
+  return {
+    markup: pieces.join(""),
+    count: targets.length,
+  };
+}
+
+function nonOverlappingUpgradeTargets(answer, suggestions) {
+  const source = String(answer || "");
+  const sourceKey = source.toLowerCase();
+  const occupied = [];
+  return (suggestions || [])
+    .map((item) => {
+      const oldText = cleanUiText(item.oldText);
+      if (!oldText) {
+        return null;
+      }
+      const start = sourceKey.indexOf(oldText.toLowerCase());
+      if (start < 0) {
+        return null;
+      }
+      const end = start + oldText.length;
+      return { item, start, end, length: oldText.length };
+    })
+    .filter(Boolean)
+    .sort((a, b) => a.start - b.start || a.length - b.length)
+    .filter((target) => {
+      const overlaps = occupied.some((range) => target.start < range.end && target.end > range.start);
+      if (overlaps) {
+        return false;
+      }
+      occupied.push({ start: target.start, end: target.end });
+      return true;
+    })
+    .slice(0, 5);
+}
+
+function renderUpgradedAnswerPreview(upgradeState) {
+  return `
+    <section class="articulation-upgrade-card upgrade-preview-card coach-reveal" ${coachRevealStyle(1)}>
+      <div class="upgrade-heading">
+        <span class="field-label">Before → After</span>
+        <h4>Your richer paragraph is ready.</h4>
+      </div>
+      <div class="answer-comparison-grid">
+        <div class="previous-answer-box">
+          <span class="field-label">Original user version</span>
+          <p>${escapeHtml(upgradeState.original || "")}</p>
+        </div>
+        <div class="previous-answer-box improved-version-box">
+          <span class="field-label">Upgraded version</span>
+          <p>${escapeHtml(upgradeState.answer || upgradeState.original || "")}</p>
+        </div>
+      </div>
+    </section>
+  `;
+}
+
+function renderArticulationProgress(articulation) {
+  const layers = articulation?.layers || [];
+  if (!layers.length) {
+    return "";
+  }
+  const total = layers.length;
+  const current = Math.max(0, articulation.currentIndex);
+  const activeIndex = current >= 0 ? current : total - 1;
+  const nextLayer = layers[activeIndex + 1];
+  return `
+    <section class="articulation-progress-card coach-reveal" ${coachRevealStyle(0)}>
+      <div class="articulation-progress-topline">
+        <span>Focus ${Math.min(activeIndex + 1, total)} of ${total}</span>
+        <div class="articulation-dot-row" aria-label="Articulation progress">
+          ${layers
+            .map(
+              (layer, index) => `
+                <span
+                  class="articulation-dot ${layer.completed ? "complete" : index === activeIndex ? "current" : ""}"
+                  aria-label="${layer.completed ? "Completed" : index === activeIndex ? "Current focus" : "Upcoming focus"}"
+                ></span>
+              `
+            )
+            .join("")}
+        </div>
+      </div>
+      ${
+        nextLayer
+          ? `<p class="articulation-next-preview">Next: ${escapeHtml(shortFocusPreview(nextLayer))}</p>`
+          : ""
+      }
+    </section>
+  `;
+}
+
+function buildLayerFocusDisplay(layer, currentFocus, escalation = {}) {
+  const title = conciseLayerFocusTitle(layer, currentFocus);
+  const guidance = cleanUiText(currentFocus);
+  const defaultSupport = supportingLineForLayer(layer);
+  return {
+    title: `${focusIconForLayer(layer, title)} ${title}`.trim(),
+    support: !layer?.dynamic && guidance && normalizeClientText(guidance) !== normalizeClientText(title) && guidance.length <= 110
+      ? guidance
+      : defaultSupport,
+    microPrompt: cleanUiText(layerExpansionPrompt(layer, escalation)) || "Add one clear visual detail.",
+  };
+}
+
+function focusIconForLayer(layer, title = "") {
+  const text = normalizeClientText(`${layer?.category || ""} ${layer?.visualFocus || ""} ${layer?.label || ""} ${title}`);
+  if (/\b(flower|petal|blossom)\b/.test(text)) return "🌸";
+  if (/\b(tree|trees|greenery|plants|bushes|shrubs|leaves)\b/.test(text)) return "🌿";
+  if (/\b(light|lighting|sun|sunlight|shadow|reflection)\b/.test(text)) return "☀️";
+  if (/\b(car|vehicle|vehicles|road|traffic|street)\b/.test(text)) return "🚗";
+  if (/\b(apartment|architecture|unfinished|construction|structure|building|buildings)\b/.test(text)) return "🏢";
+  if (/\b(room|building|roadside|city|street|environment|area)\b/.test(text)) return "🏙";
+  if (/\b(texture|fabric|surface)\b/.test(text)) return "🔎";
+  return "";
+}
+
+function conciseLayerFocusTitle(layer, fallback = "") {
+  const category = layer?.category || "";
+  const focus = cleanUiText(layer?.visualFocus || layer?.label || fallback)
+    .replace(/^describe\s+/i, "")
+    .replace(/[.!?]+$/g, "");
+  const normalized = normalizeClientText(focus);
+  if (category === "lighting" || /\b(light|lighting|sunlight|shadow|reflection)\b/.test(normalized)) {
+    return "What stands out about the lighting?";
+  }
+  if (/\b(flower|petal|blossom)\b/.test(normalized)) {
+    return "Explain the flower's appearance";
+  }
+  if (/\b(tree|trees|shrub|shrubs|leaf|leaves|greenery|plants|bushes)\b/.test(normalized)) {
+    return "Add more detail about the greenery";
+  }
+  if (/\b(car|cars|vehicle|vehicles|bus|road|traffic)\b/.test(normalized)) {
+    return category === "environment" ? "Describe the surroundings near the road" : "What stands out about the vehicles?";
+  }
+  if (/\b(apartment|building|buildings|unfinished|structure|construction|architecture)\b/.test(normalized)) {
+    return "Describe the buildings in the background";
+  }
+  if (/\b(room|desk|window|curtain|wall|floor|table)\b/.test(normalized)) {
+    return "Describe how this area looks";
+  }
+  if (["atmosphere", "condition"].includes(category)) {
+    return category === "condition" ? "What condition do you notice?" : "What feeling does the scene create?";
+  }
+  if (category === "positioning") {
+    return "Where does this detail appear?";
+  }
+  if (category === "texture") {
+    return focus ? `What texture do you notice in ${stripLeadingArticle(focus)}?` : "What texture do you notice?";
+  }
+  if (category === "contrast") {
+    return "What stands out visually?";
+  }
+  if (category === "composition") {
+    return "What catches your eye first?";
+  }
+  if (["movement", "interaction"].includes(category)) {
+    return focus ? `What is happening around ${stripLeadingArticle(focus)}?` : "What is happening in this part?";
+  }
+  if (category === "appearance") {
+    return focus ? `Explain the appearance of ${stripLeadingArticle(focus)}` : "Explain the appearance";
+  }
+  if (category === "environment") {
+    return focus ? `Describe the surroundings near ${stripLeadingArticle(focus)}` : "Describe the surroundings nearby";
+  }
+  return focus ? `Add detail about ${stripLeadingArticle(focus)}` : "Add one clear visual detail";
+}
+
+function supportingLineForLayer(layer) {
+  const category = layer?.category || "";
+  if (category === "positioning") return "Where is it in the scene?";
+  if (category === "lighting") return "Describe what the light changes or highlights.";
+  if (category === "texture") return "Use a simple texture word if you can.";
+  if (category === "contrast") return "Look for what feels different or noticeable.";
+  if (category === "composition") return "Say what your eyes notice first.";
+  if (["movement", "interaction"].includes(category)) return "Add one clear action or relationship.";
+  if (["atmosphere", "condition"].includes(category)) return "Use one simple clue from the image.";
+  if (category === "appearance") return "Add color, shape, texture, or size.";
+  return "What makes this part of the scene noticeable?";
+}
+
+function shortFocusPreview(layer) {
+  return conciseLayerFocusTitle(layer).replace(/^(Describe|Add|Add more detail about|What stands out about|Explain|Explain the appearance of)\s+/i, "").replace(/\?$/g, "");
+}
+
+function stripLeadingArticle(value) {
+  return cleanUiText(value).replace(/^(the|a|an)\s+/i, "");
+}
+
 function renderImproveHintsCard(groups) {
-  const visibleGroups = groups.filter((group) => group.items.length);
+  const visibleGroups = simplifyHintGroups(groups);
   if (!visibleGroups.length) {
     return "";
   }
@@ -1570,8 +1998,1132 @@ function renderImproveHintsCard(groups) {
   `;
 }
 
-function buildImproveCurrentFocus(issue) {
+function simplifyHintGroups(groups = []) {
+  const labelLimits = {
+    nouns: 5,
+    noun: 5,
+    verbs: 4,
+    verb: 4,
+    details: 5,
+    phrases: 5,
+    "useful phrases": 5,
+    positioning: 5,
+    adjectives: 4,
+    adjective: 4,
+    structures: 3,
+    "sentence frame": 1,
+    "sentence frames": 3,
+    "sentence structure": 3,
+  };
+  return groups.map((group) => {
+    const label = cleanUiText(group.label || "");
+    const key = normalizeClientText(label);
+    const limit = labelLimits[key] || (key.includes("adjective") ? 2 : key.includes("structure") || key.includes("frame") ? 1 : 3);
+    const items = uniqueWritingHints((group.items || []).map((item) => simplifyWritingHint(item, label)).filter(Boolean)).slice(0, limit);
+    return { label: normalizeHintLabel(label), items };
+  }).filter((group) => group.items.length).slice(0, 5);
+}
+
+function normalizeHintLabel(label) {
+  const key = normalizeClientText(label);
+  if (key.includes("noun")) return "Nouns";
+  if (key.includes("verb")) return "Verbs";
+  if (key.includes("adjective") || key.includes("choice")) return "Adjectives";
+  if (key.includes("structure") || key.includes("frame")) return "Sentence frames";
+  if (key.includes("position")) return "Phrases";
+  return "Phrases";
+}
+
+function simplifyWritingHint(value, label = "") {
+  let text = cleanUiText(value)
+    .replace(/[.!?]+$/g, "")
+    .replace(/^describe\s+/i, "")
+    .replace(/^the image shows\s+/i, "")
+    .replace(/^there (is|are)\s+/i, "")
+    .replace(/\bcovering most of\b.*$/i, "")
+    .trim();
+  if (!text) return "";
+  const key = normalizeClientText(label);
+  if (key.includes("noun")) {
+    text = nounLikeHint(text);
+  } else if (key.includes("verb")) {
+    text = verbLikeHint(text);
+  } else if (key.includes("adjective") || key.includes("choice")) {
+    text = adjectiveLikeHint(text);
+  } else if (!key.includes("structure") && !key.includes("frame")) {
+    text = phraseLikeHint(text);
+  }
+  const maxWords = key.includes("structure") || key.includes("frame") ? 12 : 5;
+  return text.split(/\s+/).length <= maxWords ? text : "";
+}
+
+function nounLikeHint(value) {
+  const text = cleanUiText(value);
+  const matches = text.match(/\b(apartment buildings|unfinished structure|buildings|structure|construction|architecture|palm trees|trees|bushes|shrubs|greenery|vehicles|cars|road|street|wires|poles|desk|curtain|window|flower|petals|leaves|background|room)\b/gi);
+  if (matches?.length) return matches[0].toLowerCase();
+  return text.split(/\s+/).slice(0, 3).join(" ");
+}
+
+function verbLikeHint(value) {
+  const text = normalizeClientText(value);
+  const matches = text.match(/\b(stretch|stretching|line|lining|shade|shading|stand|standing|rise|rising|move|moving|pass|passing|parked|cover|covering|surround|surrounding)\b/g);
+  return matches?.[0] || "";
+}
+
+function adjectiveLikeHint(value) {
+  const text = normalizeClientText(value);
+  const matches = text.match(/\b(dense|lush|green|bright|dark|soft|dusty|messy|clean|calm|busy|crowded|quiet|blurred|vivid|delicate|tangled|wooden|natural|unfinished|tall|distant|concrete|urban)\b/g);
+  return matches?.[0] || "";
+}
+
+function phraseLikeHint(value) {
+  const text = cleanUiText(value);
+  const useful = text.match(/\b(branches stretching over the road|leaves creating shade|greenery along the roadside|trees lining the street|road surface|lane markings|along the roadside|parked motorcycle|moving car|roadside vehicle|tall buildings|concrete walls|apartment buildings in the background|bright daylight|shaded area|sunlight on the road|in the background|behind the greenery|above the road|covered with greenery|lined with trees|in the foreground|under the desk|near the window|beside the road|softly blurred|surrounded by leaves)\b/i);
+  if (useful) return useful[0].toLowerCase();
+  return text.split(/\s+/).slice(0, 4).join(" ");
+}
+
+function buildArticulationState(feedback, session, learnerText = "") {
+  const coverage = getProgressiveCoverageState(feedback || {});
+  const layers = articulationLayerDefinitions(feedback, session, learnerText).map((layer) => ({
+    ...layer,
+    completed: Boolean(layer.completed),
+    current: false,
+  }));
+  const currentIndex = layers.findIndex((layer) => !layer.completed);
+  if (currentIndex >= 0) {
+    layers[currentIndex].current = true;
+  }
+  return {
+    layers,
+    currentIndex,
+    currentLayer: currentIndex >= 0 ? layers[currentIndex] : null,
+    complete: currentIndex === -1 && layers.length > 0,
+    coverage,
+    imageType: session?.analysis?.image_type || "dynamic",
+  };
+}
+
+function completedArticulationLayerKeys(feedback, session, learnerText = "") {
+  return articulationLayerDefinitions(feedback, session, learnerText)
+    .filter((layer) => layer.completed)
+    .map((layer) => layer.key);
+}
+
+function awardNewLayerCompletionXp(session, feedback, learnerText = "") {
+  const completed = completedArticulationLayerKeys(feedback, session, learnerText);
+  const rewarded = new Set(state.sessionFlow.layerRewards || []);
+  const newKeys = completed.filter((key) => !rewarded.has(key));
+  if (!newKeys.length) {
+    return;
+  }
+  state.sessionFlow.layerRewards = uniqueWritingHints([...rewarded, ...newKeys]);
+  const points = newKeys.length * 10;
+  awardLocalXp(points);
+  showToast(`+${points} XP — ${newKeys.length === 1 ? "Layer completed" : "Layers completed"}`);
+
+  const allKeys = articulationLayerDefinitions(feedback, session, learnerText).map((layer) => layer.key);
+  const allComplete = allKeys.length > 0 && allKeys.every((key) => state.sessionFlow.layerRewards.includes(key));
+  if (allComplete && !state.sessionFlow.allLayersBonusAwarded) {
+    state.sessionFlow.allLayersBonusAwarded = true;
+    awardLocalXp(20);
+    showToast("+20 XP — All image layers covered");
+  }
+}
+
+function articulationLayerDefinitions(feedback, session, learnerText = "") {
+  const normalizedText = normalizeClientText(learnerText);
+  const analysis = session?.analysis || {};
+  const targets = analysisArticulationTargets(analysis);
+  return targets.map((target, index) => ({
+    key: target.id || `target_${index + 1}`,
+    label: target.label || target.visualFocus || `Target ${index + 1}`,
+    focusArea: target.visualFocus || target.label || target.category || "image detail",
+    category: target.category || "detail",
+    prompt: target.prompt,
+    expansionPrompt: target.expansionPrompt,
+    visualFocus: target.visualFocus,
+    evidence: target.evidence,
+    hints: target.hints,
+    dynamic: true,
+    completed: dynamicTargetCompleted(target, feedback, analysis, normalizedText),
+  }));
+}
+
+function analysisArticulationTargets(analysis = {}) {
+  const rawTargets = Array.isArray(analysis.articulation_targets) ? analysis.articulation_targets : [];
+  const normalized = rawTargets.map((target, index) => normalizeClientArticulationTarget(target, index)).filter(Boolean);
+  const targets = normalized.length >= 3 ? normalized : buildFallbackArticulationTargets(analysis, normalized);
+  const seen = new Set();
+  return targets.filter((target) => {
+    const key = normalizeClientText(`${target.category} ${target.label} ${target.visualFocus}`);
+    if (!key || seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  }).slice(0, 6);
+}
+
+function normalizeClientArticulationTarget(target, index = 0) {
+  if (!target || typeof target !== "object") return null;
+  const label = cleanUiText(target.label || target.title || target.visual_focus || target.focus || target.prompt);
+  const prompt = cleanUiText(target.prompt || target.question || "");
+  const visualFocus = cleanUiText(target.visual_focus || target.visualFocus || target.focus || label);
+  const category = normalizeTargetCategory(target.category || label || prompt);
+  if (!label && !prompt && !visualFocus) return null;
+  if (isGenericTargetLabel(label, prompt)) return null;
+  const hints = cleanLayerHints([...(target.hints || []), ...(target.words || [])], 6);
+  const evidence = cleanLayerHints([...(target.evidence || []), ...(target.visual_evidence || [])], 4);
+  return {
+    id: cleanTargetId(target.id || `${category}_${index + 1}_${label || visualFocus}`),
+    label: label || visualFocus || `Image detail ${index + 1}`,
+    prompt: prompt || `Describe ${visualFocus || label}.`,
+    expansionPrompt: cleanUiText(target.expansionPrompt || target.expansion_prompt || ""),
+    category,
+    visualFocus: visualFocus || label,
+    hints,
+    evidence,
+    importance: Number(target.importance || 0.6),
+  };
+}
+
+function buildFallbackArticulationTargets(analysis = {}, existing = []) {
+  const targets = [...existing];
+  const seen = new Set(targets.map((target) => normalizeClientText(`${target.category} ${target.label} ${target.visualFocus}`)));
+  const add = (target) => {
+    const normalized = normalizeClientArticulationTarget(target, targets.length);
+    if (!normalized) return;
+    const key = normalizeClientText(`${normalized.category} ${normalized.label} ${normalized.visualFocus}`);
+    if (!key || seen.has(key) || targets.length >= 6) return;
+    seen.add(key);
+    targets.push(normalized);
+  };
+
+  const objects = (analysis.objects || [])
+    .map((item) => ({
+      name: cleanUiText(item?.name || item),
+      description: cleanUiText(item?.description || ""),
+      color: cleanUiText(item?.color || ""),
+      position: cleanUiText(item?.position || ""),
+      evidence: cleanLayerHints(item?.visual_evidence || item?.evidence || [], 3),
+      importance: Number(item?.importance || 0.6),
+    }))
+    .filter((item) => item.name)
+    .sort((a, b) => b.importance - a.importance);
+
+  objects.slice(0, 3).forEach((object) => {
+    add({
+      label: `Add detail about ${object.name}`,
+      prompt: `Add detail about ${object.name}.`,
+      category: "appearance",
+      visual_focus: object.name,
+      evidence: [object.description, object.position, ...object.evidence],
+      hints: [object.name, object.color, object.position, ...object.evidence],
+      importance: object.importance,
+    });
+  });
+
+  (analysis.actions || []).filter((item) => isMeaningfulActionPhrase(item?.phrase || item?.verb || item)).slice(0, 2).forEach((action) => {
+    const phrase = cleanUiText(action?.phrase || action?.verb || action);
+    const category = normalizeTargetCategory(phrase);
+    add({
+      label: `What stands out about ${phrase}?`,
+      prompt: `What stands out about ${phrase}?`,
+      category,
+      visual_focus: phrase,
+      evidence: [action?.visible_evidence, action?.description],
+      hints: [phrase, action?.verb],
+      importance: Number(action?.importance || 0.6),
+    });
+  });
+
+  (analysis.visual_zones || []).forEach((zone) => {
+    const zoneName = cleanUiText(zone?.zone || "").replace(/_/g, " ");
+    const elements = cleanLayerHints(zone?.elements || [], 5);
+    const opportunities = cleanLayerHints(zone?.articulation_opportunities || zone?.opportunities || [], 5);
+    const focus = bestZoneFocus(zoneName, elements, opportunities);
+    if (!focus) return;
+    const category = normalizeTargetCategory(`${focus} ${opportunities.join(" ")} ${zoneName}`);
+    add({
+      label: zoneTargetLabel(focus, category, zoneName),
+      prompt: zoneTargetLabel(focus, category, zoneName),
+      category: category === "detail" ? "environment" : category,
+      visual_focus: focus,
+      evidence: [zoneName, ...elements, ...opportunities],
+      hints: [focus, ...elements.slice(0, 2), ...opportunities.slice(0, 2)],
+      importance: Number(zone?.importance || 0.55),
+    });
+  });
+
+  (analysis.environment_details || []).slice(0, 4).forEach((detail) => {
+    const text = cleanUiText(detail);
+    if (!text) return;
+    const category = conditionRelatedHint(text) ? "condition" : positioningRelatedHint(text) ? "positioning" : normalizeTargetCategory(text);
+    add({
+      label: `Add detail about ${text}`,
+      prompt: `Add detail about ${text}.`,
+      category,
+      visual_focus: text,
+      evidence: [analysis.environment, text],
+      hints: [text, "nearby", "in the background"],
+      importance: 0.55,
+    });
+  });
+
+  const summary = cleanUiText(analysis.scene_summary_natural || analysis.native_explanation || analysis.scene_summary_simple);
+  const moodHints = uniqueWritingHints([
+    ...((analysis.vocabulary || []).map((item) => item?.word || item?.phrase || item)),
+    ...(analysis.environment_details || []),
+  ]).filter(atmosphereRelatedHint).slice(0, 5);
+  if (moodHints.length && atmosphereRelatedHint(summary)) {
+    add({
+      label: "Describe the feeling of the scene",
+      prompt: "What feeling does the scene create?",
+      category: "atmosphere",
+      visual_focus: "the feeling of the scene",
+      evidence: analysis.environment_details || [],
+      hints: moodHints,
+      importance: 0.45,
+    });
+  }
+
+  if (targets.length < 3 && cleanUiText(analysis.environment)) {
+    add({
+      label: `Describe the area around ${cleanUiText(analysis.environment)}`,
+      prompt: `Describe the area around ${cleanUiText(analysis.environment)}.`,
+      category: "environment",
+      visual_focus: cleanUiText(analysis.environment),
+      evidence: analysis.environment_details || [],
+      hints: [analysis.environment, "around it", "behind it"],
+      importance: 0.5,
+    });
+  }
+  return targets;
+}
+
+function bestZoneFocus(zoneName, elements = [], opportunities = []) {
+  const candidates = [...elements, ...opportunities].map(cleanUiText).filter(Boolean);
+  const priority = [
+    /\b(apartment buildings?|buildings?|unfinished structure|construction|architecture)\b/i,
+    /\b(wires?|poles?|skyline|upper|background)\b/i,
+    /\b(lighting|sunlight|shadow|reflection)\b/i,
+    /\b(contrast|behind|foreground|middle ground|background)\b/i,
+  ];
+  for (const pattern of priority) {
+    const match = candidates.find((item) => pattern.test(item));
+    if (match) return match;
+  }
+  if (/\bbackground|upper/.test(normalizeClientText(zoneName)) && candidates.length) return candidates[0];
+  return candidates[0] || "";
+}
+
+function zoneTargetLabel(focus, category, zoneName) {
+  const text = cleanUiText(focus);
+  if (/\b(apartment|building|structure|construction|architecture)\b/i.test(text)) {
+    return `Describe the ${text} in the background`;
+  }
+  if (category === "lighting") return `What stands out about the lighting near ${text}?`;
+  if (["composition", "positioning", "contrast"].includes(category)) return `What stands out in the ${zoneName || "background"}?`;
+  return `Add detail about ${text}`;
+}
+
+function normalizeTargetCategory(value) {
+  const text = normalizeClientText(value);
+  if (/\b(light|lighting|shadow|sun|bright)\b/.test(text)) return "lighting";
+  if (/\b(texture|rough|smooth|fabric|surface)\b/.test(text)) return "texture";
+  if (/\b(color|appearance|shape|surface|petal|fabric)\b/.test(text)) return "appearance";
+  if (/\b(apartment|building|structure|construction|architecture)\b/.test(text)) return "environment";
+  if (/\b(position|arrangement|foreground|background|near|behind|under|beside)\b/.test(text)) return "positioning";
+  if (/\b(composition|layout|framing|center|focus|focused)\b/.test(text)) return "composition";
+  if (/\b(contrast|stands out|against|different)\b/.test(text)) return "contrast";
+  if (/\b(feeling|mood|atmosphere|calm|busy|messy|peaceful)\b/.test(text)) return "atmosphere";
+  if (/\b(condition|dust|dirty|clean|clutter|maintained|worn)\b/.test(text)) return "condition";
+  if (/\b(walking|running|driving|crowd|traffic|moving|movement)\b/.test(text)) return "movement";
+  if (/\b(holding|using|carrying|talking|playing|interaction|together)\b/.test(text)) return "interaction";
+  if (/\b(room|street|garden|background|surroundings|environment|area|place|desk|roadside)\b/.test(text)) return "environment";
+  return "detail";
+}
+
+function isGenericTargetLabel(label, prompt) {
+  const text = normalizeClientText(`${label} ${prompt}`).trim();
+  return ["subject", "action", "environment", "details", "atmosphere", "describe the environment", "describe details", "describe the action"].includes(text);
+}
+
+function cleanTargetId(value) {
+  return normalizeClientText(value).replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "").slice(0, 48) || "target";
+}
+
+function dynamicTargetCompleted(target, feedback, analysis, normalizedText) {
+  if (!normalizedText) return false;
+  const directTerms = dynamicTargetTerms(target).filter((term) => term.length >= 3);
+  const directMatches = directTerms.filter((term) => normalizedText.includes(normalizeClientText(term))).length;
+  if (directMatches >= (target.category === "appearance" ? 2 : 1)) return true;
+  if (["movement", "interaction"].includes(target.category)) return isMeaningfulActionPhrase(normalizedText) && directMatches > 0;
+  if (["appearance", "texture", "contrast"].includes(target.category) && hasAppearanceLayer(feedback, analysis, normalizedText)) return directMatches > 0;
+  if (["positioning", "composition", "environment", "lighting"].includes(target.category) && hasCompositionLayer(feedback, analysis, normalizedText)) return directMatches > 0 || /\b(near|behind|under|beside|background|foreground|bright|light|shadow|roadside|room|street)\b/.test(normalizedText);
+  if (["atmosphere", "condition"].includes(target.category)) return hasAtmosphereLayer(feedback, analysis, normalizedText) || conditionRelatedHint(normalizedText);
+  return false;
+}
+
+function dynamicTargetTerms(target = {}) {
+  return uniqueWritingHints([
+    target.visualFocus,
+    target.label,
+    ...(target.hints || []),
+    ...(target.evidence || []),
+  ]).flatMap((item) => compactTargetTerms(item));
+}
+
+function compactTargetTerms(value) {
+  const text = cleanUiText(value);
+  if (!text) return [];
+  const pieces = [text];
+  text.split(/\s+/).forEach((word) => {
+    if (word.length >= 4 && !COMMON_ARTICULATION_WORDS.has(normalizeClientText(word))) pieces.push(word);
+  });
+  return pieces;
+}
+
+const COMMON_ARTICULATION_WORDS = new Set(["describe", "image", "scene", "thing", "object", "area", "looks", "there", "nearby", "background"]);
+
+function buildLayerFeedbackIssue(layer, feedback, session) {
+  return {
+    message: layer.prompt || layer.focusArea,
+    focusAreas: [layer.focusArea],
+    additions: layerAdditions(layer, feedback, session),
+    target: layer,
+  };
+}
+
+function layerAdditions(layer, feedback, session) {
+  if (layer?.dynamic) {
+    return uniqueWritingHints([
+      ...(layer.hints || []),
+      ...(layer.evidence || []),
+      layer.visualFocus,
+      layer.label,
+    ]).slice(0, 6);
+  }
+  const analysis = session?.analysis || {};
+  if (["subject", "main_object", "person"].includes(layer.key)) return [primarySubjectHint(analysis)].filter(Boolean);
+  if (layer.key === "action") return [primaryActionPhrase(analysis)].filter(Boolean);
+  if (["environment", "surroundings", "main_environment", "background"].includes(layer.key)) {
+    return [primaryBackgroundHint(analysis) || cleanUiText(analysis.environment)].filter(Boolean);
+  }
+  if (["details", "objects"].includes(layer.key)) {
+    return uniqueWritingHints([
+      primaryObjectHint(analysis, 1),
+      primaryObjectHint(analysis, 2),
+      ...cleanUiList(feedback?.specific_guidance?.nouns || [], 3),
+    ]).filter(Boolean);
+  }
+  if (layer.key === "appearance") return appearanceHintsForAnalysis(analysis, feedback).slice(0, 3);
+  if (["composition", "layout"].includes(layer.key)) return compositionHintsForAnalysis(analysis, feedback).slice(0, 3);
+  if (layer.key === "expression") return expressionHintsForAnalysis(analysis, feedback).slice(0, 3);
+  if (["atmosphere", "mood"].includes(layer.key)) {
+    return uniqueWritingHints([
+      primaryAtmosphereHint(analysis),
+      ...atmosphereChoiceWords(analysis),
+      ...conditionHintWords(analysis),
+    ]).filter(Boolean).slice(0, 5);
+  }
+  return [];
+}
+
+function buildLayerCurrentFocus(layer, session, escalation = {}) {
+  if (layer?.dynamic) {
+    return dynamicTargetPrompt(layer, session, escalation.level || 1);
+  }
+  const level = escalation.level || 1;
+  const progressive = progressiveLayerPrompt(layer, session, level);
+  if (progressive) {
+    return progressive;
+  }
+  const text = {
+    subject: "Describe the main subject",
+    main_object: "Describe the main object",
+    person: "Describe the person",
+    action: "Explain what is happening",
+    environment: "Add background details",
+    main_environment: "Describe the main environment",
+    surroundings: "Describe the surroundings",
+    details: "Mention important objects",
+    objects: "Mention important objects",
+    appearance: "Add visual details",
+    composition: "Explain the composition",
+    layout: "Describe the layout",
+    expression: "Describe the expression or posture",
+    atmosphere: "Describe the atmosphere",
+    mood: "Describe the mood",
+  };
+  return text[layer.key] || "Add one more layer";
+}
+
+function dynamicTargetPrompt(layer, session, level = 1) {
+  const base = cleanUiText(layer.prompt || `Describe ${layer.visualFocus || layer.label}.`);
+  if (level <= 1) return base;
+  if (level === 2) return dynamicNoticePrompt(layer, session);
+  if (level === 3) return dynamicContrastPrompt(layer, session);
+  if (level >= 4) return dynamicSentenceScaffold(layer, session);
+  return base;
+}
+
+function dynamicNoticePrompt(layer, session) {
+  const evidence = dynamicVisibleEvidence(layer, session);
+  return evidence ? `👀 Notice ${evidence}.` : "👀 Notice one clear detail in this part of the image.";
+}
+
+function dynamicContrastPrompt(layer, session) {
+  const choices = dynamicTargetChoices(layer, session).slice(0, 4);
+  return choices.length
+    ? `Does this part feel: ${choices.join(", ")}?`
+    : "What kind of detail fits here: color, shape, position, or feeling?";
+}
+
+function dynamicSentenceScaffold(layer, session) {
+  const focus = stripLeadingArticle(cleanUiText(layer.visualFocus || layer.label || "this area"));
+  const evidence = dynamicVisibleEvidence(layer, session).replace(/^the\s+/i, "");
+  if (["atmosphere", "condition", "environment"].includes(layer.category)) {
+    return `The ${focus} looks ___ because of the ___.`;
+  }
+  if (layer.category === "lighting") {
+    return `The light makes the ${focus} look ___.`;
+  }
+  if (layer.category === "positioning") {
+    return `The ${focus} is ___ the ${evidence || "scene"}.`;
+  }
+  return `The ${focus} looks ___ and ___.`;
+}
+
+function dynamicVisibleEvidence(layer, session) {
+  return cleanLayerHints([
+    ...(layer?.evidence || []),
+    ...(layer?.hints || []),
+    layer?.visualFocus,
+    visibleEvidencePhrase(session?.analysis || {}),
+  ], 6).find((item) => item.split(/\s+/).length <= 6) || "";
+}
+
+function dynamicTargetChoices(layer, session) {
+  const category = layer?.category || "";
+  if (category === "lighting") return ["bright", "soft", "shadowy", "warm"];
+  if (category === "condition") return ["clean", "messy", "dusty", "well maintained"];
+  if (category === "atmosphere") return atmosphereChoiceWords(session?.analysis || {});
+  if (category === "environment") return ["peaceful", "crowded", "tropical", "busy"];
+  if (category === "texture") return ["smooth", "rough", "soft", "delicate"];
+  if (category === "contrast") return ["bright", "dark", "colorful", "noticeable"];
+  return uniqueWritingHints([
+    ...cleanLayerHints(layer?.hints || [], 4).map(adjectiveLikeHint).filter(Boolean),
+    "clear",
+    "noticeable",
+    "detailed",
+  ]);
+}
+
+function buildStuckLayerUpgrade(text, layer, escalation = {}) {
+  if (!layer?.dynamic || (escalation.level || 1) < 5) return null;
+  const source = cleanUiText(text);
+  if (!source) return null;
+  const category = layer.category || "";
+  const upgrades = [
+    ["nice", upgradePhraseForLayer(layer, "nice")],
+    ["good", upgradePhraseForLayer(layer, "good")],
+    ["bad", category === "condition" ? "messy and neglected" : "not very clear"],
+    ["beautiful", category === "appearance" ? "bright and eye-catching" : "calm and attractive"],
+    ["many", category === "environment" ? "a dense area of" : "several visible"],
+    ["big", "large and noticeable"],
+    ["small", "small but noticeable"],
+  ];
+  const found = upgrades.find(([oldText, newText]) => newText && newText !== oldText && new RegExp(`\\b${escapeRegExp(oldText)}\\b`, "i").test(source));
+  if (!found) {
+    const choices = dynamicTargetChoices(layer, {}).filter(Boolean);
+    const focus = stripLeadingArticle(cleanUiText(layer.visualFocus || "this area"));
+    return choices[0] ? { oldText: focus.split(/\s+/)[0] || "this", newText: `${choices[0]} ${focus}` } : null;
+  }
+  return { oldText: found[0], newText: found[1] };
+}
+
+function upgradePhraseForLayer(layer, word) {
+  const category = layer?.category || "";
+  if (category === "atmosphere") return word === "nice" ? "peaceful and inviting" : "calm and natural";
+  if (category === "environment") return word === "nice" ? "peaceful and tropical" : "clear and well arranged";
+  if (category === "lighting") return word === "nice" ? "soft and bright" : "naturally lit";
+  if (category === "condition") return word === "nice" ? "clean and well maintained" : "neatly arranged";
+  if (category === "texture") return word === "nice" ? "smooth and delicate" : "clear and textured";
+  return word === "nice" ? "clear and noticeable" : "more detailed";
+}
+
+function applyStuckLayerUpgrade(oldText, newText) {
+  const input = document.getElementById("learnerImproveInput");
+  if (!input || !oldText || !newText) return;
+  const current = input.value || "";
+  if (new RegExp(`\\b${escapeRegExp(oldText)}\\b`, "i").test(current)) {
+    input.value = current.replace(new RegExp(`\\b${escapeRegExp(oldText)}\\b`, "i"), newText);
+  } else {
+    input.value = `${current.trim()} ${newText}`.trim();
+  }
+  input.focus();
+  showToast("+5 XP — wording upgraded");
+  awardLocalXp(5);
+}
+
+function escapeRegExp(value) {
+  return String(value || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function progressiveLayerPrompt(layer, session, level = 1) {
+  const key = normalizeLayerGuidanceKey(layer);
+  const analysis = session?.analysis || {};
+  const evidence = visibleEvidencePhrase(analysis);
+  const object = primaryObjectHint(analysis, 0) || primarySubjectHint(analysis) || "the main object";
+  const background = primaryBackgroundHint(analysis) || "the background";
+  const prompts = {
+    atmosphere: [
+      "What feeling does the scene create?",
+      "Does the area feel clean, messy, calm, crowded, or neglected?",
+      evidence ? `Because of ${evidence}, the scene feels ___.` : "The scene feels ___.",
+    ],
+    composition: [
+      "What stands out visually?",
+      "What is closest to the camera or most noticeable?",
+      `The object closest to the camera is ${object === "the main object" ? "___" : object}.`,
+    ],
+    interpretation: [
+      "What does the scene suggest?",
+      "Does the scene suggest daily life, work, relaxation, disorder, or maintenance?",
+      evidence ? `Because of ${evidence}, the scene suggests ___.` : "The scene suggests ___.",
+    ],
+    condition: [
+      "What condition is the place or object in?",
+      "Does it look clean, messy, dusty, damaged, fresh, or well maintained?",
+      evidence ? `Because of ${evidence}, it looks ___.` : "It looks ___.",
+    ],
+    positioning: [
+      "Where is the important detail in the image?",
+      "Is it in the foreground, background, center, beside something, or behind something?",
+      `${object === "the main object" ? "The important detail" : object} is near ${background}.`,
+    ],
+  };
+  const options = prompts[key];
+  return options ? options[Math.min(Math.max(level, 1), 3) - 1] : "";
+}
+
+function layerExpansionPrompt(layer, escalation = {}) {
+  if (layer?.dynamic) {
+    return dynamicTargetExpansionPrompt(layer, escalation.level || 1);
+  }
+  const level = escalation.level || 1;
+  const progressive = progressiveLayerExpansionPrompt(layer, level);
+  if (progressive) {
+    return progressive;
+  }
+  const text = {
+    subject: "Start with who or what the image is mainly about.",
+    main_object: "Name the object or natural feature clearly before adding details.",
+    person: "Start with the person as the visual focus.",
+    action: "Keep your sentence and add what is happening.",
+    environment: "Expand the same answer with where it happens or what is behind it.",
+    main_environment: "Describe the place or setting first.",
+    surroundings: "Add what appears around the main object.",
+    details: "Add one or two important visible details without starting over.",
+    objects: "Add the visible objects that make the setting clearer.",
+    appearance: "Add color, shape, size, texture, or other visual details.",
+    composition: "Explain what is in focus or where the object appears.",
+    layout: "Use position words to show how the scene is arranged.",
+    expression: "Add face, body position, or posture language if it fits.",
+    atmosphere: "Finish by adding the feeling or quality of the scene.",
+    mood: "Finish with the feeling or expression the image gives.",
+  };
+  return text[layer?.key] || "Keep your answer and add one clear layer.";
+}
+
+function dynamicTargetExpansionPrompt(layer, level = 1) {
+  if (layer.expansionPrompt) return layer.expansionPrompt;
+  const focus = cleanUiText(layer.visualFocus || layer.label || "this part of the image");
+  if (level >= 5) return "Tap the quick upgrade if it fits, or edit it in your own words.";
+  if (level >= 3) return "Use the sentence frame and one hint word.";
+  if (level >= 2) return `Choose one hint and add it to your description of ${focus}.`;
+  return `Add one clear detail about ${focus}.`;
+}
+
+function progressiveLayerExpansionPrompt(layer, level = 1) {
+  const key = normalizeLayerGuidanceKey(layer);
+  if (!isAbstractLayerCategory(key)) {
+    return "";
+  }
+  const prompts = {
+    atmosphere: [
+      "Use one simple feeling word.",
+      "Choose a category, then add one adjective.",
+      "Finish the sentence frame with one direct word.",
+    ],
+    composition: [
+      "Name the most noticeable visual part.",
+      "Look for what is closest, centered, or in focus.",
+      "Use the frame to say exactly what stands out.",
+    ],
+    interpretation: [
+      "Say what the image makes you think about.",
+      "Choose a simple idea like work, daily life, disorder, or maintenance.",
+      "Use the visible evidence to finish the sentence.",
+    ],
+    condition: [
+      "Describe whether it looks clean, messy, fresh, or damaged.",
+      "Choose a condition word from the hints.",
+      "Use the evidence and finish the sentence.",
+    ],
+  };
+  const options = prompts[key];
+  return options ? options[Math.min(Math.max(level, 1), 3) - 1] : "";
+}
+
+function importantObjectCoverageCount(feedback, session, learnerText = "") {
+  const text = normalizeClientText(learnerText);
+  const objects = (session?.analysis?.objects || [])
+    .map((item) => cleanUiText(item?.name || item))
+    .filter(Boolean);
+  const mentionedObjects = objects.filter((item) => text.includes(normalizeClientText(item))).length;
+  const coveredParts = (feedback?.coverage?.imageParts || []).filter((part) => {
+    const type = normalizeClientText(part?.type || "");
+    return isCoveragePartCovered(part) && /\b(object|detail|foreground|important)\b/.test(type);
+  }).length;
+  return Math.max(mentionedObjects, coveredParts);
+}
+
+function classifyImproveImageType(analysis = {}) {
+  const objects = (analysis.objects || []).map((item) => cleanUiText(item?.name || item)).filter(Boolean);
+  const actions = (analysis.actions || []).map((item) => cleanUiText(item?.phrase || item?.verb || item)).filter(Boolean);
+  const environment = cleanUiText(analysis.environment);
+  const details = (analysis.environment_details || []).map(cleanUiText).filter(Boolean);
+  const summary = cleanUiText(analysis.scene_summary_natural || analysis.natural_explanation || analysis.scene_summary_simple);
+  const combined = normalizeClientText([...objects, ...actions, environment, ...details, summary].join(" "));
+  const hasMeaningfulAction = actions.some(isMeaningfulActionPhrase);
+  if (hasMeaningfulAction || /\b(traffic|sports?|game|cooking|machine|driving|walking|running|riding)\b/.test(combined)) {
+    return "action";
+  }
+  const primary = normalizeClientText(objects[0] || "");
+  const hasPerson = objects.some((item) => /\b(person|people|man|woman|child|boy|girl|face|selfie|portrait)\b/i.test(item));
+  if (hasPerson && !hasMeaningfulAction) {
+    return "portrait";
+  }
+  const objectFocus = /\b(flower|plant|leaf|tree|food|meal|dish|product|bottle|cup|book|phone|car|cat|dog|object|close up|closeup)\b/.test(combined);
+  const environmentFocus = /\b(park|street|beach|city|garden|landscape|view|field|yard|room|river|mountain|forest|road|market)\b/.test(combined);
+  if (objectFocus && (objects.length <= 3 || primary)) {
+    return "object";
+  }
+  if (environmentFocus) {
+    return "environment";
+  }
+  return objects.length <= 2 ? "object" : "environment";
+}
+
+function isMeaningfulActionPhrase(value) {
+  const text = normalizeClientText(value);
+  if (!text) return false;
+  if (/\b(walking|running|riding|driving|cooking|using|holding|playing|mowing|crossing|working|cutting|eating|drinking|throwing|jumping|swimming|climbing)\b/.test(text)) {
+    return true;
+  }
+  return !/\b(sitting|standing|posing|smiling|looking|facing|visible|appears?|shown)\b/.test(text) && /\b\w+ing\b/.test(text);
+}
+
+function mentionsPrimaryObject(analysis, normalizedText) {
+  const primary = normalizeClientText(primarySubjectHint(analysis));
+  return Boolean(primary && normalizedText.includes(primary));
+}
+
+function hasEnvironmentText(analysis, normalizedText) {
+  return [analysis.environment, ...(analysis.environment_details || [])]
+    .map((item) => normalizeClientText(item))
+    .filter(Boolean)
+    .some((item) => normalizedText.includes(item));
+}
+
+function hasAppearanceLayer(feedback, analysis, normalizedText) {
+  const hints = appearanceHintsForAnalysis(analysis, feedback);
+  const hasHint = hints.some((item) => normalizedText.includes(normalizeClientText(item)));
+  return hasHint || /\b(red|pink|yellow|green|blue|white|black|bright|dark|soft|vivid|tall|small|large|round|thin|wide|fresh|smooth|rough|delicate|blurred)\b/.test(normalizedText);
+}
+
+function hasCompositionLayer(feedback, analysis, normalizedText) {
+  const hints = compositionHintsForAnalysis(analysis, feedback);
+  const hasHint = hints.some((item) => normalizedText.includes(normalizeClientText(item)));
+  return hasHint || /\b(foreground|background|center|middle|focus|focused|blurred|near|beside|behind|around|surrounded|close up|close-up)\b/.test(normalizedText);
+}
+
+function hasExpressionLayer(feedback, analysis, normalizedText) {
+  const hints = expressionHintsForAnalysis(analysis, feedback);
+  const hasHint = hints.some((item) => normalizedText.includes(normalizeClientText(item)));
+  return hasHint || /\b(smiling|serious|calm|relaxed|standing|sitting|looking|facing|posture|expression|pose)\b/.test(normalizedText);
+}
+
+function appearanceHintsForAnalysis(analysis = {}, feedback = {}) {
+  return uniqueWritingHints([
+    ...((analysis.vocabulary || []).map((item) => item?.word || item?.phrase || item)),
+    ...cleanUiList(feedback?.specific_guidance?.words || [], 5),
+    ...((analysis.objects || []).map((item) => item?.description || "")),
+    ...(analysis.environment_details || []),
+  ]).filter((item) => /\b(red|pink|yellow|green|blue|white|black|bright|dark|soft|vivid|tall|small|large|round|fresh|smooth|rough|delicate|petals?|leaves|leaf|grassy|blurred|well-kept)\b/i.test(item));
+}
+
+function compositionHintsForAnalysis(analysis = {}, feedback = {}) {
+  return uniqueWritingHints([
+    ...buildStructureHints(analysis),
+    ...((analysis.phrases || []).map((item) => item?.phrase || item)),
+    ...cleanUiList(feedback?.specific_guidance?.details || [], 5),
+    "in focus",
+    "in the foreground",
+    "slightly blurred background",
+    "near the center",
+    "surrounded by leaves",
+  ]).filter((item) => positioningRelatedHint(item) || /\b(focus|focused|blurred|center|surrounded)\b/i.test(item));
+}
+
+function expressionHintsForAnalysis(analysis = {}, feedback = {}) {
+  return uniqueWritingHints([
+    ...((analysis.actions || []).map((item) => item?.phrase || item?.verb || item)),
+    ...((analysis.vocabulary || []).map((item) => item?.word || item?.phrase || item)),
+    ...cleanUiList(feedback?.specific_guidance?.words || [], 5),
+    "smiling",
+    "standing still",
+    "relaxed posture",
+    "calm expression",
+  ]).filter((item) => /\b(smiling|serious|calm|relaxed|standing|sitting|looking|facing|posture|expression|pose)\b/i.test(item));
+}
+
+function hasAtmosphereLayer(feedback, analysis, normalizedText) {
+  const words = [
+    ...((analysis?.vocabulary || []).map((item) => item?.word || item?.phrase || item)),
+    analysis?.environment,
+    ...(analysis?.environment_details || []),
+    ...cleanUiList(feedback?.specific_guidance?.words || [], 5),
+  ].map(cleanUiText).filter(atmosphereRelatedHint);
+  const textHasMood = words.some((word) => normalizedText.includes(normalizeClientText(word)));
+  const language = feedback?.language_quality || {};
+  const naturalScore = Number(language.naturalness || language.score || 0);
+  return textHasMood || /\b(calm|peaceful|busy|quiet|bright|dark|sunny|lively|warm|clean|well kept|well-kept)\b/.test(normalizedText) || naturalScore >= 70;
+}
+
+function buildArticulationUpgradeSuggestions(session, feedback, learnerText) {
+  const text = cleanUiText(learnerText);
+  if (!text) {
+    return [];
+  }
+  const analysis = session?.analysis || {};
+  const suggestions = [];
+  const push = (item) => {
+    const normalized = normalizeUpgradeSuggestion(item, text);
+    if (!normalized) return;
+    if (suggestions.some((existing) => normalizeClientText(existing.oldText || existing.newText) === normalizeClientText(normalized.oldText || normalized.newText))) {
+      return;
+    }
+    suggestions.push(normalized);
+  };
+
+  buildFeedbackInlineUpgrades(feedback || {}, text)
+    .forEach((item) => push({ ...item, type: inferUpgradeType(item.oldText, item.newText) }));
+
+  const objects = (analysis.objects || []).map((item) => cleanUiText(item?.name || item)).filter(Boolean);
+  const details = (analysis.environment_details || []).map(cleanUiText).filter(Boolean);
+  const vocabulary = [
+    ...((analysis.vocabulary || []).map((item) => item?.word || item?.phrase || item)),
+    ...cleanUiList(feedback?.specific_guidance?.words || [], 5),
+  ].map(cleanUiText).filter(Boolean);
+  const action = primaryActionPhrase(analysis);
+  const actionVerb = primaryActionVerb(analysis);
+  const positioning = uniqueWritingHints([
+    ...buildStructureHints(analysis),
+    ...((analysis.phrases || []).map((item) => item?.phrase || item)),
+    ...cleanUiList(feedback?.phrase_usage?.suggested || [], 3),
+  ]).filter(positioningRelatedHint);
+  const atmosphere = uniqueWritingHints([
+    ...vocabulary,
+    primaryAtmosphereHint(analysis),
+    "peaceful atmosphere",
+    "calm outdoor setting",
+    "well-kept environment",
+  ]).filter(atmosphereRelatedHint);
+  const visualDetails = uniqueWritingHints([...objects, ...details, ...vocabulary]).filter(Boolean);
+  const richNounUpgrade = (noun, fallback) => {
+    const match = visualDetails.find((item) =>
+      normalizeClientText(item).includes(normalizeClientText(noun)) &&
+      normalizeClientText(item) !== normalizeClientText(noun)
+    );
+    return match || fallback;
+  };
+
+  [
+    ["people", objects.find((item) => /\b(two|three|group|person|people|man|woman|child)\b/i.test(item))],
+    ["person", objects.find((item) => /\bman|woman|child|person\b/i.test(item))],
+    ["trees", richNounUpgrade("trees", "tall palm trees")],
+    ["tree", richNounUpgrade("tree", "tall tree")],
+    ["grass", richNounUpgrade("grass", "green grass")],
+    ["flower", richNounUpgrade("flower", "bright flower")],
+    ["flowers", richNounUpgrade("flowers", "bright flowers")],
+    ["building", richNounUpgrade("building", "tall building")],
+    ["road", richNounUpgrade("road", "busy road")],
+    ["background", richNounUpgrade("background", "soft background")],
+    ["nice", atmosphere[0]],
+    ["good", atmosphere[0]],
+  ].forEach(([oldText, newText]) => push({ oldText, newText, type: atmosphereRelatedHint(newText) ? "atmosphere" : "visual_quality" }));
+
+  [
+    ["go", actionVerb || action],
+    ["going", action],
+    ["move", action],
+    ["moving", action],
+    ["walk", action && normalizeClientText(action) !== "walk" ? action : ""],
+    ["look", "gaze"],
+    ["hold", "grip"],
+  ].forEach(([oldText, newText]) => push({ oldText, newText, type: "verb" }));
+
+  const firstPosition = positioning.find((item) => !normalizeClientText(text).includes(normalizeClientText(item)));
+  const positionTarget = findPositioningUpgradeTarget(text);
+  if (firstPosition && positionTarget) {
+    push({ oldText: positionTarget, newText: `${positionTarget} ${firstPosition}`, type: "positioning" });
+  }
+  if (!/\b(while|with|surrounded by|creating|adding to)\b/i.test(text)) {
+    const flowTarget = firstSentence(text);
+    const flow = text.includes(".") ? "with clearer details" : "while showing the setting";
+    if (flowTarget && flowTarget.split(/\s+/).length <= 6) {
+      push({ oldText: flowTarget, newText: `${flowTarget.replace(/[.!?]+$/g, "")} ${flow}.`, type: "flow" });
+    }
+  }
+  [
+    ["The image shows", "The scene shows"],
+    ["There are", "In the scene, there are"],
+    ["It has", "The scene includes"],
+  ].forEach(([oldText, newText]) => push({ oldText, newText, type: "flow" }));
+  const firstMood = atmosphere.find((item) => !normalizeClientText(text).includes(normalizeClientText(item)));
+  const moodTarget = findMoodUpgradeTarget(text);
+  if (firstMood && moodTarget) {
+    push({ oldText: moodTarget, newText: `${moodTarget} with a ${firstMood} feeling`, type: "atmosphere" });
+  }
+
+  const compositionTarget = findTextOccurrence(text, "background") || findTextOccurrence(text, "behind");
+  const compositionPhrase = positioning.find((item) => /\b(foreground|background|behind|near|beside|along)\b/i.test(item));
+  if (compositionTarget && compositionPhrase && !normalizeClientText(text).includes(normalizeClientText(compositionPhrase))) {
+    push({ oldText: compositionTarget, newText: `${compositionTarget} ${compositionPhrase}`, type: "composition" });
+  }
+
+  return suggestions.slice(0, 5).map((item, index) => ({
+    ...item,
+    id: `${item.type}-${index}-${normalizeClientText(item.oldText || item.newText).slice(0, 18)}`,
+  }));
+}
+
+function normalizeUpgradeSuggestion(item, text) {
+  const oldText = cleanUiText(item?.oldText || item?.old || item?.instead_of);
+  const newText = cleanUiText(item?.newText || item?.new || item?.use || item?.strong);
+  if (!newText || oldText === newText || normalizeClientText(oldText) === normalizeClientText(newText)) {
+    return null;
+  }
+  if (oldText.split(/\s+/).filter(Boolean).length > 6 || newText.split(/\s+/).filter(Boolean).length > 7) {
+    return null;
+  }
+  if (!oldText || !findTextOccurrence(text, oldText)) {
+    return null;
+  }
+  const type = item?.type || inferUpgradeType(oldText, newText);
+  return {
+    oldText: oldText ? findTextOccurrence(text, oldText) || oldText : "",
+    newText,
+    type,
+    xp: xpForUpgradeType(type),
+  };
+}
+
+function findPositioningUpgradeTarget(text) {
+  return findTextOccurrence(text, "behind it") ||
+    findTextOccurrence(text, "background") ||
+    findTextOccurrence(text, "plants") ||
+    findTextOccurrence(text, "trees") ||
+    findTextOccurrence(text, "around it");
+}
+
+function findMoodUpgradeTarget(text) {
+  return findTextOccurrence(text, "looks nice") ||
+    findTextOccurrence(text, "nice") ||
+    findTextOccurrence(text, "good") ||
+    findTextOccurrence(text, "beautiful") ||
+    findTextOccurrence(text, "calm");
+}
+
+function inferUpgradeType(oldText, newText) {
+  const combined = `${oldText || ""} ${newText || ""}`;
+  if (/\b(foreground|background|composition|in focus|center|framed)\b/i.test(combined)) return "composition";
+  if (positioningRelatedHint(combined)) return "positioning";
+  if (/\b(while|with|surrounded by|creating|adding to)\b/i.test(combined)) return "flow";
+  if (atmosphereRelatedHint(combined)) return "atmosphere";
+  if (/\b(appears|impression|suggests|creates)\b/i.test(combined)) return "impression";
+  if (/\b(tall|bright|soft|vivid|dense|lush|green|delicate|blurred|towering|trimmed)\b/i.test(combined)) return "visual_quality";
+  if (actionRelatedHint(combined) || /\b(go|move|look|hold|gaze|grip)\b/i.test(combined)) return "verb";
+  return "vocabulary";
+}
+
+function xpForUpgradeType(type) {
+  return {
+    vocabulary: 5,
+    visual_quality: 5,
+    verb: 5,
+    positioning: 5,
+    composition: 10,
+    flow: 10,
+    atmosphere: 10,
+    impression: 10,
+  }[type] || 5;
+}
+
+function upgradeTypeLabel(type) {
+  return {
+    vocabulary: "Stronger vocabulary",
+    visual_quality: "Visual detail",
+    verb: "Precise verb",
+    positioning: "Positioning",
+    composition: "Composition",
+    flow: "Sentence flow",
+    atmosphere: "Atmosphere",
+    impression: "Impression",
+  }[type] || "Upgrade";
+}
+
+function findTextOccurrence(text, phrase) {
+  const source = String(text || "");
+  const index = source.toLowerCase().indexOf(String(phrase || "").toLowerCase());
+  return index >= 0 ? source.slice(index, index + String(phrase).length) : "";
+}
+
+function normalizeArticulationUpgradeState(existing, answer, suggestions) {
+  const ids = suggestions.map((item) => item.id).join("|");
+  if (!existing || normalizeClientText(existing.original) !== normalizeClientText(answer) || existing.suggestionKey !== ids) {
+    return {
+      original: answer,
+      answer,
+      suggestionKey: ids,
+      applied: [],
+      skipped: [],
+      xp: 0,
+      finalized: false,
+      justApplied: false,
+    };
+  }
+  return {
+    original: existing.original || answer,
+    answer: cleanUiText(existing.answer) || answer,
+    suggestionKey: ids,
+    applied: Array.isArray(existing.applied) ? existing.applied : [],
+    skipped: Array.isArray(existing.skipped) ? existing.skipped : [],
+    xp: Number(existing.xp || 0),
+    finalized: Boolean(existing.finalized),
+    multiBonusAwarded: Boolean(existing.multiBonusAwarded),
+    justApplied: Boolean(existing.justApplied),
+  };
+}
+
+function currentUpgradeAnswer() {
+  return cleanUiText(document.getElementById("articulationUpgradeInput")?.value) || state.sessionFlow.articulationUpgrade?.answer || "";
+}
+
+function applyArticulationUpgrade(id, suggestions) {
+  const upgrade = suggestions.find((item) => item.id === id);
+  const upgradeState = state.sessionFlow.articulationUpgrade;
+  if (!upgrade || !upgradeState || upgradeState.applied.includes(id)) {
+    return;
+  }
+  const current = currentUpgradeAnswer();
+  if (!findTextOccurrence(current, upgrade.oldText)) {
+    upgradeState.answer = current;
+    upgradeState.skipped = uniqueWritingHints([...upgradeState.skipped, id]);
+    showToast("That wording changed, so this suggestion was dismissed.");
+    renderSessionStep("improve", { articulationUpgrade: upgradeState });
+    return;
+  }
+  const next = replaceFirstTextOccurrence(current, upgrade.oldText, upgrade.newText);
+  upgradeState.answer = next;
+  upgradeState.applied = uniqueWritingHints([...upgradeState.applied, id]);
+  upgradeState.skipped = upgradeState.skipped.filter((item) => item !== id);
+  upgradeState.xp += upgrade.xp;
+  upgradeState.justApplied = true;
+  awardLocalXp(upgrade.xp);
+  showToast(`+${upgrade.xp} XP — ${upgradeTypeLabel(upgrade.type)}`);
+  maybeAwardUpgradeBonus(upgradeState);
+  if (allArticulationUpgradesHandled(upgradeState, suggestions)) {
+    finalizeArticulationUpgrade(upgradeState, suggestions);
+    return;
+  }
+  renderSessionStep("improve", { articulationUpgrade: upgradeState });
+}
+
+function maybeAwardUpgradeBonus(upgradeState) {
+  if ((upgradeState.applied || []).length >= 2 && !upgradeState.multiBonusAwarded) {
+    upgradeState.xp += 10;
+    upgradeState.multiBonusAwarded = true;
+    awardLocalXp(10);
+    showToast("+10 XP — Multiple articulation upgrades");
+  }
+}
+
+function skipArticulationUpgrade(id, suggestions) {
+  const upgradeState = state.sessionFlow.articulationUpgrade;
+  if (!upgradeState || upgradeState.skipped.includes(id)) {
+    return;
+  }
+  upgradeState.answer = currentUpgradeAnswer();
+  upgradeState.skipped = uniqueWritingHints([...upgradeState.skipped, id]);
+  upgradeState.justApplied = false;
+  if (allArticulationUpgradesHandled(upgradeState, suggestions)) {
+    finalizeArticulationUpgrade(upgradeState, suggestions);
+    return;
+  }
+  renderSessionStep("improve", { articulationUpgrade: upgradeState });
+}
+
+function finalizeArticulationUpgrade(upgradeState, suggestions) {
+  const nextState = upgradeState || state.sessionFlow.articulationUpgrade;
+  if (!nextState) return;
+  if (!nextState.justApplied) {
+    nextState.answer = currentUpgradeAnswer() || nextState.answer;
+  }
+  const remaining = suggestions.filter((item) => !nextState.applied.includes(item.id) && !nextState.skipped.includes(item.id));
+  nextState.skipped = uniqueWritingHints([...nextState.skipped, ...remaining.map((item) => item.id)]);
+  nextState.finalized = true;
+  renderSessionStep("improve", { articulationUpgrade: nextState });
+}
+
+function allArticulationUpgradesHandled(upgradeState, suggestions) {
+  const handled = new Set([...(upgradeState.applied || []), ...(upgradeState.skipped || [])]);
+  return suggestions.every((item) => handled.has(item.id));
+}
+
+function replaceFirstTextOccurrence(text, oldText, newText) {
+  const source = String(text || "");
+  const index = source.toLowerCase().indexOf(String(oldText || "").toLowerCase());
+  if (index === -1) {
+    return source;
+  }
+  return `${source.slice(0, index)}${newText}${source.slice(index + oldText.length)}`;
+}
+
+function awardLocalXp(points) {
+  const value = Number(points || 0);
+  if (!value) return;
+  state.progress = {
+    ...(state.progress || {}),
+    xp_points: Number(state.progress?.xp_points || 0) + value,
+  };
+  renderProgressHeader();
+}
+
+function buildImproveCurrentFocus(issue, session = {}, escalation = {}) {
   const focus = normalizeClientText(issue?.focusAreas?.[0] || issue?.message || "");
+  const category = improveFocusCategory(focus);
+  const level = escalation.level || 1;
+  if (level >= 3) {
+    const explicit = explicitImproveFocusText(category, session);
+    if (explicit) return explicit;
+  }
+  if (level >= 2) {
+    const guided = guidedImproveFocusText(category);
+    if (guided) return guided;
+  }
   if (focus.includes("main subject")) return "Describe the main subject";
   if (focus.includes("main action")) return "Describe the action";
   if (focus.includes("background")) return "Add background detail";
@@ -1583,50 +3135,665 @@ function buildImproveCurrentFocus(issue) {
   return "Make the description more complete";
 }
 
-function buildImproveHintGroups(session, feedback, issue, currentText) {
+function buildImproveEscalationContext(session, attempts, issue, currentLayer = null) {
+  const focusCategory = improveFocusCategory(normalizeClientText(issue?.focusAreas?.[0] || issue?.message || ""));
+  const layerKey = currentLayer?.key || "";
+  const layerCategory = currentLayer?.category || focusCategory;
+  const abstractLayer = isAbstractLayerCategory(normalizeLayerGuidanceKey(currentLayer) || layerCategory);
+  const recent = (attempts || []).map((attempt) => ({
+    category: improveFocusCategory(normalizeClientText(buildFeedbackIssue(attempt.feedback || {}, session)?.focusAreas?.[0] || "")),
+    currentLayerKey: buildArticulationState(attempt.feedback || {}, session, attempt.text || "").currentLayer?.key || "",
+    score: Number(attempt.score || feedbackTotalScore(attempt.feedback || {})) || 0,
+  }));
+  let repeatedFocusCount = 0;
+  if (layerKey) {
+    for (let index = recent.length - 1; index >= 0; index -= 1) {
+      if (recent[index].currentLayerKey !== layerKey) break;
+      repeatedFocusCount += 1;
+    }
+  } else {
+    for (let index = recent.length - 1; index >= 0; index -= 1) {
+      if (recent[index].category !== focusCategory) break;
+      repeatedFocusCount += 1;
+    }
+  }
+  const previous = recent[recent.length - 2];
+  const latest = recent[recent.length - 1];
+  const scoreDelta = latest && previous ? latest.score - previous.score : 0;
+  const noMeaningfulImprovement = Boolean(previous && latest && scoreDelta < 5);
+  let level = 1;
+  if (currentLayer?.dynamic) {
+    level = Math.min(5, Math.max(1, repeatedFocusCount || 1));
+    if (noMeaningfulImprovement && repeatedFocusCount >= 2) {
+      level = Math.min(5, level + 1);
+    }
+  } else if (abstractLayer && repeatedFocusCount >= 2) {
+    level = 3;
+  } else if (abstractLayer && repeatedFocusCount >= 1) {
+    level = 2;
+  } else if (repeatedFocusCount >= 3) {
+    level = 3;
+  } else if (repeatedFocusCount >= 2 || recent.length >= 2) {
+    level = 2;
+  }
+  return {
+    focusCategory,
+    layerKey,
+    layerCategory,
+    level,
+    repeatedFocusCount,
+    noMeaningfulImprovement,
+    message: supportiveLayerMessage(currentLayer, level, session),
+  };
+}
+
+function guidedImproveFocusText(category) {
+  const text = {
+    subject: "Who is the image mainly focused on?",
+    action: "What is the main subject doing?",
+    background: "What can you see behind the main subject?",
+    environment: "Where is this scene happening?",
+    objects: "Which important object should you add?",
+    positioning: "Where is the important detail in the image?",
+    appearance: "What does the main object look like?",
+    composition: "What is in focus or where is it placed?",
+    expression: "What expression or posture do you notice?",
+    atmosphere: "What feeling does the scene create?",
+    vocabulary: "Which general word can become more exact?",
+  };
+  return text[category] || "";
+}
+
+function normalizeLayerGuidanceKey(layerOrCategory) {
+  const text = normalizeClientText(
+    typeof layerOrCategory === "string"
+      ? layerOrCategory
+      : [layerOrCategory?.key, layerOrCategory?.category, layerOrCategory?.focusArea].filter(Boolean).join(" ")
+  );
+  if (!text) return "";
+  if (text.includes("atmosphere") || text.includes("mood")) return "atmosphere";
+  if (text.includes("composition") || text.includes("layout") || text.includes("positioning") || text.includes("focus")) return "composition";
+  if (text.includes("interpret") || text.includes("suggest")) return "interpretation";
+  if (text.includes("condition") || text.includes("maintained") || text.includes("messy") || text.includes("clean")) return "condition";
+  return text;
+}
+
+function isAbstractLayerCategory(value) {
+  const key = normalizeLayerGuidanceKey(value);
+  return ["atmosphere", "composition", "interpretation", "condition"].includes(key);
+}
+
+function supportiveLayerMessage(layer, level, session) {
+  if ((level || 1) <= 1) {
+    return "";
+  }
+  if (layer?.dynamic) {
+    if (level >= 5) return "Let's make the wording easier to upgrade.";
+    if (level >= 4) return "Use the sentence frame to finish this focus.";
+    if (level >= 3) return "Choose one word that best matches what you see.";
+    return "Let's notice one visible clue first.";
+  }
+  const key = normalizeLayerGuidanceKey(layer);
+  const evidence = visibleEvidencePhrase(session?.analysis || {});
+  if (level >= 3) {
+    const direct = {
+      atmosphere: evidence ? `Look at ${evidence} — what feeling do they create?` : "Let's make this easier. Finish the sentence with one feeling word.",
+      composition: "Let's make this easier. Look for the closest or most noticeable part.",
+      interpretation: evidence ? `Look at ${evidence} — what does that suggest?` : "Let's make this easier. Choose one simple idea the scene suggests.",
+      condition: evidence ? `Look at ${evidence} — what condition does that show?` : "Let's make this easier. Choose one condition word.",
+    };
+    return direct[key] || "Let's make this easier.";
+  }
+  const guided = {
+    atmosphere: "Try thinking about the condition or feeling of the place.",
+    composition: "Try looking for what your eyes notice first.",
+    interpretation: "Try choosing the simple idea the scene suggests.",
+    condition: "Try thinking about whether it looks clean, messy, fresh, or neglected.",
+  };
+  return guided[key] || "Let's make this easier.";
+}
+
+function explicitImproveFocusText(category, session) {
   const analysis = session?.analysis || {};
+  const subject = primarySubjectHint(analysis);
+  const action = primaryActionPhrase(analysis);
+  const background = primaryBackgroundHint(analysis);
+  const object = primaryObjectHint(analysis, 1);
+  const mood = primaryAtmosphereHint(analysis);
+  const appearance = appearanceHintsForAnalysis(analysis, {}).find(Boolean);
+  const composition = compositionHintsForAnalysis(analysis, {}).find(Boolean);
+  const expression = expressionHintsForAnalysis(analysis, {}).find(Boolean);
+  const text = {
+    subject: subject ? `Mention ${combineSubjectAction(subject, action)}` : "Mention the main person, animal, or object",
+    action: action ? `Mention the action: ${action}` : "Mention what the main subject is doing",
+    background: background ? `Add the background detail: ${background}` : "Add one background detail",
+    environment: background ? `Say where it happens: ${background}` : "Say where the scene happens",
+    objects: object ? `Mention the important object: ${object}` : "Mention one important visible object",
+    positioning: object ? `Place ${object} in the scene` : "Say where the important detail is",
+    appearance: appearance ? `Add the visual detail: ${appearance}` : "Add one visual detail",
+    composition: composition ? `Add composition language: ${composition}` : "Say what is in focus or where it appears",
+    expression: expression ? `Mention the expression or posture: ${expression}` : "Mention the person's expression or posture",
+    atmosphere: mood ? `Describe the atmosphere as ${mood}` : "Describe the atmosphere clearly",
+    vocabulary: mood ? `Use a stronger word like ${mood}` : "Replace one general word with a stronger word",
+  };
+  return text[category] || "";
+}
+
+function improveEscalatedHints(session, category, level) {
+  if (level <= 1) {
+    return { contextual: [], direct: [] };
+  }
+  const analysis = session?.analysis || {};
+  const subject = primarySubjectHint(analysis);
+  const action = primaryActionPhrase(analysis);
+  const actionVerb = primaryActionVerb(analysis);
+  const background = primaryBackgroundHint(analysis);
+  const object = primaryObjectHint(analysis, 1);
+  const mood = primaryAtmosphereHint(analysis);
+  const appearance = appearanceHintsForAnalysis(analysis, {}).find(Boolean);
+  const composition = compositionHintsForAnalysis(analysis, {}).find(Boolean);
+  const expression = expressionHintsForAnalysis(analysis, {}).find(Boolean);
+  const evidence = visibleEvidencePhrase(analysis);
+  const conditionWords = conditionHintWords(analysis);
+  const atmosphereWords = atmosphereChoiceWords(analysis);
+  const contextual = {
+    subject: [subject, combineSubjectAction(subject, actionVerb)],
+    action: [actionVerb, action],
+    background: [background, background ? `in the background` : ""],
+    environment: [background, background ? `in the scene` : ""],
+    objects: [object, primaryObjectHint(analysis, 2)],
+    positioning: [object, object ? `near ${object}` : "", background],
+    appearance: [appearance, primarySubjectHint(analysis)],
+    composition: [
+      composition,
+      object,
+      "closest to the camera",
+      "most noticeable",
+      "in the foreground",
+    ],
+    expression: [expression],
+    atmosphere: [
+      ...atmosphereWords,
+      ...conditionWords,
+      mood,
+      mood ? `${mood} atmosphere` : "",
+    ],
+    interpretation: ["daily life", "work", "relaxation", "disorder", "maintenance"],
+    condition: conditionWords,
+    vocabulary: [mood],
+  };
+  const direct = {
+    subject: [combineSubjectAction(subject, action)],
+    action: [action],
+    background: [background],
+    environment: [background],
+    objects: [object],
+    positioning: [object && background ? `${object} near ${background}` : object],
+    appearance: [appearance],
+    composition: [
+      composition,
+      object && `The object closest to the camera is ${object}`,
+    ],
+    expression: [expression],
+    atmosphere: [
+      evidence ? `Because of ${evidence}, the scene feels ___` : "The scene feels ___",
+      ...conditionWords.slice(0, 4),
+    ],
+    interpretation: [
+      evidence ? `Because of ${evidence}, the scene suggests ___` : "The scene suggests ___",
+      "disorder",
+      "maintenance",
+      "daily life",
+    ],
+    condition: [
+      evidence ? `Because of ${evidence}, it looks ___` : "It looks ___",
+      ...conditionWords.slice(0, 4),
+    ],
+    vocabulary: [mood],
+  };
+  return {
+    contextual: cleanLayerHints(contextual[category] || [], level >= 3 ? 7 : 5),
+    direct: cleanLayerHints(direct[category] || [], 5),
+  };
+}
+
+function primarySubjectHint(analysis) {
+  return cleanUiText((analysis.objects || [])[0]?.name || (analysis.objects || [])[0]);
+}
+
+function primaryObjectHint(analysis, index = 0) {
+  return cleanUiText((analysis.objects || [])[index]?.name || (analysis.objects || [])[index]);
+}
+
+function primaryActionPhrase(analysis) {
+  const action = (analysis.actions || [])[0];
+  return cleanUiText(action?.phrase || action?.verb || action);
+}
+
+function primaryActionVerb(analysis) {
+  const action = (analysis.actions || [])[0];
+  return cleanUiText(action?.verb || actionPhraseToVerb(action?.phrase || action));
+}
+
+function primaryBackgroundHint(analysis) {
+  return cleanReusableHints([
+    ...(analysis.environment_details || []),
+    analysis.environment,
+  ], "noun").find((item) => !normalizeClientText(item).includes(normalizeClientText(primarySubjectHint(analysis)))) || "";
+}
+
+function primaryAtmosphereHint(analysis) {
+  return cleanReusableHints([
+    ...((analysis.vocabulary || []).map((item) => item?.word || item?.phrase || item)),
+    analysis.environment,
+    ...(analysis.environment_details || []),
+  ], "adjective").find(atmosphereRelatedHint) || "";
+}
+
+function visibleEvidencePhrase(analysis = {}) {
+  const details = [
+    ...(analysis.environment_details || []),
+    ...((analysis.objects || []).map((item) => item?.description || item?.name || item)),
+    analysis.environment,
+  ].map(cleanUiText).filter(Boolean);
+  const evidence = details.find((item) =>
+    /\b(wire|dust|dirty|messy|clutter|broken|damaged|exposed|blurred|crowded|empty|clean|bright|dark|foreground|background|closest|center)\b/i.test(item)
+  ) || details[0] || "";
+  return simplifyEvidencePhrase(evidence);
+}
+
+function simplifyEvidencePhrase(value) {
+  return cleanUiText(value)
+    .replace(/^there (is|are)\s+/i, "")
+    .replace(/^a\s+|^an\s+|^the\s+/i, "")
+    .replace(/[.!?]+$/g, "")
+    .split(/\s*(?:,|;|\band\b)\s*/i)
+    .map((item) => item.trim())
+    .find((item) => item.split(/\s+/).length <= 6) || "";
+}
+
+function atmosphereChoiceWords(analysis = {}) {
+  return uniqueWritingHints([
+    primaryAtmosphereHint(analysis),
+    "calm",
+    "messy",
+    "peaceful",
+    "crowded",
+    "neglected",
+    "busy",
+  ]).filter(Boolean);
+}
+
+function conditionHintWords(analysis = {}) {
+  const evidence = normalizeClientText(visibleEvidencePhrase(analysis));
+  const defaults = ["clean", "messy", "dusty", "cluttered", "well maintained", "neglected"];
+  if (/\b(wire|dust|dirty|messy|clutter|broken|damaged|exposed)\b/.test(evidence)) {
+    return ["neglected", "messy", "cluttered", "dusty", "not well maintained"];
+  }
+  return defaults;
+}
+
+function abstractSentenceFrames(category, analysis = {}, level = 1) {
+  const evidence = visibleEvidencePhrase(analysis);
+  const object = primaryObjectHint(analysis, 0) || primarySubjectHint(analysis) || "The main object";
+  const frames = {
+    atmosphere: level >= 3
+      ? [evidence ? `Because of ${evidence}, the scene feels ___` : "The scene feels ___"]
+      : ["The scene feels ___"],
+    composition: level >= 3
+      ? [`${object} stands out because it is ___`, "The closest object is ___"]
+      : ["___ stands out visually"],
+    interpretation: level >= 3
+      ? [evidence ? `Because of ${evidence}, the scene suggests ___` : "The scene suggests ___"]
+      : ["The scene suggests ___"],
+    condition: level >= 3
+      ? [evidence ? `Because of ${evidence}, it looks ___` : "It looks ___"]
+      : ["The place looks ___"],
+  };
+  return cleanLayerHints(frames[category] || [], 3);
+}
+
+function cleanLayerHints(values, limit = 5) {
+  return uniqueWritingHints(values.map(cleanUiText))
+    .filter(Boolean)
+    .map((item) => item.replace(/[.!?]+$/g, ""))
+    .filter((item) => item.split(/\s+/).filter(Boolean).length <= 9)
+    .slice(0, limit);
+}
+
+function buildDynamicTargetHintGroups(target, analysis = {}, level = 1) {
+  const focus = cleanUiText(target.visualFocus || target.label);
+  const pack = focusLanguagePack(target, analysis);
+  const baseHints = cleanLayerHints([...(target.hints || []), ...(target.evidence || []), focus], level >= 3 ? 8 : 5);
+  const choices = dynamicTargetChoices(target, { analysis });
+  const nouns = uniqueWritingHints(cleanLayerHints([
+    ...pack.nouns,
+    focus,
+    ...baseHints.filter((item) => !atmosphereRelatedHint(item) && !positioningRelatedHint(item)),
+  ], level >= 3 ? 8 : 7).map(nounLikeHint).filter(Boolean)).slice(0, 5);
+  const verbs = uniqueWritingHints(cleanLayerHints([
+    ...pack.verbs,
+    ...baseHints,
+  ], 8).map(verbLikeHint).filter(Boolean)).slice(0, 4);
+  const phraseHints = uniqueWritingHints(cleanLayerHints([
+    ...pack.phrases,
+    ...baseHints.filter(positioningRelatedHint),
+    ...(target.category === "positioning" ? ["in the foreground", "in the background", "near ___", "under ___"] : []),
+    ...(target.category === "lighting" ? ["soft light", "bright reflection", "natural light"] : []),
+    ...(level >= 2 ? target.evidence || [] : []),
+  ], 10).map(phraseLikeHint).filter(Boolean)).filter(usefulFocusedPhrase).slice(0, 5);
+  const adjectiveHints = uniqueWritingHints(cleanLayerHints([
+    ...pack.adjectives,
+    ...(level >= 3 ? choices : []),
+    ...baseHints.filter((item) => atmosphereRelatedHint(item) || conditionRelatedHint(item)),
+    ...(["appearance", "texture", "contrast"].includes(target.category) ? ["bright", "dark", "smooth", "rough", "delicate"] : []),
+    ...(target.category === "condition" ? conditionHintWords(analysis) : []),
+    ...(target.category === "atmosphere" ? atmosphereChoiceWords(analysis) : []),
+  ], level >= 3 ? 8 : 7).map(adjectiveLikeHint).filter(Boolean)).slice(0, 4);
+  const frames = uniqueWritingHints([
+    ...pack.frames,
+    dynamicTargetSentenceFrame(target, analysis, level),
+  ].filter(Boolean)).slice(0, 3);
+  const groups = level >= 4
+    ? [
+      { label: "Nouns", items: nouns },
+      { label: "Verbs", items: verbs },
+      { label: "Adjectives", items: adjectiveHints },
+      { label: "Sentence frames", items: frames },
+    ]
+    : [
+    { label: "Nouns", items: nouns },
+    { label: "Verbs", items: verbs },
+    { label: "Phrases", items: phraseHints },
+    { label: "Adjectives", items: adjectiveHints },
+    { label: "Sentence frames", items: frames },
+    ];
+  return groups.filter((group) => group.items.length);
+}
+
+function focusLanguagePack(target = {}, analysis = {}) {
+  const text = normalizeClientText(`${target.visualFocus || ""} ${target.label || ""} ${target.category || ""} ${(target.evidence || []).join(" ")}`);
+  const packs = {
+    greenery: {
+      nouns: ["tree branches", "leaves", "roadside plants", "shaded area", "greenery"],
+      verbs: ["stretching", "lining", "creating shade"],
+      adjectives: ["dense", "leafy", "overhanging", "shaded"],
+      phrases: ["branches stretching over the road", "leaves creating shade", "greenery along the roadside", "trees lining the street"],
+      frames: ["The trees ___ over the road.", "The greenery creates ___.", "Along the roadside, there are ___."],
+    },
+    road: {
+      nouns: ["road surface", "lane markings", "asphalt", "pavement", "street"],
+      verbs: ["runs", "curves", "stretches"],
+      adjectives: ["narrow", "empty", "busy", "urban"],
+      phrases: ["along the roadside", "on the road surface", "down the street", "beside the road"],
+      frames: ["The road looks ___ because ___.", "The street ___ through the scene.", "Along the road, there are ___."],
+    },
+    vehicles: {
+      nouns: ["roadside vehicle", "moving car", "parked motorcycle", "traffic", "vehicles"],
+      verbs: ["parked", "moving", "passing", "standing"],
+      adjectives: ["busy", "parked", "small", "nearby"],
+      phrases: ["vehicles on the road", "traffic along the street", "parked near the roadside", "moving through the scene"],
+      frames: ["The vehicles are ___ on the road.", "There is ___ near the roadside.", "The traffic makes the scene feel ___."],
+    },
+    buildings: {
+      nouns: ["tall buildings", "apartment buildings", "balconies", "concrete walls", "urban structures"],
+      verbs: ["rise", "stand", "appear"],
+      adjectives: ["tall", "distant", "concrete", "unfinished", "urban"],
+      phrases: ["apartment buildings in the background", "concrete walls behind the trees", "urban structures above the greenery", "an unfinished structure in the distance"],
+      frames: ["In the background, there are ___.", "The buildings look ___ behind the greenery.", "The unfinished structure adds ___."],
+    },
+    atmosphere: {
+      nouns: ["shaded street", "quiet area", "urban scene", "roadside environment"],
+      verbs: ["creates", "feels", "suggests"],
+      adjectives: ["quiet", "shaded", "narrow", "calm", "urban", "slightly worn", "peaceful"],
+      phrases: ["a quiet urban feeling", "a shaded roadside scene", "a calm atmosphere", "a slightly worn look"],
+      frames: ["The scene feels ___.", "The shaded area creates ___.", "Overall, the place feels ___."],
+    },
+    lighting: {
+      nouns: ["bright daylight", "shadows", "shaded area", "sunlight", "contrast"],
+      verbs: ["shines", "creates", "highlights"],
+      adjectives: ["bright", "shaded", "soft", "sunny"],
+      phrases: ["bright daylight", "shadows on the road", "sunlight through the trees", "contrast between light and shade"],
+      frames: ["The light makes the scene look ___.", "The shadows create ___.", "Sunlight highlights ___."],
+    },
+  };
+  if (/\b(greenery|tree|trees|branches|leaves|plants|bushes|shrubs)\b/.test(text)) return packs.greenery;
+  if (/\b(road|street|lane|asphalt|pavement)\b/.test(text)) return packs.road;
+  if (/\b(vehicle|vehicles|car|cars|motorcycle|rickshaw|traffic)\b/.test(text)) return packs.vehicles;
+  if (/\b(building|buildings|apartment|balcony|concrete|structure|construction|urban)\b/.test(text)) return packs.buildings;
+  if (/\b(atmosphere|mood|feeling|quiet|calm|peaceful)\b/.test(text)) return packs.atmosphere;
+  if (/\b(light|lighting|daylight|shadow|sunlight|shaded)\b/.test(text)) return packs.lighting;
+  return {
+    nouns: cleanLayerHints([target.visualFocus, ...(target.hints || [])], 5),
+    verbs: [],
+    adjectives: cleanLayerHints([...(target.hints || []), ...(target.evidence || [])], 4).map(adjectiveLikeHint).filter(Boolean),
+    phrases: cleanLayerHints([...(target.hints || []), ...(target.evidence || [])], 5).map(phraseLikeHint).filter(usefulFocusedPhrase),
+    frames: [],
+  };
+}
+
+function usefulFocusedPhrase(value) {
+  const text = normalizeClientText(value);
+  return Boolean(text && !["nearby", "near", "behind", "under", "in the background", "in the foreground"].includes(text));
+}
+
+function dynamicTargetSentenceFrame(target, analysis = {}, level = 1) {
+  const focus = cleanUiText(target.visualFocus || target.label || "this detail").replace(/^describe\s+/i, "");
+  if (target.category === "atmosphere") {
+    const evidence = cleanUiText((target.evidence || [])[0]) || visibleEvidencePhrase(analysis);
+    return level >= 3 && evidence ? `Because of ${evidence}, the scene feels ___` : "The scene feels ___";
+  }
+  if (target.category === "condition") {
+    const evidence = cleanUiText((target.evidence || [])[0]) || visibleEvidencePhrase(analysis);
+    return level >= 3 && evidence ? `Because of ${evidence}, it looks ___` : "It looks ___";
+  }
+  if (target.category === "positioning") return `${focus || "It"} is near ___`;
+  if (target.category === "lighting") return `The light near ${focus || "it"} looks ___`;
+  if (["movement", "interaction"].includes(target.category)) return `${focus || "This part"} is happening ___`;
+  return `The ${focus || "detail"} looks ___`;
+}
+
+function combineSubjectAction(subject, action) {
+  const cleanSubject = cleanUiText(subject);
+  const cleanAction = cleanUiText(action);
+  if (!cleanSubject) return cleanAction;
+  if (!cleanAction) return cleanSubject;
+  const actionKey = normalizeClientText(cleanAction);
+  if (normalizeClientText(cleanSubject).includes(actionKey)) {
+    return cleanSubject;
+  }
+  return `${cleanSubject} ${cleanAction}`;
+}
+
+function buildImproveHintGroups(session, feedback, issue, currentText, escalation = {}) {
+  const analysis = session?.analysis || {};
+  if (issue?.target?.dynamic) {
+    return buildDynamicTargetHintGroups(issue.target, analysis, escalation.level || 1);
+  }
   const guidance = feedback?.specific_guidance || {};
   const focus = normalizeClientText(issue?.focusAreas?.join(" ") || issue?.message || "");
-  const objectHints = cleanReusableHints([
+  const focusCategory = improveFocusCategory(focus);
+  const level = escalation.level || 1;
+  const subjectHints = categorizedHintItems([
+    cleanUiText((analysis.objects || [])[0]?.name || (analysis.objects || [])[0]),
+    ...(issue?.additions || []),
+  ], "noun", ["subject", "objects"]);
+  const objectHints = categorizedHintItems([
     ...((analysis.objects || []).map((item) => item?.name || item)),
     ...cleanUiList(guidance.nouns || [], 5),
     ...(issue?.additions || []),
-  ], "noun");
-  const actionHints = cleanReusableHints([
+  ], "noun", ["objects", "subject"]);
+  const actionHints = categorizedHintItems([
     ...((analysis.actions || []).map((item) => item?.verb || actionPhraseToVerb(item?.phrase || item))),
     ...((analysis.actions || []).map((item) => item?.phrase || "")),
     ...cleanUiList(guidance.verbs || [], 5),
-  ], "verb");
-  const adjectiveHints = cleanReusableHints([
+  ], "verb", ["action", "subject"]);
+  const environmentHints = categorizedHintItems([
+    analysis.environment,
+    ...(analysis.environment_details || []),
+    ...cleanUiList(guidance.details || [], 5),
+  ], "noun", ["background", "environment"]);
+  const positioningHints = categorizedHintItems([
+    ...buildStructureHints(analysis),
+    ...cleanUiList(guidance.details || [], 5),
+    ...buildImprovePhraseSuggestions(session, feedback, currentText),
+  ], "phrase", ["background", "environment", "positioning"]);
+  const atmosphereHints = categorizedHintItems([
     ...((analysis.vocabulary || []).map((item) => item?.word || item?.phrase || item)),
     ...cleanUiList(guidance.words || [], 5),
-  ], "adjective").filter((item) => !objectHints.some((noun) => normalizeClientText(noun).includes(normalizeClientText(item))));
-  const phraseHints = cleanReusableHints([
+    analysis.environment,
+    ...(analysis.environment_details || []),
     ...cleanUiList(guidance.details || [], 5),
+  ], "adjective", ["atmosphere", "vocabulary"]).filter((item) => atmosphereRelatedHint(item.text));
+  const appearanceHints = categorizedHintItems([
+    ...appearanceHintsForAnalysis(analysis, feedback),
     ...cleanUiList(guidance.words || [], 5),
+  ], "phrase", ["appearance", "vocabulary"]);
+  const compositionHints = categorizedHintItems([
+    ...compositionHintsForAnalysis(analysis, feedback),
     ...buildImprovePhraseSuggestions(session, feedback, currentText),
-    ...buildStructureHints(analysis),
-  ], "phrase");
+  ], "phrase", ["composition", "positioning"]);
+  const expressionHints = categorizedHintItems([
+    ...expressionHintsForAnalysis(analysis, feedback),
+    ...cleanUiList(guidance.words || [], 5),
+  ], "phrase", ["expression", "atmosphere"]);
+  const vocabularyHints = categorizedHintItems([
+    ...((analysis.vocabulary || []).map((item) => item?.word || item?.phrase || item)),
+    ...cleanUiList(guidance.words || [], 5),
+  ], "adjective", ["vocabulary"]).filter((item) => !hintListText(objectHints).some((noun) => normalizeClientText(noun).includes(normalizeClientText(item.text))));
   const structures = cleanSentenceFrames([
     cleanUiText(guidance.sentence_starter),
     ...cleanUiList(feedback?.reusable_sentence_structures || [], 2),
     ...((analysis.sentence_patterns || []).map((item) => item?.pattern || "")),
     defaultImproveStructureForFocus(focus),
   ]);
+  const scoped = (items, category, limit) => hintListText(items.filter((item) => item.categories.includes(category))).slice(0, limit);
+  const scopedPhrases = (category, limit) => scoped(positioningHints, category, limit).filter((item) => !unrelatedToImproveFocus(item, category));
+  const atmosphereWords = scoped(atmosphereHints, "atmosphere", 8);
+  const escalatedHints = improveEscalatedHints(session, focusCategory, level);
+  const smallChunks = (items) => items.filter((item) => item.split(/\s+/).length <= 2);
+  const leveled = (baseItems, category, limit) => {
+    const extras = level >= 2 ? escalatedHints.contextual : [];
+    const direct = level >= 3 ? escalatedHints.direct : [];
+    return uniqueWritingHints([...direct, ...extras, ...baseItems])
+      .filter((item) => !unrelatedToImproveFocus(item, category))
+      .slice(0, limit);
+  };
 
-  const nounLimit = focus.includes("subject") || focus.includes("object") ? 5 : 3;
-  const verbLimit = focus.includes("action") || focus.includes("happening") ? 5 : 3;
-  const phraseLimit = focus.includes("background") || focus.includes("foreground") ? 4 : 3;
-  const structureLimit = focus.includes("wording") || focus.includes("vocabulary") ? 2 : 1;
-  const adjectiveLimit = focus.includes("wording") || focus.includes("vocabulary") || focus.includes("atmosphere") ? 4 : 2;
+  const plans = {
+    subject: [
+      { label: "Nouns", items: leveled(scoped(subjectHints, "subject", 4).length ? scoped(subjectHints, "subject", 4) : scoped(objectHints, "subject", 4), "subject", level >= 3 ? 5 : 4) },
+      { label: level >= 2 ? "Useful phrases" : "Verbs", items: leveled(level >= 2 ? scoped(actionHints, "subject", 3) : smallChunks(scoped(actionHints, "subject", 5)), "subject", level >= 2 ? 4 : 3) },
+      { label: "Structures", items: focusStructures(structures, "subject").slice(0, 2) },
+    ],
+    action: [
+      { label: level >= 2 ? "Action phrases" : "Verbs", items: leveled(level >= 2 ? scoped(actionHints, "action", 5) : smallChunks(scoped(actionHints, "action", 5)), "action", 5) },
+      { label: "Structures", items: focusStructures(structures, "action").slice(0, 2) },
+    ],
+    background: [
+      { label: "Nouns", items: leveled(scoped(environmentHints, "background", 5), "background", 5) },
+      { label: "Positioning", items: leveled(scopedPhrases("background", 4), "background", 4) },
+      { label: "Structures", items: focusStructures(structures, "background").slice(0, 2) },
+    ],
+    environment: [
+      { label: "Nouns", items: leveled(scoped(environmentHints, "environment", 5), "environment", 5) },
+      { label: "Positioning", items: leveled(scopedPhrases("environment", 4), "environment", 4) },
+      { label: "Structures", items: focusStructures(structures, "background").slice(0, 1) },
+    ],
+    appearance: [
+      { label: "Nouns", items: leveled(scoped(objectHints, "objects", 4), "objects", 4) },
+      { label: "Adjectives", items: leveled(scoped(appearanceHints, "appearance", 5), "appearance", 5) },
+      { label: "Structures", items: focusStructures(structures, "appearance").slice(0, 2) },
+    ],
+    objects: [
+      { label: "Nouns", items: leveled(scoped(objectHints, "objects", 5), "objects", 5) },
+      { label: "Positioning", items: leveled(scopedPhrases("positioning", 3), "positioning", 3) },
+      { label: "Structures", items: focusStructures(structures, "object").slice(0, 2) },
+    ],
+    composition: [
+      { label: level >= 2 ? "Look for" : "Composition phrases", items: leveled(scoped(compositionHints, "composition", 5), "composition", 5) },
+      { label: "Nouns", items: uniqueWritingHints([...scoped(objectHints, "objects", 3), ...scoped(environmentHints, "environment", 3)]).slice(0, 3) },
+      { label: "Sentence frame", items: level >= 3 ? abstractSentenceFrames("composition", analysis, level) : focusStructures(structures, "composition").slice(0, 2) },
+    ],
+    positioning: [
+      { label: "Positioning", items: leveled(scopedPhrases("positioning", 5), "positioning", 5) },
+      { label: "Nouns", items: uniqueWritingHints([...scoped(objectHints, "objects", 3), ...scoped(environmentHints, "environment", 3)]).slice(0, 3) },
+      { label: "Structures", items: focusStructures(structures, "positioning").slice(0, 2) },
+    ],
+    expression: [
+      { label: "Expression and posture", items: leveled(scoped(expressionHints, "expression", 5), "expression", 5) },
+      { label: "Structures", items: focusStructures(structures, "expression").slice(0, 2) },
+    ],
+    atmosphere: [
+      { label: level >= 2 ? "Choices" : "Adjectives", items: leveled(uniqueWritingHints([...atmosphereWords.filter((item) => item.split(/\s+/).length <= 2), ...conditionHintWords(analysis)]), "atmosphere", level >= 3 ? 6 : 5) },
+      { label: level >= 3 ? "Visible evidence" : "Contrast", items: level >= 2 ? cleanLayerHints([visibleEvidencePhrase(analysis), "clean or messy", "calm or crowded", "fresh or neglected"], 4) : leveled(atmosphereWords.filter((item) => item.split(/\s+/).length > 2), "atmosphere", 3) },
+      { label: "Sentence frame", items: abstractSentenceFrames("atmosphere", analysis, level) },
+    ],
+    interpretation: [
+      { label: level >= 2 ? "Choices" : "Ideas", items: leveled(["daily life", "work", "relaxation", "disorder", "maintenance"], "interpretation", 5) },
+      { label: "Visible evidence", items: cleanLayerHints([visibleEvidencePhrase(analysis), "messy details", "daily objects"], 3) },
+      { label: "Sentence frame", items: abstractSentenceFrames("interpretation", analysis, level) },
+    ],
+    condition: [
+      { label: level >= 2 ? "Choices" : "Adjectives", items: leveled(conditionHintWords(analysis), "condition", 6) },
+      { label: "Visible evidence", items: cleanLayerHints([visibleEvidencePhrase(analysis), "dust", "exposed wires", "clutter"], 4) },
+      { label: "Sentence frame", items: abstractSentenceFrames("condition", analysis, level) },
+    ],
+    vocabulary: [
+      { label: "Adjectives", items: leveled(uniqueWritingHints([...scoped(vocabularyHints, "vocabulary", 5), ...scoped(atmosphereHints, "vocabulary", 5)]), "vocabulary", 5) },
+      { label: "Structures", items: focusStructures(structures, "vocabulary").slice(0, 2) },
+    ],
+    complete: [
+      { label: "Nouns", items: scoped(objectHints, "objects", 3) },
+      { label: "Verbs", items: scoped(actionHints, "action", 3) },
+      { label: "Structures", items: structures.slice(0, 1) },
+    ],
+  };
+  return (plans[focusCategory] || plans.complete).filter((group) => group.items.length);
+}
 
-  return [
-    { label: "Nouns", items: objectHints.slice(0, nounLimit) },
-    { label: "Verbs", items: actionHints.slice(0, verbLimit) },
-    { label: "Adjectives", items: adjectiveHints.slice(0, adjectiveLimit) },
-    { label: "Useful phrases", items: phraseHints.slice(0, phraseLimit) },
-    { label: "Structures", items: structures.slice(0, structureLimit) },
-  ];
+function categorizedHintItems(values, kind, categories) {
+  return cleanReusableHints(values, kind).map((text) => ({
+    text,
+    categories: categoriesForHint(text, categories),
+  }));
+}
+
+function categoriesForHint(value, baseCategories) {
+  const categories = new Set(baseCategories);
+  const text = normalizeClientText(value);
+  if (/\b(background|behind|distant|sky|lawn|grass|trees|bushes|street|room|wall|field|yard)\b/.test(text)) {
+    categories.add("background");
+    categories.add("environment");
+  }
+  if (/\b(in|on|near|along|beside|behind|around|across|through|under|next to)\b/.test(text)) {
+    categories.add("positioning");
+  }
+  if (actionRelatedHint(value)) {
+    categories.add("action");
+  }
+  if (atmosphereRelatedHint(value)) {
+    categories.add("atmosphere");
+    categories.add("vocabulary");
+  }
+  return [...categories];
+}
+
+function hintListText(items) {
+  return uniqueWritingHints(items.map((item) => item.text || item));
+}
+
+function unrelatedToImproveFocus(value, category) {
+  if (/\b___\b/.test(value)) {
+    return false;
+  }
+  if (["background", "environment", "positioning"].includes(category)) {
+    return actionRelatedHint(value) && !positioningRelatedHint(value);
+  }
+  if (category === "atmosphere") {
+    return !atmosphereRelatedHint(value);
+  }
+  return false;
 }
 
 function defaultImproveStructureForFocus(focus) {
@@ -1640,6 +3807,74 @@ function defaultImproveStructureForFocus(focus) {
     return "The main subject is ___";
   }
   return "The scene shows ___";
+}
+
+function improveFocusCategory(focus) {
+  if (focus.includes("main subject") || focus.includes("subject") || focus === "person") return "subject";
+  if (focus.includes("main action") || focus.includes("action") || focus.includes("happening")) return "action";
+  if (focus.includes("background")) return "background";
+  if (focus.includes("setting") || focus.includes("environment") || focus.includes("surroundings")) return "environment";
+  if (focus.includes("foreground") || focus.includes("position")) return "positioning";
+  if (focus.includes("appearance") || focus.includes("visual")) return "appearance";
+  if (focus.includes("composition") || focus.includes("layout") || focus.includes("focus")) return "composition";
+  if (focus.includes("interpret") || focus.includes("suggest")) return "interpretation";
+  if (focus.includes("condition") || focus.includes("maintained") || focus.includes("messy") || focus.includes("clean")) return "condition";
+  if (focus.includes("expression") || focus.includes("posture")) return "expression";
+  if (focus.includes("object") || focus.includes("visible detail")) return "objects";
+  if (focus.includes("mood") || focus.includes("atmosphere")) return "atmosphere";
+  if (focus.includes("wording") || focus.includes("vocabulary")) return "vocabulary";
+  return "complete";
+}
+
+function focusStructures(structures, category) {
+  const defaults = {
+    subject: ["The main subject is ___"],
+    action: ["The person is ___"],
+    background: ["In the background, there are ___"],
+    object: ["The scene includes ___"],
+    positioning: ["___ is near ___"],
+    appearance: ["The object appears ___"],
+    composition: ["___ is in focus"],
+    expression: ["The person looks ___"],
+    atmosphere: ["The scene feels ___"],
+    interpretation: ["The scene suggests ___"],
+    condition: ["The place looks ___"],
+    vocabulary: ["The scene looks ___"],
+  };
+  const keywords = {
+    subject: /subject|person|main/i,
+    action: /is ___|doing|action/i,
+    background: /background|there are|behind/i,
+    object: /includes|shows/i,
+    positioning: /near|beside|behind|in the|on the/i,
+    appearance: /appears|looks|has|bright|soft|color/i,
+    composition: /focus|foreground|background|center|stands out/i,
+    expression: /person|looks|posture|expression/i,
+    atmosphere: /feels|looks/i,
+    interpretation: /suggests|shows|because/i,
+    condition: /looks|condition|maintained/i,
+    vocabulary: /looks|appears|feels/i,
+  };
+  return uniqueWritingHints([
+    ...structures.filter((item) => (keywords[category] || /___/).test(item)),
+    ...(defaults[category] || ["The scene shows ___"]),
+  ]);
+}
+
+function actionRelatedHint(value) {
+  return /\b(ing|move|moving|walk|walking|ride|riding|hold|holding|look|looking|stand|standing|drive|driving|run|running)\b/i.test(value);
+}
+
+function positioningRelatedHint(value) {
+  return /\b(in|on|near|along|beside|behind|around|across|through|under|next to|foreground|background)\b/i.test(value);
+}
+
+function atmosphereRelatedHint(value) {
+  return /\b(quiet|busy|calm|bright|dark|peaceful|crowded|clean|messy|dusty|cluttered|neglected|maintained|well-kept|sunny|focused|lively|warm|serene|dramatic|inviting)\b/i.test(value);
+}
+
+function conditionRelatedHint(value) {
+  return /\b(clean|messy|dusty|dirty|cluttered|neglected|maintained|well-kept|broken|damaged|worn|exposed|tidy|poorly maintained|not well maintained)\b/i.test(value);
 }
 
 function buildImproveStructureSuggestion(feedback, guidance = {}) {
@@ -2275,7 +4510,7 @@ function resetUploadPreview() {
   els.imagePreview.src = "";
   els.imagePreviewShell.classList.add("hidden");
   els.uploadPlaceholder.classList.remove("hidden");
-  els.fileNameLabel.textContent = "JPG, PNG, WEBP, or GIF up to 8 MB";
+  els.fileNameLabel.textContent = `JPG, PNG, WEBP, or GIF up to ${formatBytes(state.settings.max_upload_bytes)}`;
 }
 
 function onFileChange() {
@@ -2290,7 +4525,7 @@ function onFileChange() {
   els.imagePreview.src = state.uploadPreviewUrl;
   els.imagePreviewShell.classList.remove("hidden");
   els.uploadPlaceholder.classList.add("hidden");
-  els.fileNameLabel.textContent = file.name;
+  els.fileNameLabel.textContent = `${file.name} (${formatBytes(file.size)})`;
   els.analyzeButton.disabled = !state.user;
 }
 
@@ -2419,9 +4654,6 @@ async function onAnalyze(event) {
     return;
   }
 
-  const formData = new FormData();
-  formData.append("image", imageFile);
-
   setButtonBusy(els.analyzeButton, true, "Preparing...");
   showSessionThinkingState("Preparing guided writing...", [
     "Analyzing the image",
@@ -2429,6 +4661,12 @@ async function onAnalyze(event) {
     "Preparing beginner hints",
   ]);
   try {
+    const uploadFile = await prepareImageForUpload(imageFile);
+    if (uploadFile.size !== imageFile.size) {
+      els.fileNameLabel.textContent = `${imageFile.name} (${formatBytes(imageFile.size)} -> ${formatBytes(uploadFile.size)})`;
+    }
+    const formData = new FormData();
+    formData.append("image", uploadFile, uploadFile.name || imageFile.name);
     const data = await api("/api/analyze", {
       method: "POST",
       body: formData,
@@ -2482,6 +4720,79 @@ async function onAnalyze(event) {
   }
 }
 
+async function prepareImageForUpload(file) {
+  const maxBytes = Number(state.settings.max_upload_bytes || 25 * 1024 * 1024);
+  if (!file.type.startsWith("image/")) {
+    throw new Error("Please upload an image file.");
+  }
+  if (file.size <= Math.min(maxBytes, IMAGE_UPLOAD_TARGET_BYTES) || file.type === "image/gif") {
+    if (file.size > maxBytes) {
+      throw new Error(`That image is too large. Please choose an image under ${formatBytes(maxBytes)}.`);
+    }
+    return file;
+  }
+
+  try {
+    const image = await loadImageForCompression(file);
+    const scale = Math.min(1, IMAGE_UPLOAD_MAX_DIMENSION / Math.max(image.naturalWidth || image.width, image.naturalHeight || image.height));
+    const width = Math.max(1, Math.round((image.naturalWidth || image.width) * scale));
+    const height = Math.max(1, Math.round((image.naturalHeight || image.height) * scale));
+    const canvas = document.createElement("canvas");
+    canvas.width = width;
+    canvas.height = height;
+    const context = canvas.getContext("2d", { alpha: false });
+    context.drawImage(image, 0, 0, width, height);
+
+    const targetBytes = Math.min(maxBytes * 0.9, IMAGE_UPLOAD_TARGET_BYTES);
+    let quality = 0.88;
+    let blob = await canvasToBlob(canvas, "image/jpeg", quality);
+    while (blob && blob.size > targetBytes && quality > 0.55) {
+      quality -= 0.08;
+      blob = await canvasToBlob(canvas, "image/jpeg", quality);
+    }
+    if (!blob || blob.size > maxBytes) {
+      if (file.size <= maxBytes) return file;
+      throw new Error(`That image is too large. Please choose an image under ${formatBytes(maxBytes)}.`);
+    }
+    const baseName = file.name.replace(/\.[^.]+$/, "") || "upload-image";
+    return new File([blob], `${baseName}.jpg`, { type: "image/jpeg", lastModified: Date.now() });
+  } catch (error) {
+    if (file.size <= maxBytes) {
+      return file;
+    }
+    throw error;
+  }
+}
+
+function loadImageForCompression(file) {
+  return new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(file);
+    const image = new Image();
+    image.onload = () => {
+      URL.revokeObjectURL(url);
+      resolve(image);
+    };
+    image.onerror = () => {
+      URL.revokeObjectURL(url);
+      reject(new Error("This image could not be prepared for upload."));
+    };
+    image.src = url;
+  });
+}
+
+function canvasToBlob(canvas, type, quality) {
+  return new Promise((resolve) => {
+    canvas.toBlob(resolve, type, quality);
+  });
+}
+
+function formatBytes(bytes) {
+  const value = Number(bytes || 0);
+  if (value >= 1024 * 1024) return `${(value / (1024 * 1024)).toFixed(value >= 10 * 1024 * 1024 ? 0 : 1)} MB`;
+  if (value >= 1024) return `${Math.round(value / 1024)} KB`;
+  return `${value} B`;
+}
+
 async function submitExplanationFeedback(session) {
   const input = document.getElementById("learnerExplanationInput");
   const button = document.getElementById("submitWritingButton");
@@ -2496,10 +4807,10 @@ async function submitExplanationFeedback(session) {
   }
 
   setButtonBusy(button, true, "Checking...");
-  showSessionThinkingState("Analyzing your writing...", [
-    "Checking clarity and detail",
-    "Finding reusable phrases",
-    "Preparing feedback",
+  showSessionThinkingState("Checking covered layers...", [
+    "Checking the main image parts",
+    "Finding the next focus",
+    "Preparing light hints",
   ]);
   try {
     const data = await api(`/api/sessions/${session.id}/feedback`, {
@@ -2512,7 +4823,7 @@ async function submitExplanationFeedback(session) {
     renderProgressHeader();
     renderDashboardContent();
     const feedback = data.feedback || {};
-    renderSessionStep("feedback", {
+    renderSessionStep("improve", {
       explanation,
       feedback,
       attempts: [
@@ -2523,6 +4834,7 @@ async function submitExplanationFeedback(session) {
         },
       ],
     });
+    awardNewLayerCompletionXp(session, feedback, explanation);
     window.scrollTo({ top: 0, behavior: "smooth" });
   } catch (error) {
     showToast(error.message, true);
@@ -2535,10 +4847,10 @@ async function submitExplanationFeedback(session) {
 async function requestImprovementFeedback(session, explanation, improvedText) {
   const button = document.getElementById("submitImproveButton");
   setButtonBusy(button, true, "Checking...");
-  showSessionThinkingState("Reviewing your improved answer...", [
+  showSessionThinkingState("Checking this layer...", [
     "Comparing with the image reference",
     "Finding the next missing details",
-    "Checking readiness for quiz",
+    "Checking whether the layer is covered",
   ]);
   try {
     const data = await api(`/api/sessions/${session.id}/feedback`, {
@@ -2567,6 +4879,7 @@ async function requestImprovementFeedback(session, explanation, improvedText) {
       attempts,
       polishMode: false,
     });
+    awardNewLayerCompletionXp(session, feedback, improvedText);
     window.scrollTo({ top: 0, behavior: "smooth" });
   } catch (error) {
     showToast(error.message, true);
@@ -2585,6 +4898,10 @@ async function startPostImproveQuiz(session) {
   const attempts = state.sessionFlow.attempts || [];
   const firstAttempt = attempts[0] || {};
   const latestAttempt = attempts[attempts.length - 1] || {};
+  const finalUpgrade = state.sessionFlow.articulationUpgrade;
+  const finalImprovedText = finalUpgrade?.finalized
+    ? finalUpgrade.answer || latestAttempt.text || ""
+    : latestAttempt.text || "";
   const scoreImprovement = Math.max(0, (latestAttempt.score || 0) - (firstAttempt.score || 0));
   setButtonBusy(button, true, "Building quiz...");
   els.quizModal.classList.remove("hidden");
@@ -2602,7 +4919,7 @@ async function startPostImproveQuiz(session) {
       body: JSON.stringify({
         explanation: state.sessionFlow.explanation || firstAttempt.text || "",
         learner_text: firstAttempt.text || state.sessionFlow.explanation || "",
-        improved_text: latestAttempt.text || "",
+        improved_text: finalImprovedText,
         feedback: latestAttempt.feedback || state.sessionFlow.feedback || {},
         score_improvement: scoreImprovement,
       }),
@@ -3171,7 +5488,6 @@ function renderReviewCard() {
   }
 
   state.quizQuestionStartedAt = Date.now();
-  state.quizConfidence = 2;
 
   const progressPercent = Math.max(
     8,
@@ -3204,14 +5520,6 @@ function renderReviewCard() {
           ? `<div class="tip-box">Hint: ${escapeHtml(card.context_note)}</div>`
           : ""
       }
-      <div class="confidence-row">
-        <span class="field-label">Confidence</span>
-        <div class="confidence-options">
-          <button class="confidence-chip" type="button" data-confidence="1">Not sure</button>
-          <button class="confidence-chip active" type="button" data-confidence="2">Okay</button>
-          <button class="confidence-chip" type="button" data-confidence="3">Sure</button>
-        </div>
-      </div>
       <div class="answer-options">
         ${card.options
           .map(
@@ -3226,7 +5534,6 @@ function renderReviewCard() {
     </div>
   `;
 
-  bindConfidenceButtons();
   els.quizContent.querySelectorAll("[data-review-option-index]").forEach((button) => {
     button.addEventListener("click", () => {
       const option = card.options[Number(button.dataset.reviewOptionIndex)];
@@ -3245,7 +5552,6 @@ function renderQuizRun(run) {
 
   const question = run.question;
   state.quizQuestionStartedAt = Date.now();
-  state.quizConfidence = 2;
 
   const progressPercent = Math.max(
     8,
@@ -3282,20 +5588,10 @@ function renderQuizRun(run) {
             ? `<div class="tip-box">Hint: ${escapeHtml(question.context_note)}</div>`
             : ""
         }
-        <div class="confidence-row">
-          <span class="field-label">Confidence</span>
-          <div class="confidence-options">
-            <button class="confidence-chip" type="button" data-confidence="1">Not sure</button>
-            <button class="confidence-chip active" type="button" data-confidence="2">Okay</button>
-            <button class="confidence-chip" type="button" data-confidence="3">Sure</button>
-          </div>
-        </div>
         <div id="quizAnswerZone"></div>
       </section>
     </div>
   `;
-
-  bindConfidenceButtons();
 
   const answerZone = document.getElementById("quizAnswerZone");
   if (question.answer_mode === "typing") {
@@ -3311,17 +5607,6 @@ function renderQuizRun(run) {
     return;
   }
   renderMultipleChoiceAnswer(question, answerZone);
-}
-
-function bindConfidenceButtons() {
-  els.quizContent.querySelectorAll("[data-confidence]").forEach((button) => {
-    button.addEventListener("click", () => {
-      state.quizConfidence = Number(button.dataset.confidence);
-      els.quizContent.querySelectorAll("[data-confidence]").forEach((chip) => {
-        chip.classList.toggle("active", chip === button);
-      });
-    });
-  });
 }
 
 function renderMultipleChoiceAnswer(question, container) {
@@ -3572,7 +5857,7 @@ async function submitQuizAnswer(selectedAnswer) {
         item_id: state.currentQuizRun.question.id,
         selected_answer: selectedAnswer,
         response_ms: responseMs,
-        confidence: state.quizConfidence,
+        confidence: 2,
       }),
     });
 
@@ -3693,7 +5978,7 @@ async function submitReviewAnswer(selectedAnswer) {
         card_id: card.id,
         selected_answer: selectedAnswer,
         response_ms: responseMs,
-        confidence: state.quizConfidence,
+        confidence: 2,
       }),
     });
 
@@ -3859,6 +6144,9 @@ async function api(path, options = {}) {
   const payload = isJson ? await response.json() : null;
 
   if (!response.ok) {
+    if (response.status === 413) {
+      throw new Error(`That image is too large. Please choose a smaller image or let the app compress it below ${formatBytes(state.settings.max_upload_bytes)}.`);
+    }
     throw new Error(payload?.error || "Request failed.");
   }
   return payload;

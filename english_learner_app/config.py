@@ -78,6 +78,9 @@ class AppConfig:
     smtp_use_starttls: bool
     smtp_use_ssl: bool
     cookie_secure: bool
+    disable_login_flow: bool
+    dev_user_email: str
+    dev_user_name: str
 
     @classmethod
     def from_env(cls, base_dir: Path | None = None) -> "AppConfig":
@@ -126,7 +129,7 @@ class AppConfig:
                 os.getenv("REVIEW_PROMPT_INTERVAL_SECONDS", "90")
             ),
             quiz_retake_minutes=int(os.getenv("QUIZ_RETAKE_MINUTES", "20")),
-            max_upload_bytes=int(os.getenv("MAX_UPLOAD_BYTES", str(8 * 1024 * 1024))),
+            max_upload_bytes=int(os.getenv("MAX_UPLOAD_BYTES", str(25 * 1024 * 1024))),
             ai_backend=ai_backend,
             vllm_base_url=os.getenv("VLLM_BASE_URL", "http://127.0.0.1:8000/v1").rstrip("/"),
             vllm_api_key=os.getenv("VLLM_API_KEY", "local-dev"),
@@ -153,4 +156,7 @@ class AppConfig:
             smtp_use_starttls=_env_bool("SMTP_USE_STARTTLS", True),
             smtp_use_ssl=_env_bool("SMTP_USE_SSL", False),
             cookie_secure=_env_bool("COOKIE_SECURE", False),
+            disable_login_flow=_env_bool("DISABLE_LOGIN_FLOW", False),
+            dev_user_email=os.getenv("DEV_USER_EMAIL", "dev@local.test"),
+            dev_user_name=os.getenv("DEV_USER_NAME", "Dev Learner"),
         )

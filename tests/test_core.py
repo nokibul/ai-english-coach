@@ -3,7 +3,9 @@ from __future__ import annotations
 from datetime import timezone
 import os
 from pathlib import Path
+import shutil
 import sqlite3
+import subprocess
 import tempfile
 import unittest
 import asyncio
@@ -111,6 +113,368 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(config.data_dir, root / "runtime-data")
         self.assertEqual(config.uploads_dir, root / "runtime-uploads")
         self.assertEqual(config.database_path, root / "runtime-db" / "app.sqlite3")
+
+
+class StaticImproveHintTests(unittest.TestCase):
+    @unittest.skipIf(shutil.which("node") is None, "node is required for static Improve hint tests")
+    def test_improve_hints_are_filtered_by_current_focus(self) -> None:
+        script = r"""
+const fs = require("fs");
+const vm = require("vm");
+const code = fs.readFileSync("english_learner_app/static/app.js", "utf8");
+const context = {
+  document: { addEventListener() {}, getElementById() { return null; }, querySelectorAll() { return []; } },
+  window: { setTimeout() {} },
+  console,
+};
+vm.createContext(context);
+vm.runInContext(code, context);
+
+const session = {
+  analysis: {
+    objects: [{ name: "person" }, { name: "riding mower" }, { name: "palm trees" }],
+    actions: [{ verb: "riding", phrase: "riding a mower across the lawn" }],
+    environment: "sunny outdoor lawn",
+    environment_details: ["green grass", "palm trees", "trimmed bushes", "sunny sky"],
+    vocabulary: [{ word: "peaceful" }, { word: "lawn" }],
+    phrases: [{ phrase: "in the background" }, { phrase: "riding across the lawn" }],
+  },
+};
+const feedback = {
+  specific_guidance: {
+    nouns: ["person", "mower", "palm trees"],
+    verbs: ["riding"],
+    details: ["palm trees in the background", "peaceful atmosphere"],
+    words: ["peaceful", "sunny"],
+  },
+  phrase_usage: { used: [], suggested: ["in the background", "riding across the lawn"] },
+  reusable_sentence_structures: ["In the background, there are ___", "The scene feels ___"],
+};
+function flatHints(focus) {
+  return context.buildImproveHintGroups(session, feedback, { focusAreas: [focus], additions: [] }, "A person is outside.")
+    .flatMap((group) => group.items)
+    .join(" | ")
+    .toLowerCase();
+}
+function assert(condition, message) {
+  if (!condition) {
+    throw new Error(message);
+  }
+}
+const subjectHints = flatHints("main subject");
+assert(subjectHints.includes("person"), "subject focus should include subject nouns");
+assert(!subjectHints.includes("background"), "subject focus should hide background hints");
+assert(!subjectHints.includes("peaceful"), "subject focus should hide atmosphere hints");
+
+const backgroundHints = flatHints("background");
+assert(backgroundHints.includes("palm trees"), "background focus should include environment nouns");
+assert(backgroundHints.includes("in the background"), "background focus should include positioning phrases");
+assert(!backgroundHints.includes("riding across"), "background focus should hide action phrases");
+
+const atmosphereHints = flatHints("mood/atmosphere");
+assert(atmosphereHints.includes("peaceful"), "atmosphere focus should include mood words");
+assert(!atmosphereHints.includes("riding"), "atmosphere focus should hide action verbs");
+assert(!atmosphereHints.includes("in the background"), "atmosphere focus should hide background phrases");
+"""
+        result = subprocess.run(
+            ["node", "-e", script],
+            cwd=Path(__file__).resolve().parents[1],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    @unittest.skipIf(shutil.which("node") is None, "node is required for static Improve hint tests")
+    def test_improve_focus_and_hints_escalate_when_stuck(self) -> None:
+        script = r"""
+const fs = require("fs");
+const vm = require("vm");
+const code = fs.readFileSync("english_learner_app/static/app.js", "utf8");
+const context = {
+  document: { addEventListener() {}, getElementById() { return null; }, querySelectorAll() { return []; } },
+  window: { setTimeout() {} },
+  console,
+};
+vm.createContext(context);
+vm.runInContext(code, context);
+
+const session = {
+  analysis: {
+    objects: [{ name: "two people" }, { name: "paved path" }, { name: "trees" }],
+    actions: [{ verb: "walking", phrase: "walking along the path" }],
+    environment: "park path",
+    environment_details: ["paved path", "trees"],
+    vocabulary: [{ word: "peaceful" }],
+    phrases: [{ phrase: "along the path" }],
+  },
+};
+const feedback = {
+  score: 30,
+  coverage: {
+    mainSubjectMentioned: false,
+    mainActionMentioned: true,
+    imageParts: [{ type: "main_subject", covered: false, coverageStatus: "missing" }],
+  },
+  readiness: { criteria: { mainSubject: false, mainAction: true, notAWordList: true } },
+  missing_details: ["main subject"],
+  specific_guidance: { nouns: ["people"], verbs: ["walking"], details: ["paved path"], words: [] },
+};
+const issue = context.buildFeedbackIssue(feedback, session);
+const first = context.buildImproveEscalationContext(session, [{ text: "Walking outside", feedback, score: 30 }], issue);
+const second = context.buildImproveEscalationContext(session, [
+  { text: "Walking outside", feedback, score: 30 },
+  { text: "Walking in a park", feedback, score: 31 },
+], issue);
+const third = context.buildImproveEscalationContext(session, [
+  { text: "Walking outside", feedback, score: 30 },
+  { text: "Walking in a park", feedback, score: 31 },
+  { text: "On the path", feedback, score: 31 },
+], issue);
+function flatHints(escalation) {
+  return context.buildImproveHintGroups(session, feedback, issue, "On the path", escalation)
+    .flatMap((group) => group.items)
+    .join(" | ")
+    .toLowerCase();
+}
+function assert(condition, message) {
+  if (!condition) throw new Error(message);
+}
+assert(first.level === 1, "first attempt should stay abstract");
+assert(context.buildImproveCurrentFocus(issue, session, first) === "Describe the main subject", "first focus should be abstract");
+assert(second.level === 2, "second miss should become guided but not explicit");
+assert(context.buildImproveCurrentFocus(issue, session, second) === "Who is the image mainly focused on?", "second focus should narrow attention");
+assert(third.level === 3, "third repeated miss should stay explicit");
+assert(context.buildImproveCurrentFocus(issue, session, third).includes("two people"), "third focus should name the missing subject");
+const firstHints = flatHints(first);
+const thirdHints = flatHints(third);
+assert(firstHints.includes("people"), "first hints should still include reusable subject chunks");
+assert(!firstHints.includes("walking along the path"), "first hints should not reveal the contextual phrase");
+assert(thirdHints.includes("two people walking along the path"), "third hints should reveal the missing concept directly");
+assert(!thirdHints.includes("peaceful"), "subject escalation should still hide unrelated atmosphere hints");
+"""
+        result = subprocess.run(
+            ["node", "-e", script],
+            cwd=Path(__file__).resolve().parents[1],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    @unittest.skipIf(shutil.which("node") is None, "node is required for static Improve hint tests")
+    def test_improve_stage_moves_through_articulation_layers(self) -> None:
+        script = r"""
+const fs = require("fs");
+const vm = require("vm");
+const code = fs.readFileSync("english_learner_app/static/app.js", "utf8");
+const context = {
+  document: { addEventListener() {}, getElementById() { return null; }, querySelectorAll() { return []; } },
+  window: { setTimeout() {} },
+  console,
+};
+vm.createContext(context);
+vm.runInContext(code, context);
+
+const session = {
+  analysis: {
+    objects: [{ name: "two people" }, { name: "paved path" }, { name: "palm trees" }],
+    actions: [{ verb: "walking", phrase: "walking along the path" }],
+    environment: "sunny park",
+    environment_details: ["paved path", "palm trees", "trimmed bushes"],
+    vocabulary: [{ word: "calm" }, { word: "well-kept" }],
+    phrases: [{ phrase: "along the path" }, { phrase: "in the background" }],
+  },
+};
+function assert(condition, message) {
+  if (!condition) throw new Error(message);
+}
+function feedback(criteria, parts = [], words = []) {
+  return {
+    coverage: { imageParts: parts },
+    readiness: { criteria: { ...criteria, notAWordList: true, naturalEnglish: true } },
+    specific_guidance: { nouns: ["two people", "paved path", "palm trees"], verbs: ["walking"], details: ["palm trees"], words },
+  };
+}
+const subjectOnly = feedback(
+  { mainSubject: true, mainAction: false, settingBackground: false },
+  [{ type: "main_subject", covered: true, coverageStatus: "covered" }]
+);
+let state = context.buildArticulationState(subjectOnly, session, "Two people.");
+assert(state.layers[0].completed, "subject layer should be completed");
+assert(state.currentLayer.key === "action", "action should be the next layer");
+assert(context.buildLayerCurrentFocus(state.currentLayer, session, { level: 1 }) === "Explain what is happening", "action layer should use layer wording");
+
+const throughEnvironment = feedback(
+  { mainSubject: true, mainAction: true, settingBackground: true },
+  [
+    { type: "main_subject", covered: true, coverageStatus: "covered" },
+    { type: "main_action", covered: true, coverageStatus: "covered" },
+    { type: "setting", covered: true, coverageStatus: "covered" },
+  ]
+);
+state = context.buildArticulationState(throughEnvironment, session, "Two people are walking along the path in a sunny park.");
+assert(state.layers.slice(0, 3).every((layer) => layer.completed), "first three layers should be complete");
+assert(state.currentLayer.key === "details", "details should be next after environment");
+const detailIssue = context.buildLayerFeedbackIssue(state.currentLayer, throughEnvironment, session);
+const detailHints = context.buildImproveHintGroups(session, throughEnvironment, detailIssue, "Two people are walking along the path.", { level: 1 })
+  .flatMap((group) => group.items)
+  .join(" | ")
+  .toLowerCase();
+assert(detailHints.includes("paved path") || detailHints.includes("palm trees"), "detail layer should show object/detail hints");
+assert(!detailHints.includes("calm"), "detail layer should not show atmosphere hints");
+
+const complete = feedback(
+  { mainSubject: true, mainAction: true, settingBackground: true },
+  [
+    { type: "main_subject", covered: true, coverageStatus: "covered" },
+    { type: "main_action", covered: true, coverageStatus: "covered" },
+    { type: "setting", covered: true, coverageStatus: "covered" },
+    { type: "important_object", covered: true, coverageStatus: "covered" },
+    { type: "foreground_detail", covered: true, coverageStatus: "covered" },
+  ],
+  ["calm", "well-kept"]
+);
+state = context.buildArticulationState(
+  complete,
+  session,
+  "Two people are walking along the paved path in a sunny park with palm trees. The area looks calm and well-kept."
+);
+assert(state.complete, "all articulation layers should be complete");
+assert(state.layers.every((layer) => layer.completed), "completed state should mark every layer");
+"""
+        result = subprocess.run(
+            ["node", "-e", script],
+            cwd=Path(__file__).resolve().parents[1],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    @unittest.skipIf(shutil.which("node") is None, "node is required for static Improve hint tests")
+    def test_articulation_upgrade_suggests_and_applies_small_replacements(self) -> None:
+        script = r"""
+const fs = require("fs");
+const vm = require("vm");
+const code = fs.readFileSync("english_learner_app/static/app.js", "utf8");
+const context = {
+  document: { addEventListener() {}, getElementById() { return { value: "The image shows grass and trees in a nice place." }; }, querySelectorAll() { return []; } },
+  window: { setTimeout() {}, clearTimeout() {} },
+  console,
+};
+vm.createContext(context);
+vm.runInContext(code, context);
+
+const session = {
+  analysis: {
+    objects: [{ name: "two people" }, { name: "tall palm trees" }],
+    actions: [{ verb: "walking", phrase: "walking along the path" }],
+    environment: "peaceful outdoor setting",
+    environment_details: ["grassy lawn", "tall palm trees", "in the background"],
+    vocabulary: [{ word: "peaceful" }],
+    phrases: [{ phrase: "in the background" }],
+  },
+};
+const feedback = {
+  coverage: {
+    imageParts: [
+      { type: "main_subject", covered: true, coverageStatus: "covered" },
+      { type: "main_action", covered: true, coverageStatus: "covered" },
+      { type: "setting", covered: true, coverageStatus: "covered" },
+      { type: "important_object", covered: true, coverageStatus: "covered" },
+      { type: "foreground_detail", covered: true, coverageStatus: "covered" },
+    ],
+  },
+  readiness: { criteria: { mainSubject: true, mainAction: true, settingBackground: true, naturalEnglish: true, notAWordList: true } },
+  language_quality: { naturalness: 72 },
+  specific_guidance: { words: ["peaceful"], nouns: ["grassy lawn", "tall palm trees"], verbs: ["walking"], details: ["in the background"] },
+};
+function assert(condition, message) {
+  if (!condition) throw new Error(message);
+}
+const answer = "The image shows grass and trees in a nice place.";
+const articulation = context.buildArticulationState(feedback, session, answer);
+assert(articulation.complete, "coverage layers should be complete before upgrade suggestions");
+const suggestions = context.buildArticulationUpgradeSuggestions(session, feedback, answer);
+assert(suggestions.length > 0 && suggestions.length <= 3, "upgrade stage should show 1-3 suggestions");
+assert(suggestions.some((item) => item.oldText === "grass" && item.newText === "grassy lawn"), "should suggest a vocabulary upgrade tied to the sentence");
+assert(suggestions.some((item) => item.oldText === "trees" && item.newText === "tall palm trees"), "should suggest reusable image language");
+let upgradeState = context.normalizeArticulationUpgradeState(null, answer, suggestions);
+const grassUpgrade = suggestions.find((item) => item.oldText === "grass");
+const upgraded = context.replaceFirstTextOccurrence(upgradeState.answer, grassUpgrade.oldText, grassUpgrade.newText);
+assert(upgraded.includes("grassy lawn"), "applying should update only the targeted phrase");
+assert(!upgraded.includes("grass and"), "old phrase should be replaced");
+assert(context.xpForUpgradeType(grassUpgrade.type) === 5, "vocabulary upgrades should award 5 XP");
+"""
+        result = subprocess.run(
+            ["node", "-e", script],
+            cwd=Path(__file__).resolve().parents[1],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    @unittest.skipIf(shutil.which("node") is None, "node is required for static Improve hint tests")
+    def test_static_object_images_use_appearance_layers_not_action(self) -> None:
+        script = r"""
+const fs = require("fs");
+const vm = require("vm");
+const code = fs.readFileSync("english_learner_app/static/app.js", "utf8");
+const context = {
+  document: { addEventListener() {}, getElementById() { return null; }, querySelectorAll() { return []; } },
+  window: { setTimeout() {}, clearTimeout() {} },
+  console,
+};
+vm.createContext(context);
+vm.runInContext(code, context);
+
+const session = {
+  analysis: {
+    objects: [{ name: "flower", description: "A bright pink flower with soft petals." }],
+    actions: [],
+    environment: "garden",
+    environment_details: ["green leaves", "slightly blurred background"],
+    vocabulary: [{ word: "bright pink" }, { word: "vivid" }, { word: "soft" }],
+    phrases: [{ phrase: "in focus" }, { phrase: "surrounded by leaves" }],
+  },
+};
+const feedback = {
+  coverage: { imageParts: [{ type: "main_subject", covered: true, coverageStatus: "covered" }] },
+  readiness: { criteria: { mainSubject: true, mainAction: false, settingBackground: false, notAWordList: true } },
+  specific_guidance: {
+    nouns: ["flower", "petals", "leaves"],
+    verbs: ["walking"],
+    details: ["green leaves", "slightly blurred background"],
+    words: ["bright pink", "vivid", "soft"],
+  },
+};
+function assert(condition, message) {
+  if (!condition) throw new Error(message);
+}
+assert(context.classifyImproveImageType(session.analysis) === "object", "flower image should be object-focused");
+const state = context.buildArticulationState(feedback, session, "A flower.");
+const keys = state.layers.map((layer) => layer.key).join("|");
+assert(!keys.includes("action"), "object-focused layer set should not include action");
+assert(state.currentLayer.key === "appearance", "after naming the flower, the next layer should be appearance");
+assert(context.buildLayerCurrentFocus(state.currentLayer, session, { level: 1 }) === "Add visual details", "static image prompt should ask for visual details");
+const issue = context.buildLayerFeedbackIssue(state.currentLayer, feedback, session);
+const hints = context.buildImproveHintGroups(session, feedback, issue, "A flower.", { level: 1 })
+  .flatMap((group) => group.items)
+  .join(" | ")
+  .toLowerCase();
+assert(hints.includes("bright pink") || hints.includes("soft"), "appearance hints should include visual adjectives");
+assert(!hints.includes("walking"), "appearance hints should not include unrelated action verbs");
+"""
+        result = subprocess.run(
+            ["node", "-e", script],
+            cwd=Path(__file__).resolve().parents[1],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
 
 
 class DatabaseAuthTests(unittest.TestCase):

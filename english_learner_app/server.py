@@ -51,7 +51,7 @@ def build_app(config: AppConfig | None = None) -> web.Application:
     db.initialize()
 
     app = web.Application(
-        client_max_size=config.max_upload_bytes + (1024 * 512),
+        client_max_size=max(config.max_upload_bytes + (2 * 1024 * 1024), 64 * 1024 * 1024),
         middlewares=[error_middleware, user_middleware],
     )
     app["config"] = config
@@ -134,7 +134,12 @@ async def error_middleware(request: web.Request, handler):
 @web.middleware
 async def user_middleware(request: web.Request, handler):
     request["user"] = None
-    session_cookie = request.cookies.get(request.app["config"].session_cookie_name)
+    config: AppConfig = request.app["config"]
+    if config.disable_login_flow:
+        request["user"] = ensure_dev_user(request.app["db"], config)
+        return await handler(request)
+
+    session_cookie = request.cookies.get(config.session_cookie_name)
     if session_cookie:
         token_hash = hash_token(session_cookie)
         request["user"] = request.app["db"].get_user_by_session_hash(
@@ -149,6 +154,31 @@ def current_user(request: web.Request) -> dict[str, Any]:
     if not user:
         raise web.HTTPUnauthorized(reason="Please log in first.")
     return user
+
+
+def ensure_dev_user(db: Database, config: AppConfig) -> dict[str, Any]:
+    email = (config.dev_user_email or "dev@local.test").strip().lower()
+    user = db.get_user_by_email(email)
+    if user:
+        if not user["is_verified"]:
+            db.set_user_verified(user["id"])
+            user = db.get_user_by_id(user["id"])
+        return user
+
+    now_iso = to_iso(utc_now())
+    user = db.create_user(
+        full_name=(config.dev_user_name or "Dev Learner").strip() or "Dev Learner",
+        phone=None,
+        email=email,
+        password_hash=hash_password(make_token(24)),
+        difficulty_band="developing",
+        fluency_score=60,
+        fluency_summary="Development user with login disabled.",
+        assessment={"source": "DISABLE_LOGIN_FLOW"},
+        created_at=now_iso,
+    )
+    db.set_user_verified(user["id"])
+    return db.get_user_by_id(user["id"])
 
 
 async def optional_json(request: web.Request) -> dict[str, Any]:
@@ -908,6 +938,7 @@ async def bootstrap(request: web.Request) -> web.Response:
                 ].review_prompt_interval_seconds,
                 "quiz_retake_minutes": request.app["config"].quiz_retake_minutes,
                 "first_review_minutes": request.app["config"].first_review_minutes,
+                "max_upload_bytes": request.app["config"].max_upload_bytes,
             },
             "user": public_user(user) if user else None,
             "stats": stats,

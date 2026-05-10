@@ -275,11 +275,14 @@ class AIAnalyzer:
             "Return this JSON structure with detailed, useful, and reusable language:\n"
             "{\n"
             '  "title": "",\n'
+            '  "image_type": "flower|room|street|nature|portrait|object|food|indoor_area|outdoor_area|other",\n'
             '  "scene_summary_simple": "1 very simple sentence (beginner level)",\n'
             '  "scene_summary_natural": "6-10 natural sentences describing the scene in detail",\n'
-            '  "objects": [{"name":"","description":"","importance":0.8}],\n'
-            '  "actions": [{"verb":"","subject":"","phrase":"","importance":0.8}],\n'
+            '  "objects": [{"name":"","description":"","importance":0.8,"confidence":"high|medium|low","visual_evidence":[""]}],\n'
+            '  "actions": [{"verb":"","subject":"","phrase":"","importance":0.8,"confidence":"high|medium|low","visible_evidence":""}],\n'
             '  "environment": {"setting":"","details":[""]},\n'
+            '  "visual_zones": [{"zone":"foreground|middle_ground|background|upper_composition|supporting_zone","elements":[""],"articulation_opportunities":[""],"richness_potential":"low|medium|high","importance":0.7}],\n'
+            '  "articulation_targets": [{"id":"","label":"","prompt":"","category":"appearance|environment|composition|lighting|atmosphere|positioning|texture|movement|interaction|contrast|condition","visual_focus":"","evidence":[""],"hints":[""],"importance":0.8}],\n'
             '  "vocabulary": [{"word":"","part_of_speech":"","meaning_simple":"","example":"","frequency_priority":"high"}],\n'
             '  "phrases": [{"phrase":"","meaning_simple":"","example":"","collocation_type":"phrase","reusable":true}],\n'
             '  "sentence_starters": ["The image shows ...", "Here we see ...", "This scene shows ..."],\n'
@@ -293,8 +296,26 @@ class AIAnalyzer:
             "- scene_summary_natural must be detailed (6–10 sentences).\n"
             "- Describe what you see, what is happening, and how things relate.\n"
             "- Mention positions: left, right, background, near, far, in front of, behind.\n"
-            "- Mention actions clearly (walking, holding, sitting, looking, etc).\n"
+            "- Mention actions clearly ONLY when a visible human/object action is present (walking, holding, using, carrying, moving). If the image is a static object/area, return an empty actions array.\n"
             "- Describe the situation like a real person explaining a photo.\n"
+            "- Be a careful visual observer: do not confidently name an object unless the image clearly supports it.\n"
+            "- For each object, set confidence to high, medium, or low. High means visually obvious (flower, car, bicycle, person, palm tree). Medium means likely but not certain. Low means unclear.\n"
+            "- If object confidence is medium, use soft wording in descriptions such as 'appears to be', 'looks like', or 'seems to be'.\n"
+            "- If object confidence is low, use generic visual labels only, such as 'black object', 'box-shaped device', 'dark rectangular equipment', or 'electronic device'.\n"
+            "- Do not use exact labels like desktop computer, gaming PC, computer tower, server, or workstation unless those details are visually obvious and confidence is high.\n"
+            "- Ground object names and hints in visible evidence: color, shape, position, wires, dust, desk, surface, foreground/background. Do not invent product names or functions.\n"
+            "- Prefer descriptive visual language over semantic assumptions when uncertain: 'a black rectangular object under a wooden desk' is better than 'a desktop workstation tower'.\n"
+            "- Analyze the image in visual zones before choosing articulation targets: foreground, middle ground, background, upper composition, and supporting visual zones.\n"
+            "- For each visual_zones item, identify important visible elements, articulation opportunities, and richness potential. Do not stop after the most obvious subject.\n"
+            "- Actively search for secondary articulation-worthy details: background architecture, apartment buildings, unfinished structures, construction areas, poles/wires, lighting, visual contrast, grouped regions, atmosphere clues, and composition features.\n"
+            "- Include background architecture or unfinished structures as visual_zones and articulation_targets when visible enough to describe.\n"
+            "- First decide the image_type, then generate 3–6 articulation_targets that fit THIS image, not generic categories.\n"
+            "- Articulation targets should come from obvious objects AND from visual zones, architecture, composition, lighting, positioning, texture, movement, interaction, visual contrast, condition, or atmosphere clues.\n"
+            "- Do not force action targets for static images. Do not force atmosphere or composition targets unless the image has visible clues for them.\n"
+            "- Each articulation target must be grounded in visible evidence. Hints must be short reusable chunks, not full answer sentences.\n"
+            "- Avoid generic target labels like 'subject', 'action', 'environment', 'details', or 'atmosphere'. Make them image-specific and conversational.\n"
+            "- Good target labels: 'Add more detail about the greenery', 'What stands out about the lighting?', 'Describe the roadside environment', 'Explain the flower appearance'.\n"
+            "- Bad target labels: 'Describe dense trees and shrubs', 'Describe overhead wires and multiple tall poles', 'Describe the environment'.\n"
             "- Focus only on natural, real-life English used by native speakers.\n"
             "- Name obvious visible subjects in the explanation, but do not teach them as key vocabulary.\n"
             "- Do not include basic function words as vocabulary targets.\n"
@@ -3583,7 +3604,10 @@ class AIAnalyzer:
         )
         objects = self._normalize_objects(raw.get("objects") or [])
         actions = self._normalize_actions(raw.get("actions") or [])
+        natural_explanation = self._downgrade_uncertain_object_language(natural_explanation, objects)
+        simple_explanation = self._downgrade_uncertain_object_language(simple_explanation, objects)
         environment_text, environment_details = self._normalize_environment(raw.get("environment"))
+        visual_zones = self._normalize_visual_zones(raw.get("visual_zones") or raw.get("visualZones") or [])
         vocabulary = self._normalize_vocabulary(raw.get("vocabulary") or [])
         phrases = self._normalize_phrases(
             raw.get("phrases") or [],
@@ -3614,6 +3638,18 @@ class AIAnalyzer:
                 phrases=phrases,
             )
 
+        articulation_targets = self._normalize_articulation_targets(
+            raw.get("articulation_targets") or raw.get("articulationTargets") or [],
+            objects=objects,
+            actions=actions,
+            environment_text=environment_text,
+            environment_details=environment_details,
+            visual_zones=visual_zones,
+            vocabulary=vocabulary,
+            phrases=phrases,
+            natural_explanation=natural_explanation,
+        )
+
         natural_explanation, vocabulary, phrases = self._synchronize_explanation_language(
             natural_explanation,
             vocabulary=vocabulary,
@@ -3631,6 +3667,7 @@ class AIAnalyzer:
             simple_explanation=simple_explanation,
             environment_text=environment_text,
         )
+        quiz_candidates = self._downgrade_uncertain_quiz_language(quiz_candidates, objects)
         title = self._normalize_title(
             str(raw.get("title") or "").strip(),
             objects=objects,
@@ -3658,12 +3695,15 @@ class AIAnalyzer:
 
         return {
             "title": title,
+            "image_type": self._normalize_image_type(raw.get("image_type") or raw.get("imageType") or ""),
             "scene_summary_simple": simple_explanation,
             "scene_summary_natural": natural_explanation,
             "objects": objects,
             "actions": actions,
             "environment": environment_text,
             "environment_details": environment_details,
+            "visual_zones": visual_zones,
+            "articulation_targets": articulation_targets,
             "vocabulary": vocabulary,
             "phrases": phrases,
             "sentence_starters": sentence_starters,
@@ -4246,6 +4286,312 @@ class AIAnalyzer:
             return default
         return max(0.0, min(1.0, numeric))
 
+    def _normalize_confidence(self, value: Any, *, default: str = "medium") -> str:
+        text = str(value or "").strip().lower()
+        if text in {"high", "medium", "low"}:
+            return text
+        return default
+
+    def _normalize_articulation_targets(
+        self,
+        raw_items: list[Any],
+        *,
+        objects: list[dict[str, Any]],
+        actions: list[dict[str, Any]],
+        environment_text: str,
+        environment_details: list[str],
+        visual_zones: list[dict[str, Any]],
+        vocabulary: list[dict[str, Any]],
+        phrases: list[dict[str, Any]],
+        natural_explanation: str,
+    ) -> list[dict[str, Any]]:
+        targets: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for item in raw_items if isinstance(raw_items, list) else []:
+            if not isinstance(item, dict):
+                continue
+            prompt = self._clean_text_value(item.get("prompt") or item.get("question") or "")
+            label = self._clean_text_value(item.get("label") or item.get("title") or prompt)
+            focus = self._clean_text_value(item.get("visual_focus") or item.get("focus") or label)
+            category = self._normalize_target_category(item.get("category") or label or prompt)
+            if not prompt and focus:
+                prompt = f"Describe {focus}."
+            if not label and focus:
+                label = focus
+            if self._is_generic_articulation_target(label, prompt):
+                continue
+            evidence = self._clean_string_list(item.get("evidence") or item.get("visual_evidence") or [], limit=4)
+            hints = self._clean_string_list(item.get("hints") or item.get("words") or [], limit=6)
+            if not (prompt and (focus or evidence or hints)):
+                continue
+            key = normalize_answer(f"{category} {label} {focus}")
+            if key in seen:
+                continue
+            seen.add(key)
+            targets.append(
+                {
+                    "id": self._safe_target_id(item.get("id") or key or f"target-{len(targets) + 1}"),
+                    "label": label[:80],
+                    "prompt": self._target_prompt(prompt, focus),
+                    "category": category,
+                    "visual_focus": focus[:80],
+                    "evidence": evidence,
+                    "hints": hints,
+                    "importance": self._normalize_importance(item.get("importance"), default=0.6),
+                }
+            )
+            if len(targets) >= 6:
+                break
+
+        if len(targets) < 3:
+            targets = self._fallback_articulation_targets(
+                objects=objects,
+                actions=actions,
+                environment_text=environment_text,
+                environment_details=environment_details,
+                visual_zones=visual_zones,
+                vocabulary=vocabulary,
+                phrases=phrases,
+                natural_explanation=natural_explanation,
+                existing=targets,
+            )
+        return targets[:6]
+
+    def _fallback_articulation_targets(
+        self,
+        *,
+        objects: list[dict[str, Any]],
+        actions: list[dict[str, Any]],
+        environment_text: str,
+        environment_details: list[str],
+        visual_zones: list[dict[str, Any]],
+        vocabulary: list[dict[str, Any]],
+        phrases: list[dict[str, Any]],
+        natural_explanation: str,
+        existing: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        targets = list(existing)
+        seen = {normalize_answer(f"{item.get('category')} {item.get('label')} {item.get('visual_focus')}") for item in targets}
+
+        def add(label: str, category: str, focus: str, evidence: list[str], hints: list[str], importance: float = 0.55) -> None:
+            key = normalize_answer(f"{category} {label} {focus}")
+            if not label or key in seen or len(targets) >= 6:
+                return
+            seen.add(key)
+            targets.append(
+                {
+                    "id": self._safe_target_id(key or f"target-{len(targets) + 1}"),
+                    "label": label[:80],
+                    "prompt": self._target_prompt(f"Describe {focus or label}.", focus or label),
+                    "category": category,
+                    "visual_focus": (focus or label)[:80],
+                    "evidence": self._clean_string_list(evidence, limit=4),
+                    "hints": self._clean_string_list(hints, limit=6),
+                    "importance": importance,
+                }
+            )
+
+        for obj in sorted(objects, key=lambda item: float(item.get("importance") or 0), reverse=True)[:3]:
+            name = self._clean_text_value(obj.get("name") or "")
+            if not name:
+                continue
+            evidence = [obj.get("description", ""), obj.get("position", ""), *(obj.get("visual_evidence") or [])]
+            hints = [name, obj.get("color", ""), obj.get("position", ""), *(obj.get("visual_evidence") or [])]
+            add(f"Add detail about {name}", "appearance", name, evidence, hints, float(obj.get("importance") or 0.6))
+
+        for action in actions[:2]:
+            phrase = self._clean_text_value(action.get("phrase") or action.get("verb") or "")
+            if phrase:
+                category = self._normalize_target_category(phrase)
+                add(f"What stands out about {phrase}?", category, phrase, [action.get("visible_evidence", ""), action.get("description", "")], [phrase, action.get("verb", "")], float(action.get("importance") or 0.6))
+
+        for zone in sorted(visual_zones, key=lambda item: float(item.get("importance") or 0), reverse=True):
+            if len(targets) >= 6:
+                break
+            zone_name = self._clean_text_value(zone.get("zone") or "").replace("_", " ")
+            elements = self._clean_string_list(zone.get("elements") or [], limit=4)
+            opportunities = self._clean_string_list(zone.get("articulation_opportunities") or [], limit=4)
+            focus = self._best_zone_focus(zone_name=zone_name, elements=elements, opportunities=opportunities)
+            if not focus:
+                continue
+            category = self._normalize_target_category(f"{focus} {' '.join(opportunities)} {zone_name}")
+            if category == "detail":
+                category = "composition" if zone_name in {"background", "upper composition"} else "environment"
+            label = self._zone_target_label(focus=focus, category=category, zone_name=zone_name)
+            add(label, category, focus, [zone_name, *elements, *opportunities], [focus, *elements[:2], *opportunities[:2]], float(zone.get("importance") or 0.55))
+
+        for detail in environment_details[:3]:
+            clean = self._clean_text_value(detail)
+            if clean:
+                category = self._normalize_target_category(clean)
+                if category == "detail":
+                    category = "condition" if re.search(r"\b(dust|dirty|messy|clutter|broken|worn|clean|maintained)\b", clean, re.I) else "environment"
+                add(f"Add detail about {clean}", category, clean, [environment_text, clean], [clean, "nearby", "in the background"])
+
+        if environment_text and len(targets) < 3:
+            add(f"Describe the area around {environment_text}", "environment", environment_text, environment_details, [environment_text, "around it", "behind it"])
+
+        mood_words = [
+            self._clean_text_value(item.get("word") or item.get("phrase") or "")
+            for item in vocabulary
+            if re.search(r"\b(calm|busy|quiet|bright|dark|messy|dusty|crowded|peaceful|neglected|warm|lively)\b", str(item), re.I)
+        ]
+        if mood_words and re.search(r"\b(calm|busy|quiet|bright|dark|messy|dusty|crowded|peaceful|neglected|warm|lively)\b", natural_explanation, re.I):
+            add("Describe the feeling of the scene", "atmosphere", "the feeling of the scene", environment_details, mood_words[:5])
+
+        phrase_hints = [self._clean_text_value(item.get("phrase") or "") for item in phrases[:4]]
+        if phrase_hints and objects and len(targets) < 4:
+            focus = self._clean_text_value(objects[0].get("name") or "")
+            plural = focus.endswith("s") and not focus.endswith("ss")
+            add(f"Where {'are' if plural else 'is'} the {focus}?", "positioning", focus, [objects[0].get("position", ""), *environment_details[:2]], phrase_hints)
+        return targets
+
+    def _normalize_visual_zones(self, raw_items: Any) -> list[dict[str, Any]]:
+        zones: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        allowed = {"foreground", "middle_ground", "background", "upper_composition", "supporting_zone"}
+        for item in raw_items if isinstance(raw_items, list) else []:
+            if not isinstance(item, dict):
+                continue
+            raw_zone = str(item.get("zone") or item.get("name") or "").strip().lower().replace("-", "_").replace(" ", "_")
+            zone = raw_zone if raw_zone in allowed else normalize_answer(raw_zone).replace(" ", "_")
+            aliases = {
+                "middleground": "middle_ground",
+                "middle": "middle_ground",
+                "upper": "upper_composition",
+                "uppercomposition": "upper_composition",
+                "supporting": "supporting_zone",
+            }
+            zone = aliases.get(zone, zone)
+            if zone not in allowed:
+                zone = "supporting_zone"
+            elements = self._clean_string_list(item.get("elements") or item.get("visible_elements") or [], limit=6)
+            opportunities = self._clean_string_list(
+                item.get("articulation_opportunities") or item.get("opportunities") or item.get("details") or [],
+                limit=6,
+            )
+            if not elements and not opportunities:
+                continue
+            key = f"{zone}:{normalize_answer(' '.join(elements[:3]))}"
+            if key in seen:
+                continue
+            seen.add(key)
+            zones.append(
+                {
+                    "zone": zone,
+                    "elements": elements,
+                    "articulation_opportunities": opportunities,
+                    "richness_potential": self._normalize_richness_potential(item.get("richness_potential")),
+                    "importance": self._normalize_importance(item.get("importance"), default=0.55),
+                }
+            )
+            if len(zones) >= 8:
+                break
+        return zones
+
+    def _normalize_richness_potential(self, value: Any) -> str:
+        text = str(value or "").strip().lower()
+        return text if text in {"low", "medium", "high"} else "medium"
+
+    def _best_zone_focus(self, *, zone_name: str, elements: list[str], opportunities: list[str]) -> str:
+        candidates = [*elements, *opportunities]
+        priority = [
+            r"\b(apartment buildings?|buildings?|unfinished structure|construction|architecture)\b",
+            r"\b(wires?|poles?|skyline|upper|background)\b",
+            r"\b(lighting|sunlight|shadow|reflection)\b",
+            r"\b(contrast|behind|foreground|middle ground|background)\b",
+        ]
+        for pattern in priority:
+            match = next((item for item in candidates if re.search(pattern, item, re.I)), "")
+            if match:
+                return self._clean_text_value(match)
+        if zone_name in {"background", "upper composition"} and candidates:
+            return self._clean_text_value(candidates[0])
+        return self._clean_text_value(candidates[0] if candidates else "")
+
+    def _zone_target_label(self, *, focus: str, category: str, zone_name: str) -> str:
+        focus_text = self._clean_text_value(focus)
+        if re.search(r"\b(apartment|building|structure|construction|architecture)\b", focus_text, re.I):
+            return f"Describe the {focus_text} in the background"
+        if category == "lighting":
+            return f"What stands out about the lighting near {focus_text}?"
+        if category in {"composition", "positioning", "contrast"}:
+            return f"What stands out in the {zone_name or 'background'}?"
+        return f"Add detail about {focus_text}"
+
+    def _normalize_target_category(self, value: Any) -> str:
+        text = normalize_answer(str(value or ""))
+        if re.search(r"\b(light|shadow|sun|bright)\b", text):
+            return "lighting"
+        if re.search(r"\b(texture|rough|smooth|fabric|surface)\b", text):
+            return "texture"
+        if re.search(r"\b(color|petal|appearance|shape|surface)\b", text):
+            return "appearance"
+        if re.search(r"\b(apartment|building|structure|construction|architecture)\b", text):
+            return "environment"
+        if re.search(r"\b(position|arrange|foreground|background|near|behind|under)\b", text):
+            return "positioning"
+        if re.search(r"\b(composition|layout|framing|focus|center|contrast)\b", text):
+            return "composition"
+        if re.search(r"\b(contrast|different|stands out|against)\b", text):
+            return "contrast"
+        if re.search(r"\b(feel|mood|atmosphere|calm|busy|messy|peaceful)\b", text):
+            return "atmosphere"
+        if re.search(r"\b(condition|dust|dirty|clean|clutter|maintained)\b", text):
+            return "condition"
+        if re.search(r"\b(walking|running|driving|crowd|moving|traffic|movement)\b", text):
+            return "movement"
+        if re.search(r"\b(holding|using|carrying|talking|playing|interaction|together)\b", text):
+            return "interaction"
+        if re.search(r"\b(room|street|garden|background|surrounding|area|place|environment)\b", text):
+            return "environment"
+        return "detail"
+
+    def _is_generic_articulation_target(self, label: str, prompt: str) -> bool:
+        text = normalize_answer(f"{label} {prompt}")
+        generic = {
+            "subject",
+            "action",
+            "environment",
+            "details",
+            "atmosphere",
+            "describe the subject",
+            "describe the action",
+            "describe the environment",
+            "describe the details",
+        }
+        return text in generic
+
+    def _normalize_image_type(self, value: Any) -> str:
+        text = normalize_answer(str(value or ""))
+        allowed = {
+            "flower",
+            "room",
+            "street",
+            "nature",
+            "portrait",
+            "object",
+            "food",
+            "indoor_area",
+            "outdoor_area",
+            "other",
+        }
+        text = text.replace(" ", "_").replace("-", "_")
+        return text if text in allowed else "other"
+
+    def _target_prompt(self, prompt: str, focus: str) -> str:
+        cleaned = self._clean_text_value(prompt)
+        if not cleaned and focus:
+            cleaned = f"Describe {focus}."
+        if cleaned and not re.match(r"^(describe|what|where|how|which)\b", cleaned, re.I):
+            cleaned = f"Describe {cleaned[0].lower()}{cleaned[1:]}"
+        return cleaned[:120]
+
+    def _safe_target_id(self, value: Any) -> str:
+        text = normalize_answer(str(value or "target"))
+        text = re.sub(r"[^a-z0-9]+", "-", text).strip("-")
+        return text[:48] or "target"
+
     def _normalize_objects(self, raw_items: list[Any]) -> list[dict[str, Any]]:
         objects: list[dict[str, Any]] = []
         seen: set[str] = set()
@@ -4256,12 +4602,32 @@ class AIAnalyzer:
                 color = str(item.get("color") or "").strip()
                 position = str(item.get("position") or "").strip()
                 importance = self._normalize_importance(item.get("importance"), default=0.6)
+                confidence = self._normalize_confidence(
+                    item.get("confidence") or item.get("identification_confidence") or item.get("object_confidence"),
+                    default="medium",
+                )
+                visual_evidence = self._clean_string_list(
+                    item.get("visual_evidence") or item.get("evidence") or [],
+                    limit=4,
+                )
             else:
                 name = str(item).strip()
                 description = ""
                 color = ""
                 position = ""
                 importance = 0.6
+                confidence = "medium"
+                visual_evidence = []
+            safe_name, safe_description = self._conservative_object_label(
+                name=name,
+                description=description,
+                color=color,
+                position=position,
+                confidence=confidence,
+                visual_evidence=visual_evidence,
+            )
+            name = safe_name
+            description = safe_description
             key = name.casefold()
             if not name or key in seen:
                 continue
@@ -4273,9 +4639,49 @@ class AIAnalyzer:
                     "importance": importance,
                     "color": color,
                     "position": position,
+                    "confidence": confidence,
+                    "visual_evidence": visual_evidence,
+                    "original_name": self._clean_text_value(str(item.get("name") or "") if isinstance(item, dict) else str(item)),
                 }
             )
         return objects
+
+    def _downgrade_uncertain_object_language(self, text: str, objects: list[dict[str, Any]]) -> str:
+        updated = str(text or "")
+        for item in objects:
+            original = str(item.get("original_name") or "").strip()
+            safe = str(item.get("name") or "").strip()
+            confidence = str(item.get("confidence") or "medium").strip().lower()
+            if original and safe and confidence != "high" and normalize_answer(original) != normalize_answer(safe):
+                updated = re.sub(re.escape(original), safe, updated, flags=re.I)
+        replacements = {
+            r"\bgaming\s+pc\b": "electronic device",
+            r"\bdesktop\s+computer\b": "electronic device",
+            r"\bcomputer\s+tower\b": "electronic device",
+            r"\bserver\s+machine\b": "electronic device",
+            r"\bworkstation\s+setup\b": "desk area",
+            r"\bworkstation\s+tower\b": "electronic device",
+        }
+        for pattern, replacement in replacements.items():
+            updated = re.sub(pattern, replacement, updated, flags=re.I)
+        return updated
+
+    def _downgrade_uncertain_quiz_language(
+        self,
+        quiz_candidates: list[dict[str, Any]],
+        objects: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        for item in quiz_candidates:
+            for key in ("prompt", "answer", "explanation", "source_text"):
+                if key in item:
+                    item[key] = self._downgrade_uncertain_object_language(str(item.get(key) or ""), objects)
+            distractors = item.get("distractors")
+            if isinstance(distractors, list):
+                item["distractors"] = [
+                    self._downgrade_uncertain_object_language(str(value or ""), objects)
+                    for value in distractors
+                ]
+        return quiz_candidates
 
     def _normalize_actions(self, raw_items: list[Any]) -> list[dict[str, Any]]:
         actions: list[dict[str, Any]] = []
@@ -4290,6 +4696,8 @@ class AIAnalyzer:
                 ).strip()
                 description = str(item.get("description") or "").strip()
                 importance = self._normalize_importance(item.get("importance"), default=0.6)
+                confidence = self._normalize_confidence(item.get("confidence"), default="medium")
+                visible_evidence = str(item.get("visible_evidence") or item.get("evidence") or "").strip()
             else:
                 phrase = str(item).strip()
                 verb = phrase.split(" ", 1)[0] if phrase else ""
@@ -4297,6 +4705,15 @@ class AIAnalyzer:
                 object_text = ""
                 description = ""
                 importance = 0.6
+                confidence = "medium"
+                visible_evidence = ""
+            if not self._action_is_visibly_supported(
+                verb=verb,
+                phrase=phrase,
+                confidence=confidence,
+                visible_evidence=visible_evidence,
+            ):
+                continue
             key = phrase.casefold()
             if not phrase or key in seen:
                 continue
@@ -4309,9 +4726,118 @@ class AIAnalyzer:
                     "phrase": phrase,
                     "description": description or f'The image suggests the action "{phrase}".',
                     "importance": importance,
+                    "confidence": confidence,
+                    "visible_evidence": visible_evidence,
                 }
             )
         return actions
+
+    def _conservative_object_label(
+        self,
+        *,
+        name: str,
+        description: str,
+        color: str,
+        position: str,
+        confidence: str,
+        visual_evidence: list[str],
+    ) -> tuple[str, str]:
+        cleaned_name = self._clean_text_value(name)
+        cleaned_description = self._clean_text_value(description)
+        evidence_text = " ".join([cleaned_name, cleaned_description, color, position, *visual_evidence]).lower()
+        uncertain_exact_label = re.search(
+            r"\b(desktop|computer tower|gaming pc|pc tower|server|workstation|computer case|cpu|desktop computer|machine)\b",
+            evidence_text,
+            re.I,
+        )
+        box_like = re.search(r"\b(box|rectangular|case|device|equipment|black|dark|under|desk|wire|cable)\b", evidence_text, re.I)
+        if confidence == "low" or (confidence != "high" and uncertain_exact_label):
+            safe_name = self._generic_visual_object_name(evidence_text, confidence=confidence)
+            safe_description = self._generic_visual_object_description(
+                safe_name=safe_name,
+                color=color,
+                position=position,
+                visual_evidence=visual_evidence,
+            )
+            return safe_name, safe_description
+        if confidence == "medium" and box_like and uncertain_exact_label:
+            safe_name = "black electronic device" if "black" in evidence_text or "dark" in evidence_text else "box-shaped device"
+            safe_description = self._generic_visual_object_description(
+                safe_name=safe_name,
+                color=color,
+                position=position,
+                visual_evidence=visual_evidence,
+                qualifier="appears to be",
+            )
+            return safe_name, safe_description
+        if confidence == "medium" and cleaned_description and not re.search(r"\b(appears|looks like|seems|possibly)\b", cleaned_description, re.I):
+            cleaned_description = f"It appears to be {cleaned_description[0].lower()}{cleaned_description[1:]}"
+        return cleaned_name, cleaned_description
+
+    def _generic_visual_object_name(self, evidence_text: str, *, confidence: str) -> str:
+        dark = "black" in evidence_text or "dark" in evidence_text
+        rectangular = any(word in evidence_text for word in ("rectangular", "box", "case", "tower"))
+        electronic = any(word in evidence_text for word in ("wire", "cable", "electronic", "device", "equipment"))
+        if confidence != "low" and electronic:
+            return "black electronic device" if dark else "electronic device"
+        if rectangular and electronic:
+            return "dark rectangular equipment" if dark else "rectangular equipment"
+        if rectangular:
+            return "black rectangular object" if dark else "box-like object"
+        return "black object" if dark else "unclear object"
+
+    def _generic_visual_object_description(
+        self,
+        *,
+        safe_name: str,
+        color: str,
+        position: str,
+        visual_evidence: list[str],
+        qualifier: str = "",
+    ) -> str:
+        safe_key = normalize_answer(safe_name)
+        pieces = []
+        if color and normalize_answer(color) not in safe_key:
+            pieces.append(color)
+        pieces.extend([safe_name, position, *visual_evidence[:2]])
+        compact: list[str] = []
+        seen: set[str] = set()
+        for piece in pieces:
+            cleaned = self._clean_text_value(piece)
+            key = normalize_answer(cleaned)
+            if cleaned and key and key not in seen and key not in safe_key:
+                compact.append(cleaned)
+                seen.add(key)
+            elif cleaned == safe_name and key not in seen:
+                compact.append(cleaned)
+                seen.add(key)
+        base = " ".join(compact) or safe_name
+        if qualifier:
+            article = "an" if base[:1].lower() in {"a", "e", "i", "o", "u"} else "a"
+            return f"The object {qualifier} {article} {base}."
+        return f"The image shows {base}."
+
+    def _action_is_visibly_supported(
+        self,
+        *,
+        verb: str,
+        phrase: str,
+        confidence: str,
+        visible_evidence: str,
+    ) -> bool:
+        text = f"{verb} {phrase} {visible_evidence}".lower()
+        if confidence == "low":
+            return False
+        if not text.strip():
+            return False
+        if re.search(r"\b(shown|visible|appears?|seems|looks|sits?|stands?|located|placed|resting|lying|is|are|has|contains)\b", text):
+            return False
+        return bool(
+            re.search(
+                r"\b(walking|running|riding|driving|holding|using|carrying|eating|drinking|playing|working|cutting|cooking|moving|crossing|climbing|throwing|jumping|swimming|writing|reading)\b",
+                text,
+            )
+        )
 
     def _normalize_environment(self, raw_environment: Any) -> tuple[str, list[str]]:
         if isinstance(raw_environment, dict):
