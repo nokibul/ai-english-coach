@@ -40,6 +40,15 @@ const els = {};
 const SESSION_CHUNK_SIZE = 6;
 const IMAGE_UPLOAD_TARGET_BYTES = 4 * 1024 * 1024;
 const IMAGE_UPLOAD_MAX_DIMENSION = 1920;
+const LEARNING_STAGES = Object.freeze({
+  INITIAL_ATTEMPT: "initial_attempt",
+  COVERAGE_FEEDBACK: "coverage_feedback",
+  COVERAGE_LAYERS: "coverage_layers",
+  COVERAGE_COMPLETE: "coverage_complete",
+  POLISH_STAGE: "polish_stage",
+  FINAL_REVEAL: "final_reveal",
+  QUIZ_READY: "quiz_ready",
+});
 let sessionListObserver = null;
 
 document.addEventListener("DOMContentLoaded", () => {
@@ -296,16 +305,32 @@ function renderSession(session) {
   closeLanguageModal();
   renderLearnMode();
   els.sessionDetailPanel.classList.remove("hidden");
-  state.sessionFlow = {
+  state.sessionFlow = createInitialSessionFlow(session);
+  renderSessionStep("write");
+}
+
+function createInitialSessionFlow(session = {}) {
+  return {
+    stage: normalizeLearningStage(session.learning_stage) || LEARNING_STAGES.INITIAL_ATTEMPT,
     step: "write",
     explanation: "",
     feedback: null,
     attempts: [],
+    coverageLayers: null,
+    coverageComplete: false,
+    skippedCoverageLayers: [],
+    polishUnlocked: false,
     articulationUpgrade: null,
+    finalPolishedText: "",
     layerRewards: [],
     allLayersBonusAwarded: false,
+    quizLaunchStarted: false,
   };
-  renderSessionStep("write");
+}
+
+function normalizeLearningStage(stage) {
+  const value = String(stage || "").trim();
+  return Object.values(LEARNING_STAGES).includes(value) ? value : "";
 }
 
 function renderSessionStep(step, updates = {}) {
@@ -313,11 +338,17 @@ function renderSessionStep(step, updates = {}) {
   if (!session) {
     return;
   }
+  const explicitStage = normalizeLearningStage(updates.stage || updates.learningStage);
   state.sessionFlow = {
     ...state.sessionFlow,
     ...updates,
     step,
   };
+  state.sessionFlow.stage = explicitStage || inferLearningStage(step, state.sessionFlow, session);
+  state.sessionFlow.learningStage = state.sessionFlow.stage;
+  if (state.currentSession) {
+    state.currentSession.learning_stage = state.sessionFlow.stage;
+  }
 
   closeLanguageModal();
   els.sessionDetailPanel.classList.remove("hidden");
@@ -345,6 +376,33 @@ function renderSessionStep(step, updates = {}) {
   animateStepTransition();
 }
 
+function inferLearningStage(step, flow, session) {
+  const current = normalizeLearningStage(flow?.stage);
+  const upgrade = flow?.articulationUpgrade;
+  if (flow?.quizLaunchStarted || current === LEARNING_STAGES.QUIZ_READY) {
+    return LEARNING_STAGES.QUIZ_READY;
+  }
+  if (upgrade?.finalized || flow?.finalPolishedText || current === LEARNING_STAGES.FINAL_REVEAL) {
+    return LEARNING_STAGES.FINAL_REVEAL;
+  }
+  if (current === LEARNING_STAGES.POLISH_STAGE) {
+    return LEARNING_STAGES.POLISH_STAGE;
+  }
+  if (step === "write" || !(flow?.attempts || []).length) {
+    return LEARNING_STAGES.INITIAL_ATTEMPT;
+  }
+  if (step === "feedback") {
+    return LEARNING_STAGES.COVERAGE_FEEDBACK;
+  }
+  const latestAttempt = (flow?.attempts || []).at(-1) || {};
+  const latestFeedback = latestAttempt.feedback || flow?.feedback || {};
+  const layerState = buildCoverageLayerState(latestFeedback, session, latestAttempt.text || flow?.explanation || "");
+  if (layerState.complete) {
+    return LEARNING_STAGES.COVERAGE_COMPLETE;
+  }
+  return LEARNING_STAGES.COVERAGE_LAYERS;
+}
+
 function setFocusedSessionLayout(focused) {
   els.sessionWorkspace.classList.toggle("focused-session-layout", Boolean(focused));
   if (focused) {
@@ -356,21 +414,31 @@ function setFocusedSessionLayout(focused) {
 }
 
 function renderStepProgress(activeStep) {
-  const steps = activeStep === "guided_write" || activeStep === "submit"
-    ? [
-        ["image", "Image"],
-        ["guided_write", "Guided Write"],
-        ["submit", "Submit"],
-      ]
-    : [
-        ["image", "Image"],
-        ["write", "Write"],
-        ["improve", "Layers"],
-        ["upgrade", "Upgrade"],
-        ["quiz", "Quiz"],
-        ["reward", "Reward"],
-      ];
+  const steps = [
+    ["initial_attempt", "Attempt"],
+    ["coverage_feedback", "Coverage"],
+    ["coverage_layers", "Layers"],
+    ["polish_stage", "Polish"],
+    ["final_reveal", "Final"],
+    ["quiz_ready", "Quiz"],
+  ];
+  const activeStage = normalizeLearningStage(activeStep) || normalizeLearningStage(state.sessionFlow?.stage) || LEARNING_STAGES.INITIAL_ATTEMPT;
+  const stageAliases = {
+    image: LEARNING_STAGES.INITIAL_ATTEMPT,
+    guided_write: LEARNING_STAGES.INITIAL_ATTEMPT,
+    write: LEARNING_STAGES.INITIAL_ATTEMPT,
+    submit: LEARNING_STAGES.COVERAGE_FEEDBACK,
+    feedback: LEARNING_STAGES.COVERAGE_FEEDBACK,
+    improve: LEARNING_STAGES.COVERAGE_LAYERS,
+    coverage_complete: LEARNING_STAGES.COVERAGE_LAYERS,
+    upgrade: LEARNING_STAGES.POLISH_STAGE,
+    quiz: LEARNING_STAGES.QUIZ_READY,
+    reward: LEARNING_STAGES.QUIZ_READY,
+  };
+  const activeKey = stageAliases[activeStage] || activeStage;
   const activeIndex = steps.findIndex(([key]) => key === activeStep);
+  const stageIndex = steps.findIndex(([key]) => key === activeKey);
+  const progressIndex = stageIndex >= 0 ? stageIndex : Math.max(0, activeIndex);
 
   return `
     <nav class="journey-steps" aria-label="Learning progress">
@@ -378,7 +446,7 @@ function renderStepProgress(activeStep) {
         .map(
           ([key, label], index) => `
             <span class="journey-step ${
-              index < activeIndex ? "complete" : index === activeIndex ? "active" : ""
+              index < progressIndex ? "complete" : index === progressIndex ? "active" : ""
             }">
               <span class="journey-step-number">${index + 1}</span>
               <span>${label}</span>
@@ -866,6 +934,12 @@ function renderFeedbackStep(session, feedback) {
     return;
   }
 
+  const initialFeedback = feedback.initial_attempt_feedback;
+  if (initialFeedback) {
+    renderInitialAttemptFeedbackStep(session, feedback, initialFeedback);
+    return;
+  }
+
   const totalScore = feedbackTotalScore(feedback);
   const latestAttempt = (state.sessionFlow.attempts || []).at(-1) || null;
   const attemptCount = Math.max(1, (state.sessionFlow.attempts || []).length);
@@ -908,10 +982,91 @@ function renderFeedbackStep(session, feedback) {
   `;
 
   document.getElementById("feedbackPrimaryButton").addEventListener("click", () => {
-    renderSessionStep("improve");
+    renderSessionStep("improve", { stage: LEARNING_STAGES.COVERAGE_LAYERS });
     window.scrollTo({ top: 0, behavior: "smooth" });
   });
   animateNumber("feedbackScoreValue", totalScore);
+}
+
+function renderInitialAttemptFeedbackStep(session, feedback, initialFeedback) {
+  const missingAreas = cleanUiList(initialFeedback.missing_visual_areas || feedback.missing_details || [], 5);
+  const reusable = initialFeedback.reusable_language || {};
+  const languageGroups = [
+    ["Nouns", reusable.nouns],
+    ["Verbs", reusable.verbs],
+    ["Phrases", reusable.phrases],
+    ["Collocations", reusable.collocations],
+    ["Sentence structures", reusable.sentence_structures],
+    ["Positioning", reusable.positioning_language],
+    ["Atmosphere", reusable.atmosphere_language],
+  ]
+    .map(([label, items]) => ({ label, items: cleanUiList(items, 5) }))
+    .filter((group) => group.items.length);
+
+  els.sessionDetailPanel.innerHTML = `
+    <div class="journey-shell focused-step-shell diagnosis-shell">
+      ${renderStepProgress(LEARNING_STAGES.COVERAGE_FEEDBACK)}
+      <section class="feedback-screen-card fast-feedback-card diagnosis-card">
+        <section class="diagnosis-line-card diagnosis-good-card coach-reveal" ${coachRevealStyle(0)}>
+          <p><span aria-hidden="true">✓</span> ${escapeHtml(initialFeedback.acknowledgement || "Nice start — you described part of the image.")}</p>
+        </section>
+
+        <section class="simple-feedback-section coach-reveal" ${coachRevealStyle(1)}>
+          <h4>Enhanced only from your answer</h4>
+          <p>${escapeHtml(initialFeedback.covered_enhancement || feedback.better_version || "")}</p>
+        </section>
+
+        ${
+          languageGroups.length
+            ? `
+              <section class="simple-feedback-section phrase-usage-section coach-reveal" ${coachRevealStyle(2)}>
+                <h4>Reusable language from that upgrade</h4>
+                <div class="language-feedback-grid initial-language-grid">
+                  ${languageGroups
+                    .map(
+                      (group) => `
+                        <div>
+                          <span class="field-label">${escapeHtml(group.label)}</span>
+                          <div class="mini-suggestion-row">
+                            ${group.items.map((item) => `<span class="phrase-chip suggested">${escapeHtml(item)}</span>`).join("")}
+                          </div>
+                        </div>
+                      `
+                    )
+                    .join("")}
+                </div>
+              </section>
+            `
+            : ""
+        }
+
+        <section class="diagnosis-line-card diagnosis-issue-card coach-reveal" ${coachRevealStyle(3)}>
+          <p><strong>Missing visual areas:</strong> ${escapeHtml(
+            missingAreas.length
+              ? `You could also describe ${joinReadableList(missingAreas)}.`
+              : "You covered the main visual areas; next we can polish the wording."
+          )}</p>
+        </section>
+
+        <button id="feedbackPrimaryButton" class="primary-button journey-primary-button diagnosis-cta coach-reveal" ${coachRevealStyle(4)} type="button">
+          Start Guided Coverage Layers
+        </button>
+      </section>
+    </div>
+  `;
+
+  document.getElementById("feedbackPrimaryButton").addEventListener("click", () => {
+    renderSessionStep("improve", { stage: LEARNING_STAGES.COVERAGE_LAYERS });
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  });
+}
+
+function joinReadableList(items = []) {
+  const clean = cleanUiList(items, 5);
+  if (!clean.length) return "";
+  if (clean.length === 1) return clean[0];
+  if (clean.length === 2) return `${clean[0]} and ${clean[1]}`;
+  return `${clean.slice(0, -1).join(", ")}, and ${clean.at(-1)}`;
 }
 
 function coachRevealStyle(index) {
@@ -1462,7 +1617,10 @@ function renderImproveStep(session) {
   const latestText = latestAttempt?.text || state.sessionFlow.explanation || "";
   const rewriteDraft = latestText;
   const attemptNumber = attempts.length;
-  const articulation = buildArticulationState(latestFeedback, session, latestText);
+  const coverageLayers = buildCoverageLayerState(latestFeedback, session, latestText);
+  state.sessionFlow.coverageLayers = coverageLayers;
+  state.sessionFlow.coverageComplete = Boolean(coverageLayers.complete);
+  state.sessionFlow.polishUnlocked = Boolean(coverageLayers.complete);
   const upgradeSuggestions = buildArticulationUpgradeSuggestions(session, latestFeedback, latestText);
   const upgradeState = normalizeArticulationUpgradeState(
     state.sessionFlow.articulationUpgrade,
@@ -1470,62 +1628,69 @@ function renderImproveStep(session) {
     upgradeSuggestions
   );
   state.sessionFlow.articulationUpgrade = upgradeState;
-  const showUpgrade = articulation.complete && !upgradeState.finalized;
-  const showMoveOption = articulation.complete && upgradeState.finalized;
-  const showEditor = !articulation.complete;
+  const showUpgrade = coverageLayers.complete && !upgradeState.finalized;
+  const showMoveOption = coverageLayers.complete && upgradeState.finalized;
+  const showEditor = !coverageLayers.complete;
   const ready = showMoveOption;
-  const issue = articulation.currentLayer
-    ? buildLayerFeedbackIssue(articulation.currentLayer, latestFeedback, session)
+  const issue = coverageLayers.currentLayer
+    ? buildLayerFeedbackIssue(coverageLayers.currentLayer, latestFeedback, session)
     : buildFeedbackIssue(latestFeedback, session);
-  const escalation = buildImproveEscalationContext(session, attempts, issue, articulation.currentLayer);
-  const currentFocus = articulation.currentLayer
-    ? buildLayerCurrentFocus(articulation.currentLayer, session, escalation)
+  const escalation = buildImproveEscalationContext(session, attempts, issue, coverageLayers.currentLayer);
+  const currentFocus = coverageLayers.currentLayer
+    ? buildLayerCurrentFocus(coverageLayers.currentLayer, session, escalation)
     : buildImproveCurrentFocus(issue, session, escalation);
   const hintGroups = buildImproveHintGroups(session, latestFeedback, issue, latestText, escalation);
+  const stage = showMoveOption
+    ? LEARNING_STAGES.FINAL_REVEAL
+    : showUpgrade
+      ? LEARNING_STAGES.POLISH_STAGE
+      : coverageLayers.complete
+        ? LEARNING_STAGES.COVERAGE_COMPLETE
+        : LEARNING_STAGES.COVERAGE_LAYERS;
+  const currentLayerNumber = coverageLayers.currentIndex >= 0 ? coverageLayers.currentIndex + 1 : Math.max(1, attemptNumber);
+  const layerTotal = Math.max(coverageLayers.layers?.length || 0, currentLayerNumber);
+  const headerEyebrow = showMoveOption
+    ? "Final reveal"
+    : showUpgrade
+      ? "Polish stage"
+      : `Focus ${currentLayerNumber} of ${layerTotal}`;
+  const headerTitle = showMoveOption
+    ? "Look how far it improved"
+    : showUpgrade
+      ? "Upgrade your articulation"
+      : shortFocusPreview(coverageLayers.currentLayer) || "Explore one visual area";
+  const headerSupport = showUpgrade
+    ? "Scene covered. Now choose the wording upgrades you like."
+    : "";
+  state.sessionFlow.stage = stage;
+  if (state.currentSession) {
+    state.currentSession.learning_stage = stage;
+  }
 
   els.sessionDetailPanel.innerHTML = `
     <div class="journey-shell focused-step-shell">
-      ${renderStepProgress(showUpgrade || showMoveOption ? "upgrade" : "improve")}
+      ${renderStepProgress(stage)}
       <section class="focused-writing-card improve-action-card">
         <div class="focused-image-frame">
           <img class="focused-image-preview" src="${session.image_url}" alt="Image to describe">
         </div>
         <div class="focused-copy">
-          <p class="eyebrow">${
-            articulation.complete
-              ? showUpgrade
-                ? "Articulation upgrade"
-                : "Description complete"
-              : `Layer ${articulation.currentIndex + 1 || Math.max(1, attemptNumber)}`
-          }</p>
-          <h3>${
-            showUpgrade
-              ? "✅ Scene covered"
-              : ready
-                ? "You built a complete description"
-                : "Explore the image"
-          }</h3>
+          <p class="eyebrow">${escapeHtml(headerEyebrow)}</p>
+          <h3>${escapeHtml(headerTitle)}</h3>
           ${
-            showUpgrade
-              ? `<p class="muted">✨ Want to make it sound more natural?</p>`
+            headerSupport
+              ? `<p class="muted">${escapeHtml(headerSupport)}</p>`
               : ""
           }
         </div>
-        ${renderArticulationProgress(articulation)}
-        ${showEditor ? renderImproveEditor({ rewriteDraft, currentFocus, hintGroups, articulation, escalation }) : ""}
+        ${renderCoverageLayerProgress(coverageLayers)}
+        ${showEditor ? renderImproveEditor({ rewriteDraft, currentFocus, hintGroups, articulation: coverageLayers, escalation }) : ""}
         ${showUpgrade ? renderArticulationUpgradeStage(upgradeState, upgradeSuggestions) : ""}
-        ${showMoveOption && upgradeState.finalized ? renderUpgradedAnswerPreview(upgradeState) : ""}
+        ${showMoveOption && upgradeState.finalized ? renderFinalPolishedReveal(upgradeState, upgradeSuggestions, latestFeedback, session) : ""}
         ${showEditor ? `
           <button id="submitImproveButton" class="primary-button journey-primary-button" type="button">
             Add This Layer
           </button>
-        ` : ""}
-        ${showMoveOption ? `
-          <div class="move-forward-box">
-            <strong>Ready for quiz?</strong>
-            <p class="muted">Review your original and upgraded versions, then continue to the quiz.</p>
-            <button id="continueToQuizButton" class="primary-button" type="button">Continue to Quiz</button>
-          </div>
         ` : ""}
       </section>
     </div>
@@ -1538,6 +1703,9 @@ function renderImproveStep(session) {
       return;
     }
     requestImprovementFeedback(session, state.sessionFlow.explanation, improvedText);
+  });
+  document.getElementById("moveToNextCoverageLayerButton")?.addEventListener("click", () => {
+    moveToNextCoverageLayer();
   });
   document.getElementById("finishArticulationUpgradeButton")?.addEventListener("click", () => {
     finalizeArticulationUpgrade(upgradeState, upgradeSuggestions);
@@ -1586,6 +1754,13 @@ function renderImproveStep(session) {
       event.preventDefault();
       openInlineUpgradePopover(target);
     });
+    target.addEventListener("keydown", (event) => {
+      if (event.key !== "Enter" && event.key !== " ") {
+        return;
+      }
+      event.preventDefault();
+      openInlineUpgradePopover(target);
+    });
   });
   window.setTimeout(() => {
     document.getElementById("learnerImproveInput")?.focus();
@@ -1595,9 +1770,13 @@ function renderImproveStep(session) {
 
 function openInlineUpgradePopover(target) {
   els.sessionDetailPanel.querySelectorAll(".inline-upgrade-target.active").forEach((item) => {
-    if (item !== target) item.classList.remove("active", "show-below", "align-left", "align-right");
+    if (item !== target) {
+      item.classList.remove("active", "show-below", "align-left", "align-right");
+      item.setAttribute("aria-expanded", "false");
+    }
   });
   target.classList.toggle("active");
+  target.setAttribute("aria-expanded", target.classList.contains("active") ? "true" : "false");
   if (target.classList.contains("active")) {
     positionInlineUpgradePopover(target);
     window.setTimeout(() => {
@@ -1613,6 +1792,7 @@ function closeInlineUpgradePopoverOnOutside(event) {
   }
   els.sessionDetailPanel?.querySelectorAll(".inline-upgrade-target.active").forEach((item) => {
     item.classList.remove("active", "show-below", "align-left", "align-right");
+    item.setAttribute("aria-expanded", "false");
   });
 }
 
@@ -1649,6 +1829,7 @@ function renderImproveEditor({ rewriteDraft, currentFocus, hintGroups, articulat
       ${renderLayerSupportMessage(escalation)}
       <small>${escapeHtml(focus.microPrompt)}</small>
     </section>
+    ${renderMoveForwardLayerOption(articulation, escalation)}
     ${renderImproveHintsCard(hintGroups)}
     ${renderStuckLayerUpgrade(stuckUpgrade)}
     <textarea
@@ -1658,6 +1839,23 @@ function renderImproveEditor({ rewriteDraft, currentFocus, hintGroups, articulat
       maxlength="900"
       placeholder="Keep your answer and add this layer..."
     >${escapeHtml(rewriteDraft)}</textarea>
+  `;
+}
+
+function renderMoveForwardLayerOption(coverageLayers, escalation = {}) {
+  const layer = coverageLayers?.currentLayer;
+  if (!layer || !escalation.canMoveForward) {
+    return "";
+  }
+  const remaining = (coverageLayers.layers || []).filter((item) => !item.completed);
+  const hasNext = remaining.length > 1;
+  return `
+    <section class="layer-support-message move-layer-message coach-reveal" ${coachRevealStyle(1)}>
+      <span>${escapeHtml(escalation.moveForwardMessage || "Good effort. You can keep trying this focus or move to the next visual area.")}</span>
+      <button id="moveToNextCoverageLayerButton" class="text-button" type="button">
+        ${hasNext ? "Move to next visual area" : "Continue to polish"}
+      </button>
+    </section>
   `;
 }
 
@@ -1685,47 +1883,44 @@ function renderLayerSupportMessage(escalation = {}) {
   return `<div class="layer-support-message">${escapeHtml(message)}</div>`;
 }
 
+function moveToNextCoverageLayer() {
+  const layer = state.sessionFlow.coverageLayers?.currentLayer;
+  if (!layer) {
+    return;
+  }
+  state.sessionFlow.skippedCoverageLayers = uniqueWritingHints([
+    ...(state.sessionFlow.skippedCoverageLayers || []),
+    layer.key,
+  ]);
+  showToast("Good effort — moving to the next visual area.");
+  renderSessionStep("improve", { stage: LEARNING_STAGES.COVERAGE_LAYERS });
+  window.scrollTo({ top: 0, behavior: "smooth" });
+}
+
 function renderArticulationUpgradeStage(upgradeState, suggestions) {
   const answer = upgradeState.answer || upgradeState.original || "";
   const handled = new Set([...(upgradeState.applied || []), ...(upgradeState.skipped || [])]);
   const activeSuggestions = suggestions.filter((item) => !handled.has(item.id));
   const annotated = buildInlineUpgradeMarkup(answer, activeSuggestions);
-  const richnessTypes = richnessUpgradeTypes(activeSuggestions.length ? activeSuggestions : suggestions);
   return `
     <section class="articulation-upgrade-card richness-upgrade-card coach-reveal" ${coachRevealStyle(1)}>
       <div class="upgrade-heading">
-        <span class="field-label">Richness upgrade</span>
-        <h4>Simple observation → richer visual articulation</h4>
-        <p class="muted">Tap only the upgrades you like. Your meaning stays yours.</p>
+        <span class="field-label">Upgrade your articulation</span>
+        <h4>Tap a highlight to make it richer.</h4>
+        <p class="muted">Choose only the upgrades you like. Your meaning stays yours.</p>
       </div>
-      ${
-        richnessTypes.length
-          ? `<div class="richness-type-row">${richnessTypes.map((type) => `<span>${escapeHtml(type)}</span>`).join("")}</div>`
-          : ""
-      }
       <div class="inline-upgrade-editor">
-        <span class="field-label">Tap a suggestion to replace the highlighted words</span>
         <div class="inline-upgrade-answer ${upgradeState.justApplied ? "replacement-flash" : ""}" aria-live="polite">
           ${annotated.markup || escapeHtml(answer)}
         </div>
         ${
           annotated.count
-            ? `<p class="muted inline-upgrade-help">${annotated.count} suggestion${pluralize(annotated.count)} available. Use X to dismiss one.</p>`
-            : `<p class="muted inline-upgrade-help">No exact upgrade targets remain. You can manually edit before previewing.</p>`
+            ? `<p class="muted inline-upgrade-help">${annotated.count} small upgrade${pluralize(annotated.count)} available.</p>`
+            : `<p class="muted inline-upgrade-help">All upgrades handled. Ready for the reveal.</p>`
         }
       </div>
-      <div class="upgrade-answer-panel">
-        <label class="field-label" for="articulationUpgradeInput">Manual edit</label>
-        <textarea
-          id="articulationUpgradeInput"
-          class="focused-writing-input articulation-upgrade-input"
-          rows="4"
-          maxlength="900"
-          placeholder="Edit your upgraded answer..."
-        >${escapeHtml(answer)}</textarea>
-      </div>
       <button id="finishArticulationUpgradeButton" class="secondary-button" type="button">
-        ${annotated.count ? "Skip remaining and preview" : "Keep my version and preview"}
+        ${annotated.count ? "Preview final version" : "Show final reveal"}
       </button>
     </section>
   `;
@@ -1734,10 +1929,8 @@ function renderArticulationUpgradeStage(upgradeState, suggestions) {
 function richnessUpgradeTypes(suggestions = []) {
   const labels = {
     visual_quality: "Visual quality",
-    composition: "Composition",
     atmosphere: "Atmosphere",
-    impression: "Impression",
-    flow: "Sentence flow",
+    sentence_flow: "Sentence flow",
     vocabulary: "Stronger vocabulary",
     verb: "Better verbs",
     positioning: "Positioning",
@@ -1761,7 +1954,15 @@ function buildInlineUpgradeMarkup(answer, suggestions) {
     const item = target.item;
     pieces.push(escapeHtml(text.slice(cursor, target.start)));
     pieces.push(`
-      <span class="inline-upgrade-target" data-upgrade-id="${escapeHtml(item.id)}">
+      <span
+        class="inline-upgrade-target"
+        data-upgrade-id="${escapeHtml(item.id)}"
+        role="button"
+        tabindex="0"
+        aria-haspopup="dialog"
+        aria-expanded="false"
+        aria-label="Show upgrade for ${escapeHtml(text.slice(target.start, target.end))}"
+      >
         <span class="inline-upgrade-popover">
           <button class="inline-upgrade-choice" type="button" data-apply-upgrade="${escapeHtml(item.id)}">
             ${escapeHtml(item.newText)}
@@ -1811,25 +2012,80 @@ function nonOverlappingUpgradeTargets(answer, suggestions) {
     .slice(0, 5);
 }
 
-function renderUpgradedAnswerPreview(upgradeState) {
+function renderFinalPolishedReveal(upgradeState, suggestions = [], feedback = {}, session = {}) {
+  const firstAttempt = (state.sessionFlow.attempts || [])[0]?.text || upgradeState.original || "";
+  const finalAnswer = upgradeState.answer || upgradeState.original || firstAttempt;
+  const learnedLanguage = finalRevealReusableLanguage(upgradeState, suggestions, feedback, session);
+  const appliedCount = (upgradeState.applied || []).length;
+  const phraseCount = learnedLanguage.length;
+  const progressItems = [
+    "Scene covered",
+    appliedCount ? `Articulation upgraded` : "Articulation reviewed",
+    `${phraseCount} reusable phrase${pluralize(phraseCount)} learned`,
+  ];
   return `
-    <section class="articulation-upgrade-card upgrade-preview-card coach-reveal" ${coachRevealStyle(1)}>
+    <section class="articulation-upgrade-card upgrade-preview-card final-reveal-card coach-reveal" ${coachRevealStyle(1)}>
       <div class="upgrade-heading">
-        <span class="field-label">Before → After</span>
-        <h4>Your richer paragraph is ready.</h4>
+        <span class="field-label">Final reveal</span>
+        <h4>Look how far your description improved.</h4>
+        <p class="muted">You kept your own meaning and made it clearer, fuller, and more natural.</p>
+      </div>
+      <div class="final-progress-row">
+        ${progressItems.map((item) => `<span>${escapeHtml(item)}</span>`).join("")}
       </div>
       <div class="answer-comparison-grid">
         <div class="previous-answer-box">
-          <span class="field-label">Original user version</span>
-          <p>${escapeHtml(upgradeState.original || "")}</p>
+          <span class="field-label">Original first attempt</span>
+          <p>${escapeHtml(firstAttempt)}</p>
         </div>
         <div class="previous-answer-box improved-version-box">
-          <span class="field-label">Upgraded version</span>
-          <p>${escapeHtml(upgradeState.answer || upgradeState.original || "")}</p>
+          <span class="field-label">Final evolved version</span>
+          <p>${escapeHtml(finalAnswer)}</p>
         </div>
+      </div>
+      ${
+        learnedLanguage.length
+          ? `
+            <div class="final-language-box">
+              <span class="field-label">Reusable language learned</span>
+              <div class="mini-suggestion-row">
+                ${learnedLanguage.map((item) => `<span class="phrase-chip suggested">${escapeHtml(item)}</span>`).join("")}
+              </div>
+            </div>
+          `
+          : ""
+      }
+      <div class="final-reward-box">
+        <div>
+          <span class="field-label">Progress reward</span>
+          <strong>+${Number(upgradeState.xp || 0)} XP</strong>
+        </div>
+        <button id="continueToQuizButton" class="primary-button" type="button">Continue to Quiz</button>
       </div>
     </section>
   `;
+}
+
+function finalRevealReusableLanguage(upgradeState = {}, suggestions = [], feedback = {}, session = {}) {
+  const applied = new Set(upgradeState.applied || []);
+  const appliedLanguage = (suggestions || [])
+    .filter((item) => applied.has(item.id))
+    .map((item) => item.newText);
+  const analysis = session?.analysis || {};
+  const initialReusable = feedback?.initial_attempt_feedback?.reusable_language || {};
+  return uniqueWritingHints([
+    ...appliedLanguage,
+    ...cleanUiList(feedback?.phrase_usage?.used || [], 3),
+    ...cleanUiList(feedback?.phrase_usage?.suggested || [], 3),
+    ...cleanUiList(initialReusable.phrases || [], 3),
+    ...cleanUiList(initialReusable.collocations || [], 3),
+    ...cleanUiList(initialReusable.positioning_language || [], 2),
+    ...((analysis.phrases || []).map((item) => item?.phrase || item)),
+    ...((analysis.reusable_language || []).map((item) => item?.text || item?.phrase || item)),
+  ])
+    .map(cleanUiText)
+    .filter((item) => item && item.split(/\s+/).length <= 7)
+    .slice(0, 3);
 }
 
 function renderArticulationProgress(articulation) {
@@ -1840,7 +2096,7 @@ function renderArticulationProgress(articulation) {
   const total = layers.length;
   const current = Math.max(0, articulation.currentIndex);
   const activeIndex = current >= 0 ? current : total - 1;
-  const nextLayer = layers[activeIndex + 1];
+  const currentLayer = layers[activeIndex];
   return `
     <section class="articulation-progress-card coach-reveal" ${coachRevealStyle(0)}>
       <div class="articulation-progress-topline">
@@ -1858,13 +2114,13 @@ function renderArticulationProgress(articulation) {
             .join("")}
         </div>
       </div>
-      ${
-        nextLayer
-          ? `<p class="articulation-next-preview">Next: ${escapeHtml(shortFocusPreview(nextLayer))}</p>`
-          : ""
-      }
+      <p class="articulation-current-focus">${escapeHtml(shortFocusPreview(currentLayer))}</p>
     </section>
   `;
+}
+
+function renderCoverageLayerProgress(coverageLayers) {
+  return renderArticulationProgress(coverageLayers);
 }
 
 function buildLayerFocusDisplay(layer, currentFocus, escalation = {}) {
@@ -1971,7 +2227,7 @@ function renderImproveHintsCard(groups) {
   }
   return `
     <section class="improve-hints-card coach-reveal" ${coachRevealStyle(1)}>
-      <h4>Hints</h4>
+      <h4>Focused hints</h4>
       <div class="improve-hint-grid">
         ${visibleGroups
           .map(
@@ -2000,16 +2256,16 @@ function renderImproveHintsCard(groups) {
 
 function simplifyHintGroups(groups = []) {
   const labelLimits = {
-    nouns: 5,
-    noun: 5,
-    verbs: 4,
-    verb: 4,
-    details: 5,
-    phrases: 5,
+    nouns: 4,
+    noun: 4,
+    verbs: 3,
+    verb: 3,
+    details: 4,
+    phrases: 4,
     "useful phrases": 5,
-    positioning: 5,
-    adjectives: 4,
-    adjective: 4,
+    positioning: 4,
+    adjectives: 3,
+    adjective: 3,
     structures: 3,
     "sentence frame": 1,
     "sentence frames": 3,
@@ -2021,7 +2277,7 @@ function simplifyHintGroups(groups = []) {
     const limit = labelLimits[key] || (key.includes("adjective") ? 2 : key.includes("structure") || key.includes("frame") ? 1 : 3);
     const items = uniqueWritingHints((group.items || []).map((item) => simplifyWritingHint(item, label)).filter(Boolean)).slice(0, limit);
     return { label: normalizeHintLabel(label), items };
-  }).filter((group) => group.items.length).slice(0, 5);
+  }).filter((group) => group.items.length).slice(0, 3);
 }
 
 function normalizeHintLabel(label) {
@@ -2104,8 +2360,273 @@ function buildArticulationState(feedback, session, learnerText = "") {
   };
 }
 
+function buildCoverageLayerState(feedback, session, learnerText = "") {
+  const coverage = getProgressiveCoverageState(feedback || {});
+  const skipped = new Set(state?.sessionFlow?.skippedCoverageLayers || []);
+  const allLayers = coverageLayerDefinitions(feedback, session, learnerText);
+  const layers = allLayers.filter((layer) => !skipped.has(layer.key)).map((layer) => ({
+    ...layer,
+    completed: Boolean(layer.completed),
+    current: false,
+  }));
+  const currentIndex = layers.findIndex((layer) => !layer.completed);
+  if (currentIndex >= 0) {
+    layers[currentIndex].current = true;
+  }
+  const gate = coverageCompletionGate(feedback, session);
+  return {
+    layers,
+    currentIndex,
+    currentLayer: currentIndex >= 0 ? layers[currentIndex] : null,
+    complete: gate.complete && (currentIndex === -1 || layers.length === 0),
+    coverage,
+    gate,
+    imageType: session?.analysis?.image_type || "dynamic",
+  };
+}
+
+function coverageLayerDefinitions(feedback, session, learnerText = "") {
+  const normalizedText = normalizeClientText(learnerText);
+  const analysis = session?.analysis || {};
+  const allTargets = analysisArticulationTargets(analysis);
+  const missingAreas = missingVisualAreaLabels(feedback, session);
+  if (!missingAreas.length) {
+    return [];
+  }
+  const usedTargetKeys = new Set();
+  return missingAreas.map((area, index) => {
+    const matched = bestCoverageTargetForMissingArea(area, allTargets, usedTargetKeys);
+    const target = matched || synthesizeCoverageTarget(area, index, analysis);
+    usedTargetKeys.add(normalizeClientText(`${target.id} ${target.label} ${target.visualFocus}`));
+    return {
+      ...target,
+      key: target.id || `coverage_${index + 1}_${cleanTargetId(area)}`,
+      id: target.id || `coverage_${index + 1}_${cleanTargetId(area)}`,
+      label: coverageLayerLabel(area, target),
+      focusArea: target.visualFocus || area,
+      visualFocus: target.visualFocus || area,
+      prompt: coverageLayerPrompt(area, target),
+      expansionPrompt: target.expansionPrompt || `Keep your answer and add one clear detail about ${area}.`,
+      dynamic: true,
+      coverageArea: area,
+      completed: false,
+    };
+  }).slice(0, 6);
+}
+
+function missingVisualAreaLabels(feedback = {}, session = {}) {
+  const coverage = feedback.coverage || {};
+  const flow = feedback.learning_flow || {};
+  const initial = feedback.initial_attempt_feedback || {};
+  const gate = coverageCompletionGate(feedback, session);
+  if (gate.complete) {
+    return [];
+  }
+  const currentLabels = [
+    ...cleanUiList(flow.missing_visual_areas || [], 8),
+    ...cleanUiList(feedback.missing_details || [], 8),
+    ...cleanUiList(coverage.missingMajorParts || [], 8),
+  ];
+  (coverage.imageParts || []).forEach((part) => {
+    if (!part || isCoveragePartCovered(part)) {
+      return;
+    }
+    currentLabels.push(cleanUiText(part.name || part.description || part.type || ""));
+  });
+  const labels = currentLabels.length
+    ? currentLabels
+    : [
+        ...cleanUiList(gate.missingFocuses || [], 8),
+        ...cleanUiList(initial.missing_visual_areas || [], 8),
+      ];
+  return uniqueWritingHints(labels)
+    .map((item) => item.replace(/_/g, " "))
+    .filter((item) => !/no major visual detail/i.test(item))
+    .slice(0, 6);
+}
+
+function coverageCompletionGate(feedback = {}, session = {}) {
+  const coverage = feedback.coverage || {};
+  const progressive = getProgressiveCoverageState(feedback);
+  const analysis = session?.analysis || {};
+  const coveragePercent = Number(coverage.coveragePercent || coverage.coverageScore || 0);
+  const imageParts = Array.isArray(coverage.imageParts) ? coverage.imageParts : [];
+  const coveredParts = imageParts.filter(isCoveragePartCovered);
+  const relevant = relevantCoverageDimensions(analysis, feedback);
+  const missingFocuses = [];
+  const hasMainFocus = Boolean(progressive.subjectOk || coveredPartMatches(coveredParts, /main_subject|subject|main_object|person|object/));
+  const actionRequired = relevant.action;
+  const hasAction = !actionRequired || Boolean(progressive.actionOk || coveredPartMatches(coveredParts, /main_action|action|movement|interaction/));
+  const hasSetting = Boolean(progressive.settingOk || coveredPartMatches(coveredParts, /setting|background|environment|context|place/));
+  const detailCount = meaningfulDetailCount(coveredParts);
+  const hasDetails = detailCount >= (relevant.detailHeavy ? 2 : 1);
+  const hasAtmosphere = !relevant.atmosphere || Boolean(coveredPartMatches(coveredParts, /mood|atmosphere|condition|feeling/) || coveragePercent >= 82);
+  const hasComposition = !relevant.composition || Boolean(coveredPartMatches(coveredParts, /composition|position|positioning|foreground|layout|lighting|shadow/) || coveragePercent >= 82);
+  const naturalEnough = Boolean(progressive.notListOk && (progressive.naturalOk || coveragePercent >= 70));
+
+  if (!hasMainFocus) missingFocuses.push("main visual focus");
+  if (!hasAction) missingFocuses.push("main action");
+  if (!hasSetting) missingFocuses.push("setting or background");
+  if (!hasDetails) missingFocuses.push(relevant.detailHeavy ? "important objects and meaningful details" : "one meaningful visual detail");
+  if (!hasAtmosphere) missingFocuses.push("atmosphere or condition");
+  if (!hasComposition) missingFocuses.push("composition or positioning");
+  if (!naturalEnough) missingFocuses.push("a clear connected sentence");
+
+  const highPriorityMissing = missingFocuses.filter((item) => !/atmosphere|composition|connected sentence/i.test(item));
+  const complete = (
+    hasMainFocus &&
+    hasAction &&
+    hasSetting &&
+    hasDetails &&
+    hasAtmosphere &&
+    hasComposition &&
+    naturalEnough &&
+    coveragePercent >= 68 &&
+    highPriorityMissing.length === 0
+  );
+
+  return {
+    complete,
+    missingFocuses: uniqueWritingHints(missingFocuses).slice(0, 5),
+    coveragePercent,
+    hasMainFocus,
+    hasAction,
+    hasSetting,
+    hasDetails,
+    hasAtmosphere,
+    hasComposition,
+    naturalEnough,
+  };
+}
+
+function relevantCoverageDimensions(analysis = {}, feedback = {}) {
+  const targets = Array.isArray(analysis.articulation_targets) ? analysis.articulation_targets : [];
+  const actions = Array.isArray(analysis.actions) ? analysis.actions : [];
+  const details = [
+    analysis.environment,
+    ...(analysis.environment_details || []),
+    ...(analysis.visual_zones || []).flatMap((zone) => [
+      zone?.zone,
+      ...(zone?.elements || []),
+      ...(zone?.articulation_opportunities || []),
+    ]),
+    ...targets.flatMap((target) => [target?.category, target?.label, target?.visual_focus, target?.visualFocus]),
+    ...cleanUiList(feedback?.missing_details || feedback?.coverage?.missingMajorParts || [], 6),
+  ].map(normalizeClientText).join(" ");
+  return {
+    action: actions.some((item) => isMeaningfulActionPhrase(item?.phrase || item?.verb || item)),
+    atmosphere: /\b(atmosphere|mood|feeling|condition|clean|messy|quiet|busy|calm|crowded|shaded|peaceful)\b/.test(details),
+    composition: /\b(composition|position|positioning|foreground|background|lighting|shadow|sunlight|layout|near|behind|beside)\b/.test(details),
+    detailHeavy: (analysis.objects || []).length >= 3 || (analysis.environment_details || []).length >= 2,
+  };
+}
+
+function coveredPartMatches(coveredParts, pattern) {
+  return coveredParts.some((part) => pattern.test(normalizeClientText(`${part.type || ""} ${part.name || ""} ${part.description || ""}`)));
+}
+
+function meaningfulDetailCount(coveredParts) {
+  return coveredParts.filter((part) => {
+    const text = normalizeClientText(`${part.type || ""} ${part.name || ""} ${part.description || ""}`);
+    return /\b(important|object|foreground|detail|background|setting|environment|vehicle|building|tree|lighting|shadow|condition|atmosphere|composition|position)\b/.test(text);
+  }).length;
+}
+
+function bestCoverageTargetForMissingArea(area, targets, usedTargetKeys) {
+  const areaKey = normalizeClientText(area);
+  if (!areaKey) {
+    return null;
+  }
+  const scored = targets
+    .filter((target) => !usedTargetKeys.has(normalizeClientText(`${target.id} ${target.label} ${target.visualFocus}`)))
+    .map((target) => ({
+      target,
+      score: coverageTargetMatchScore(areaKey, target),
+    }))
+    .filter((item) => item.score > 0)
+    .sort((a, b) => b.score - a.score);
+  return scored[0]?.target || null;
+}
+
+function coverageTargetMatchScore(areaKey, target) {
+  const targetKey = normalizeClientText([
+    target.label,
+    target.visualFocus,
+    target.category,
+    ...(target.hints || []),
+    ...(target.evidence || []),
+  ].join(" "));
+  if (!targetKey) {
+    return 0;
+  }
+  let score = 0;
+  if (/\b(action|happening|movement|interaction)\b/.test(areaKey) && ["movement", "interaction"].includes(target.category)) {
+    score += 10;
+  }
+  if (/\b(appearance|look|color|shape|texture)\b/.test(areaKey) && target.category === "appearance") {
+    score += 8;
+  }
+  if (targetKey.includes(areaKey) || areaKey.includes(targetKey)) {
+    score += 8;
+  }
+  const areaTokens = meaningfulCoverageTokens(areaKey);
+  const targetTokens = new Set(meaningfulCoverageTokens(targetKey));
+  areaTokens.forEach((token) => {
+    if (targetTokens.has(token)) {
+      score += 3;
+    }
+  });
+  const areaCategory = normalizeTargetCategory(areaKey);
+  if (areaCategory && areaCategory === target.category) {
+    score += 2;
+  }
+  return score;
+}
+
+function meaningfulCoverageTokens(text) {
+  const blocked = new Set(["main", "visual", "area", "detail", "important", "describe", "image", "scene", "the", "and", "with"]);
+  return normalizeClientText(text)
+    .split(/\s+/)
+    .filter((token) => token.length >= 3 && !blocked.has(token));
+}
+
+function synthesizeCoverageTarget(area, index, analysis = {}) {
+  const focus = cleanUiText(area) || `visual area ${index + 1}`;
+  const category = normalizeTargetCategory(focus);
+  const pack = focusLanguagePack({ visualFocus: focus, label: focus, category }, analysis);
+  return {
+    id: `coverage_${index + 1}_${cleanTargetId(focus)}`,
+    label: coverageLayerLabel(focus, { category }),
+    prompt: coverageLayerPrompt(focus, { category }),
+    expansionPrompt: `Keep your answer and add one clear detail about ${focus}.`,
+    category,
+    visualFocus: focus,
+    hints: cleanLayerHints([focus, ...pack.nouns, ...pack.phrases, ...pack.adjectives], 8),
+    evidence: cleanLayerHints([focus, ...pack.phrases], 5),
+    importance: 0.7,
+  };
+}
+
+function coverageLayerLabel(area, target = {}) {
+  const text = cleanUiText(area).replace(/^the\s+/i, "");
+  const key = normalizeClientText(`${text} ${target.category || ""}`);
+  if (/\b(tree|trees|greenery|plants|leaves|bushes|shrubs)\b/.test(key)) return "Add more detail about the greenery";
+  if (/\b(vehicle|vehicles|car|cars|motorcycle|traffic)\b/.test(key)) return "Describe the vehicles near the road";
+  if (/\b(building|buildings|apartment|structure|construction)\b/.test(key)) return "Describe the buildings in the background";
+  if (/\b(light|lighting|shadow|shadows|sunlight|shaded)\b/.test(key)) return "Describe the lighting and shadows";
+  if (/\b(atmosphere|mood|feeling|quiet|busy|calm)\b/.test(key)) return "Describe the atmosphere of the place";
+  if (/\b(road|street|lane)\b/.test(key)) return "Describe the road area";
+  return text ? `Add detail about ${text}` : "Add one missing visual area";
+}
+
+function coverageLayerPrompt(area, target = {}) {
+  const label = coverageLayerLabel(area, target);
+  if (label.endsWith("?")) return label;
+  return `${label}.`;
+}
+
 function completedArticulationLayerKeys(feedback, session, learnerText = "") {
-  return articulationLayerDefinitions(feedback, session, learnerText)
+  return coverageLayerDefinitions(feedback, session, learnerText)
     .filter((layer) => layer.completed)
     .map((layer) => layer.key);
 }
@@ -2122,7 +2643,7 @@ function awardNewLayerCompletionXp(session, feedback, learnerText = "") {
   awardLocalXp(points);
   showToast(`+${points} XP — ${newKeys.length === 1 ? "Layer completed" : "Layers completed"}`);
 
-  const allKeys = articulationLayerDefinitions(feedback, session, learnerText).map((layer) => layer.key);
+  const allKeys = coverageLayerDefinitions(feedback, session, learnerText).map((layer) => layer.key);
   const allComplete = allKeys.length > 0 && allKeys.every((key) => state.sessionFlow.layerRewards.includes(key));
   if (allComplete && !state.sessionFlow.allLayersBonusAwarded) {
     state.sessionFlow.allLayersBonusAwarded = true;
@@ -2463,7 +2984,8 @@ function dynamicTargetPrompt(layer, session, level = 1) {
   if (level <= 1) return base;
   if (level === 2) return dynamicNoticePrompt(layer, session);
   if (level === 3) return dynamicContrastPrompt(layer, session);
-  if (level >= 4) return dynamicSentenceScaffold(layer, session);
+  if (level === 4) return dynamicSentenceScaffold(layer, session);
+  if (level >= 5) return directLayerHelp(layer, session);
   return base;
 }
 
@@ -2492,6 +3014,22 @@ function dynamicSentenceScaffold(layer, session) {
     return `The ${focus} is ___ the ${evidence || "scene"}.`;
   }
   return `The ${focus} looks ___ and ___.`;
+}
+
+function directLayerHelp(layer, session) {
+  const focus = stripLeadingArticle(cleanUiText(layer.visualFocus || layer.label || "this area"));
+  const evidence = dynamicVisibleEvidence(layer, session);
+  const phrase = cleanLayerHints([...(layer?.hints || []), evidence], 6).find((item) => item.split(/\s+/).length <= 7);
+  if (phrase) {
+    return `Try mentioning that ${phrase}.`;
+  }
+  if (layer.category === "lighting") {
+    return `Try mentioning the light or shadows around ${focus}.`;
+  }
+  if (layer.category === "atmosphere") {
+    return `Try mentioning how ${focus} makes the place feel.`;
+  }
+  return `Try adding one short detail about ${focus}.`;
 }
 
 function dynamicVisibleEvidence(layer, session) {
@@ -2639,7 +3177,7 @@ function layerExpansionPrompt(layer, escalation = {}) {
 function dynamicTargetExpansionPrompt(layer, level = 1) {
   if (layer.expansionPrompt) return layer.expansionPrompt;
   const focus = cleanUiText(layer.visualFocus || layer.label || "this part of the image");
-  if (level >= 5) return "Tap the quick upgrade if it fits, or edit it in your own words.";
+  if (level >= 5) return directLayerHelp(layer, state.currentSession || {});
   if (level >= 3) return "Use the sentence frame and one hint word.";
   if (level >= 2) return `Choose one hint and add it to your description of ${focus}.`;
   return `Add one clear detail about ${focus}.`;
@@ -2851,6 +3389,9 @@ function buildArticulationUpgradeSuggestions(session, feedback, learnerText) {
   };
 
   [
+    ["thing", visualDetails[0]],
+    ["things", visualDetails.find((item) => !/\b(feeling|atmosphere|mood)\b/i.test(item))],
+    ["place", analysis.environment || details[0]],
     ["people", objects.find((item) => /\b(two|three|group|person|people|man|woman|child)\b/i.test(item))],
     ["person", objects.find((item) => /\bman|woman|child|person\b/i.test(item))],
     ["trees", richNounUpgrade("trees", "tall palm trees")],
@@ -2859,11 +3400,23 @@ function buildArticulationUpgradeSuggestions(session, feedback, learnerText) {
     ["flower", richNounUpgrade("flower", "bright flower")],
     ["flowers", richNounUpgrade("flowers", "bright flowers")],
     ["building", richNounUpgrade("building", "tall building")],
+    ["buildings", richNounUpgrade("buildings", "tall buildings")],
     ["road", richNounUpgrade("road", "busy road")],
     ["background", richNounUpgrade("background", "soft background")],
     ["nice", atmosphere[0]],
     ["good", atmosphere[0]],
-  ].forEach(([oldText, newText]) => push({ oldText, newText, type: atmosphereRelatedHint(newText) ? "atmosphere" : "visual_quality" }));
+    ["beautiful", atmosphere[0] || richNounUpgrade("scene", "vivid scene")],
+    ["big", visualDetails.find((item) => /\b(tall|large|wide|broad)\b/i.test(item))],
+    ["small", visualDetails.find((item) => /\b(small|narrow|tiny|compact)\b/i.test(item))],
+  ].forEach(([oldText, newText]) => push({
+    oldText,
+    newText,
+    type: atmosphereRelatedHint(newText)
+      ? "atmosphere"
+      : /\b(thing|things|place|people|person|tree|trees|grass|flower|flowers|building|buildings|road|background)\b/i.test(oldText)
+        ? "vocabulary"
+        : "visual_quality",
+  }));
 
   [
     ["go", actionVerb || action],
@@ -2884,14 +3437,15 @@ function buildArticulationUpgradeSuggestions(session, feedback, learnerText) {
     const flowTarget = firstSentence(text);
     const flow = text.includes(".") ? "with clearer details" : "while showing the setting";
     if (flowTarget && flowTarget.split(/\s+/).length <= 6) {
-      push({ oldText: flowTarget, newText: `${flowTarget.replace(/[.!?]+$/g, "")} ${flow}.`, type: "flow" });
+      push({ oldText: flowTarget, newText: `${flowTarget.replace(/[.!?]+$/g, "")} ${flow}.`, type: "sentence_flow" });
     }
   }
   [
     ["The image shows", "The scene shows"],
     ["There are", "In the scene, there are"],
     ["It has", "The scene includes"],
-  ].forEach(([oldText, newText]) => push({ oldText, newText, type: "flow" }));
+    ["There is", "The scene includes"],
+  ].forEach(([oldText, newText]) => push({ oldText, newText, type: "sentence_flow" }));
   const firstMood = atmosphere.find((item) => !normalizeClientText(text).includes(normalizeClientText(item)));
   const moodTarget = findMoodUpgradeTarget(text);
   if (firstMood && moodTarget) {
@@ -2901,13 +3455,69 @@ function buildArticulationUpgradeSuggestions(session, feedback, learnerText) {
   const compositionTarget = findTextOccurrence(text, "background") || findTextOccurrence(text, "behind");
   const compositionPhrase = positioning.find((item) => /\b(foreground|background|behind|near|beside|along)\b/i.test(item));
   if (compositionTarget && compositionPhrase && !normalizeClientText(text).includes(normalizeClientText(compositionPhrase))) {
-    push({ oldText: compositionTarget, newText: `${compositionTarget} ${compositionPhrase}`, type: "composition" });
+    push({ oldText: compositionTarget, newText: `${compositionTarget} ${compositionPhrase}`, type: "positioning" });
   }
 
-  return suggestions.slice(0, 5).map((item, index) => ({
+  return selectPolishUpgradeSuggestions(suggestions, text).map((item, index) => ({
     ...item,
     id: `${item.type}-${index}-${normalizeClientText(item.oldText || item.newText).slice(0, 18)}`,
   }));
+}
+
+function selectPolishUpgradeSuggestions(suggestions = [], answer = "") {
+  const source = String(answer || "");
+  const selected = [];
+  const usedRanges = [];
+  const usedTypes = new Set();
+  const seenOldText = new Set();
+  const typePriority = {
+    vocabulary: 1,
+    verb: 2,
+    positioning: 3,
+    atmosphere: 4,
+    sentence_flow: 5,
+    visual_quality: 6,
+  };
+  const candidates = suggestions
+    .map((item, index) => ({
+      ...item,
+      type: normalizePolishUpgradeType(item.type),
+      originalIndex: index,
+    }))
+    .filter((item) => polishUpgradeTypeAllowed(item.type))
+    .sort((a, b) => (typePriority[a.type] || 9) - (typePriority[b.type] || 9) || a.originalIndex - b.originalIndex);
+
+  const trySelect = (item, requireNewType = false) => {
+    if (selected.length >= 5) return;
+    if (requireNewType && usedTypes.has(item.type)) return;
+    const oldKey = normalizeClientText(item.oldText || "");
+    if (!oldKey || seenOldText.has(oldKey)) return;
+    const start = source.toLowerCase().indexOf(String(item.oldText || "").toLowerCase());
+    if (start < 0) return;
+    const end = start + String(item.oldText || "").length;
+    if (usedRanges.some((range) => start < range.end && end > range.start)) return;
+    selected.push(item);
+    seenOldText.add(oldKey);
+    usedTypes.add(item.type);
+    usedRanges.push({ start, end });
+  };
+
+  candidates.forEach((item) => trySelect(item, true));
+  candidates.forEach((item) => trySelect(item, false));
+
+  return selected;
+}
+
+function normalizePolishUpgradeType(type) {
+  const value = String(type || "").trim();
+  if (value === "flow") return "sentence_flow";
+  if (value === "composition") return "positioning";
+  if (value === "impression") return "atmosphere";
+  return value || "vocabulary";
+}
+
+function polishUpgradeTypeAllowed(type) {
+  return ["vocabulary", "verb", "positioning", "atmosphere", "sentence_flow", "visual_quality"].includes(type);
 }
 
 function normalizeUpgradeSuggestion(item, text) {
@@ -2949,11 +3559,11 @@ function findMoodUpgradeTarget(text) {
 
 function inferUpgradeType(oldText, newText) {
   const combined = `${oldText || ""} ${newText || ""}`;
-  if (/\b(foreground|background|composition|in focus|center|framed)\b/i.test(combined)) return "composition";
+  if (/\b(foreground|background|composition|in focus|center|framed)\b/i.test(combined)) return "positioning";
   if (positioningRelatedHint(combined)) return "positioning";
-  if (/\b(while|with|surrounded by|creating|adding to)\b/i.test(combined)) return "flow";
+  if (/\b(while|with|surrounded by|creating|adding to)\b/i.test(combined)) return "sentence_flow";
   if (atmosphereRelatedHint(combined)) return "atmosphere";
-  if (/\b(appears|impression|suggests|creates)\b/i.test(combined)) return "impression";
+  if (/\b(appears|impression|suggests|creates)\b/i.test(combined)) return "atmosphere";
   if (/\b(tall|bright|soft|vivid|dense|lush|green|delicate|blurred|towering|trimmed)\b/i.test(combined)) return "visual_quality";
   if (actionRelatedHint(combined) || /\b(go|move|look|hold|gaze|grip)\b/i.test(combined)) return "verb";
   return "vocabulary";
@@ -2965,10 +3575,8 @@ function xpForUpgradeType(type) {
     visual_quality: 5,
     verb: 5,
     positioning: 5,
-    composition: 10,
-    flow: 10,
+    sentence_flow: 10,
     atmosphere: 10,
-    impression: 10,
   }[type] || 5;
 }
 
@@ -2978,11 +3586,20 @@ function upgradeTypeLabel(type) {
     visual_quality: "Visual detail",
     verb: "Precise verb",
     positioning: "Positioning",
-    composition: "Composition",
-    flow: "Sentence flow",
+    sentence_flow: "Sentence flow",
     atmosphere: "Atmosphere",
-    impression: "Impression",
   }[type] || "Upgrade";
+}
+
+function polishRewardLabel(type) {
+  return {
+    vocabulary: "stronger wording",
+    visual_quality: "more vivid detail",
+    verb: "stronger verb",
+    positioning: "clearer positioning",
+    sentence_flow: "smoother flow",
+    atmosphere: "richer atmosphere",
+  }[type] || "wording upgraded";
 }
 
 function findTextOccurrence(text, phrase) {
@@ -3043,7 +3660,7 @@ function applyArticulationUpgrade(id, suggestions) {
   upgradeState.xp += upgrade.xp;
   upgradeState.justApplied = true;
   awardLocalXp(upgrade.xp);
-  showToast(`+${upgrade.xp} XP — ${upgradeTypeLabel(upgrade.type)}`);
+  showToast(`+${upgrade.xp} XP — ${polishRewardLabel(upgrade.type)}`);
   maybeAwardUpgradeBonus(upgradeState);
   if (allArticulationUpgradesHandled(upgradeState, suggestions)) {
     finalizeArticulationUpgrade(upgradeState, suggestions);
@@ -3085,6 +3702,8 @@ function finalizeArticulationUpgrade(upgradeState, suggestions) {
   const remaining = suggestions.filter((item) => !nextState.applied.includes(item.id) && !nextState.skipped.includes(item.id));
   nextState.skipped = uniqueWritingHints([...nextState.skipped, ...remaining.map((item) => item.id)]);
   nextState.finalized = true;
+  state.sessionFlow.stage = LEARNING_STAGES.FINAL_REVEAL;
+  state.sessionFlow.finalPolishedText = nextState.answer || nextState.original || "";
   renderSessionStep("improve", { articulationUpgrade: nextState });
 }
 
@@ -3142,7 +3761,7 @@ function buildImproveEscalationContext(session, attempts, issue, currentLayer = 
   const abstractLayer = isAbstractLayerCategory(normalizeLayerGuidanceKey(currentLayer) || layerCategory);
   const recent = (attempts || []).map((attempt) => ({
     category: improveFocusCategory(normalizeClientText(buildFeedbackIssue(attempt.feedback || {}, session)?.focusAreas?.[0] || "")),
-    currentLayerKey: buildArticulationState(attempt.feedback || {}, session, attempt.text || "").currentLayer?.key || "",
+    currentLayerKey: buildCoverageLayerState(attempt.feedback || {}, session, attempt.text || "").currentLayer?.key || "",
     score: Number(attempt.score || feedbackTotalScore(attempt.feedback || {})) || 0,
   }));
   let repeatedFocusCount = 0;
@@ -3164,9 +3783,6 @@ function buildImproveEscalationContext(session, attempts, issue, currentLayer = 
   let level = 1;
   if (currentLayer?.dynamic) {
     level = Math.min(5, Math.max(1, repeatedFocusCount || 1));
-    if (noMeaningfulImprovement && repeatedFocusCount >= 2) {
-      level = Math.min(5, level + 1);
-    }
   } else if (abstractLayer && repeatedFocusCount >= 2) {
     level = 3;
   } else if (abstractLayer && repeatedFocusCount >= 1) {
@@ -3183,6 +3799,8 @@ function buildImproveEscalationContext(session, attempts, issue, currentLayer = 
     level,
     repeatedFocusCount,
     noMeaningfulImprovement,
+    canMoveForward: Boolean(currentLayer?.dynamic && repeatedFocusCount >= 5),
+    moveForwardMessage: "Good effort. You can keep this detail simple and move to the next visual area.",
     message: supportiveLayerMessage(currentLayer, level, session),
   };
 }
@@ -3228,7 +3846,7 @@ function supportiveLayerMessage(layer, level, session) {
     return "";
   }
   if (layer?.dynamic) {
-    if (level >= 5) return "Let's make the wording easier to upgrade.";
+    if (level >= 5) return "Try the short helper sentence, or move forward if you made a reasonable attempt.";
     if (level >= 4) return "Use the sentence frame to finish this focus.";
     if (level >= 3) return "Choose one word that best matches what you see.";
     return "Let's notice one visible clue first.";
@@ -4067,30 +4685,11 @@ function buildImproveSuggestionItems(feedback) {
     .slice(0, 2);
 }
 
-function isExplanationReady(feedback) {
+function isExplanationReady(feedback, session = state.currentSession || {}) {
   if (!feedback) {
     return false;
   }
-  if (typeof feedback.is_ready === "boolean") {
-    return feedback.is_ready;
-  }
-  if (typeof feedback?.readiness?.ready === "boolean") {
-    return feedback.readiness.ready;
-  }
-  const state = getProgressiveCoverageState(feedback);
-  const coverage = feedback.coverage || {};
-  const coveragePercent = Number(coverage.coveragePercent || coverage.coverageScore || 0);
-  const score = feedbackTotalScore(feedback);
-  return (
-    state.subjectOk &&
-    state.actionOk &&
-    state.settingOk &&
-    state.detailCount >= 2 &&
-    state.naturalOk &&
-    state.notListOk &&
-    coveragePercent >= 70 &&
-    score >= 65
-  );
+  return coverageCompletionGate(feedback, session).complete;
 }
 
 function getProgressiveCoverageState(feedback) {
@@ -4823,7 +5422,8 @@ async function submitExplanationFeedback(session) {
     renderProgressHeader();
     renderDashboardContent();
     const feedback = data.feedback || {};
-    renderSessionStep("improve", {
+    renderSessionStep("feedback", {
+      stage: data.learning_stage || data.stage || feedback.learning_stage || LEARNING_STAGES.COVERAGE_FEEDBACK,
       explanation,
       feedback,
       attempts: [
@@ -4876,6 +5476,7 @@ async function requestImprovementFeedback(session, explanation, improvedText) {
       },
     ];
     renderSessionStep("improve", {
+      stage: data.learning_stage || data.stage || feedback.learning_stage || null,
       attempts,
       polishMode: false,
     });
@@ -4894,6 +5495,10 @@ async function startPostImproveQuiz(session) {
     return;
   }
   state.sessionFlow.quizLaunchStarted = true;
+  state.sessionFlow.stage = LEARNING_STAGES.QUIZ_READY;
+  if (state.currentSession) {
+    state.currentSession.learning_stage = LEARNING_STAGES.QUIZ_READY;
+  }
   const button = document.getElementById("continueToQuizButton");
   const attempts = state.sessionFlow.attempts || [];
   const firstAttempt = attempts[0] || {};

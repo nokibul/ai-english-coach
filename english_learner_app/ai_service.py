@@ -276,6 +276,13 @@ class AIAnalyzer:
             analysis=analysis,
         )
         if validation_feedback is not None:
+            if attempt_index <= 1:
+                self._attach_initial_attempt_feedback(
+                    validation_feedback,
+                    payload={},
+                    learner_text=learner_text,
+                    analysis=analysis,
+                )
             return self._apply_progressive_coaching(
                 validation_feedback,
                 analysis=analysis,
@@ -294,6 +301,7 @@ class AIAnalyzer:
             original_text=original_text,
             analysis=analysis,
             learner_level=learner_level,
+            attempt_index=attempt_index,
         )
         try:
             output_text = await self._request_text_generation(
@@ -306,6 +314,13 @@ class AIAnalyzer:
             except Exception:
                 raise
             normalized = self._normalize_explanation_feedback(payload, fallback=fallback)
+            if attempt_index <= 1:
+                self._attach_initial_attempt_feedback(
+                    normalized,
+                    payload=payload,
+                    learner_text=learner_text,
+                    analysis=analysis,
+                )
             return self._apply_progressive_coaching(
                 normalized,
                 analysis=analysis,
@@ -315,6 +330,13 @@ class AIAnalyzer:
             )
         except Exception as exc:
             print(f"[feedback-fallback] {type(exc).__name__}: {exc}")
+            if attempt_index <= 1:
+                self._attach_initial_attempt_feedback(
+                    fallback,
+                    payload={},
+                    learner_text=learner_text,
+                    analysis=analysis,
+                )
             return self._apply_progressive_coaching(
                 fallback,
                 analysis=analysis,
@@ -330,6 +352,7 @@ class AIAnalyzer:
         original_text: str,
         analysis: dict[str, Any],
         learner_level: str,
+        attempt_index: int,
     ) -> str:
         visual_reference = {
             "title": analysis.get("title") or "",
@@ -350,6 +373,20 @@ class AIAnalyzer:
             ],
             "sentence_patterns": analysis.get("sentence_patterns", [])[:2],
         }
+        initial_attempt_rules = ""
+        if attempt_index <= 1:
+            initial_attempt_rules = (
+                "FIRST ATTEMPT FEEDBACK MODE:\n"
+                "- This is the learner's first image description. Do not generate a full perfect image explanation.\n"
+                "- Acknowledge only the visual areas the learner already covered.\n"
+                "- improvedVersion must enhance ONLY what the learner covered. Do not add major missing details yet.\n"
+                "- Example: if the learner says 'There is a road and buildings', improve only that idea, such as 'The image shows a quiet urban road lined with tall buildings.'\n"
+                "- Bad: adding trees, vehicles, sky, atmosphere, people, or other major details when the learner did not mention them.\n"
+                "- Fill initialAttemptFeedback with acknowledgement, coveredEnhancement, reusableLanguageFromEnhancement, and missingVisualAreas.\n"
+                "- missingVisualAreas should name meaningful areas to cover next, but coveredEnhancement must not include them.\n"
+                "- This feedback prepares guided coverage layers; full polish/articulation is locked until coverage is reasonably complete.\n"
+            )
+
         return (
             "You are an English writing coach for image description practice.\n"
             f"Learner level: {level_label(canonical_level(learner_level))}.\n"
@@ -378,8 +415,10 @@ class AIAnalyzer:
             '"reusableLanguage": {"usedWell": [""], "tryNext": [""], "misused": [{"phrase": "", "note": ""}], "message": ""}, '
             '"missingDetails": ["", "", ""], '
             '"inlineImprovements": [{"old": "", "new": "", "why": ""}], '
+            '"initialAttemptFeedback": {"acknowledgement": "", "coveredEnhancement": "", "reusableLanguageFromEnhancement": {"nouns": [""], "verbs": [""], "phrases": [""], "collocations": [""], "sentenceStructures": [""], "positioningLanguage": [""], "atmosphereLanguage": [""]}, "missingVisualAreas": [""]}, '
             '"improvedVersion": "" }\n'
             "Rules:\n"
+            f"{initial_attempt_rules}"
             "- First set answerValidation.valid to false if the answer is not understandable English, not coherent, keyword stuffing, fragments, unfinished, not relevant to the image, does not mention at least one visible element, is too short, random, or nonsense.\n"
             "- If answerValidation.valid is false because of random words or keyword stuffing: score must be 0-15, improvedVersion must be empty, inlineImprovements must be empty, whatWentWell must be empty, and fixes must tell the learner to start with 'This image shows...', use one clear sentence, connect objects with verbs, and avoid listing random words.\n"
             "- If answerValidation.valid is false because of broken fragments with some image-related words: score must be 15-25, improvedVersion must be empty, inlineImprovements must be empty, and mainIssue must say the answer includes relevant words but is not yet a clear sentence.\n"
@@ -440,8 +479,8 @@ class AIAnalyzer:
             "- Preserve the learner's original idea and wording where possible; make it more natural, articulate, and complete.\n"
             "- Do not replace the learner's answer with a totally different model answer.\n"
             "- The improved version must be achievable for this learner and must stay close to the learner's meaning.\n"
-            "- The improved version must fix the learner's coverage problem: if the learner missed the main subject, include it; if the learner missed the setting/background, include it; remove or correct inaccurate details.\n"
-            "- The improved version must include missing major parts, especially subject and action when missing, stay close to the learner level, and include 1-3 reusable phrases naturally when they fit.\n"
+            "- For non-first attempts, the improved version must fix the learner's coverage problem: if the learner missed the main subject, include it; if the learner missed the setting/background, include it; remove or correct inaccurate details.\n"
+            "- For non-first attempts, the improved version must include missing major parts, especially subject and action when missing, stay close to the learner level, and include 1-3 reusable phrases naturally when they fit.\n"
             "- Mention important missing major parts, such as main subject, setting, mood, background, positions, or relationships.\n"
             "- If a detail is not supported by the visual context, mark it as an accuracy issue gently.\n"
             "- For repeated improvements, focus on remaining issues and what improved instead of repeating all feedback.\n"
@@ -453,7 +492,7 @@ class AIAnalyzer:
             "- If the learner used no reusable phrases, acknowledge clarity if applicable, then suggest 1-2 phrases that would fit naturally.\n"
             "- If the learner partially used a phrase, name the partial attempt and show the full stronger phrase.\n"
             "- If the learner misused a phrase, explain the issue and give a correct short example.\n"
-            "- The improved version should include 1-3 reusable phrases only when they fit the learner's idea naturally.\n"
+            "- For first attempts, the improved version should include reusable phrases only from the covered-only enhancement. For later attempts, it may include 1-3 reusable phrases when they fit the learner's idea naturally.\n"
             "- Keep reusable language scoring small. It is only 10% of languageQuality and must never dominate the score.\n"
             "- Prefer language from the lesson when it fits.\n"
             "- Do not invent image details not supported by the lesson.\n"
@@ -641,6 +680,206 @@ class AIAnalyzer:
             )
         self._dedupe_feedback_sections(normalized)
         return normalized
+
+    def _attach_initial_attempt_feedback(
+        self,
+        feedback: dict[str, Any],
+        *,
+        payload: dict[str, Any],
+        learner_text: str,
+        analysis: dict[str, Any],
+    ) -> None:
+        payload = payload if isinstance(payload, dict) else {}
+        initial_payload = (
+            payload.get("initialAttemptFeedback")
+            if isinstance(payload.get("initialAttemptFeedback"), dict)
+            else {}
+        )
+        covered_areas = self._covered_area_labels(feedback)
+        missing_areas = self._missing_area_labels(feedback)
+        acknowledgement = self._clean_text_value(initial_payload.get("acknowledgement"))
+        if not acknowledgement:
+            acknowledgement = self._initial_acknowledgement(covered_areas, learner_text)
+
+        covered_enhancement = self._clean_text_value(initial_payload.get("coveredEnhancement"))
+        if not covered_enhancement:
+            covered_enhancement = self._covered_only_enhancement(
+                learner_text=learner_text,
+                covered_areas=covered_areas,
+            )
+        if self._enhancement_mentions_missing_area(covered_enhancement, missing_areas):
+            covered_enhancement = self._covered_only_enhancement(
+                learner_text=learner_text,
+                covered_areas=covered_areas,
+            )
+
+        reusable_payload = (
+            initial_payload.get("reusableLanguageFromEnhancement")
+            if isinstance(initial_payload.get("reusableLanguageFromEnhancement"), dict)
+            else {}
+        )
+        reusable_language = self._normalize_initial_reusable_language(
+            reusable_payload,
+            enhancement=covered_enhancement,
+            analysis=analysis,
+            covered_areas=covered_areas,
+        )
+        initial_feedback = {
+            "acknowledgement": acknowledgement,
+            "covered_enhancement": covered_enhancement,
+            "reusable_language": reusable_language,
+            "missing_visual_areas": missing_areas[:5],
+            "prepares_coverage_layers": True,
+        }
+        feedback["initial_attempt_feedback"] = initial_feedback
+        feedback["better_version"] = covered_enhancement
+        feedback["main_issue"] = (
+            f"Next, add another visual area: {missing_areas[0]}."
+            if missing_areas
+            else "You covered the main visual areas; next you can make the wording more natural."
+        )
+        feedback["missing_details"] = missing_areas[:3]
+        feedback["next_step_instructions"] = (
+            [f"Add {missing_areas[0]} in the next layer."]
+            if missing_areas
+            else ["Move to a polish pass for clearer, more natural wording."]
+        )
+
+    def _covered_area_labels(self, feedback: dict[str, Any]) -> list[str]:
+        coverage = feedback.get("coverage") if isinstance(feedback.get("coverage"), dict) else {}
+        labels: list[str] = []
+        for part in coverage.get("imageParts", []):
+            if not isinstance(part, dict):
+                continue
+            status = str(part.get("coverageStatus") or "").casefold()
+            if not (part.get("covered") is True or status in {"covered", "partially_covered"}):
+                continue
+            label = self._clean_text_value(part.get("name") or part.get("description") or part.get("type"))
+            if label:
+                labels.append(label.replace("_", " "))
+        return self._clean_string_list(labels, limit=6)
+
+    def _missing_area_labels(self, feedback: dict[str, Any]) -> list[str]:
+        coverage = feedback.get("coverage") if isinstance(feedback.get("coverage"), dict) else {}
+        labels: list[str] = []
+        for part in coverage.get("imageParts", []):
+            if not isinstance(part, dict):
+                continue
+            status = str(part.get("coverageStatus") or "").casefold()
+            missing = part.get("covered") is False or status in {"missing", "inaccurate"}
+            if not missing:
+                continue
+            label = self._clean_text_value(part.get("name") or part.get("description") or part.get("type"))
+            if label:
+                labels.append(label.replace("_", " "))
+        labels.extend(self._clean_string_list(coverage.get("missingMajorParts") or feedback.get("missing_details"), limit=6))
+        return self._clean_string_list(labels, limit=6)
+
+    def _initial_acknowledgement(self, covered_areas: list[str], learner_text: str) -> str:
+        if covered_areas:
+            return f"Nice start — you described {self._join_short_list(covered_areas[:3])}."
+        trimmed = self._short_text(learner_text, limit=80)
+        return f"Nice start — you began with your own observation{f': {trimmed}' if trimmed else '.'}"
+
+    def _covered_only_enhancement(self, *, learner_text: str, covered_areas: list[str]) -> str:
+        base = self._clean_text_value(learner_text).rstrip(".!?")
+        if covered_areas:
+            subject = self._join_short_list(covered_areas[:3])
+            if any(word in normalize_answer(subject) for word in ("road", "street")):
+                return f"The image shows {subject} in a clearer, more natural way."
+            return f"The image shows {subject} clearly."
+        if base:
+            return f"The image shows {base}."
+        return "The image shows the visual details you noticed."
+
+    def _enhancement_mentions_missing_area(self, enhancement: str, missing_areas: list[str]) -> bool:
+        key = normalize_answer(enhancement)
+        for area in missing_areas:
+            area_key = normalize_answer(area)
+            if area_key and len(area_key) >= 4 and area_key in key:
+                return True
+        return False
+
+    def _normalize_initial_reusable_language(
+        self,
+        payload: dict[str, Any],
+        *,
+        enhancement: str,
+        analysis: dict[str, Any],
+        covered_areas: list[str],
+    ) -> dict[str, list[str]]:
+        text = normalize_answer(enhancement)
+        phrase_candidates = [
+            str(item.get("phrase") or "").strip()
+            for item in analysis.get("phrases", [])
+            if isinstance(item, dict) and str(item.get("phrase") or "").strip()
+        ]
+        structure_candidates = [
+            str(item.get("pattern") or "").strip()
+            for item in analysis.get("sentence_patterns", [])
+            if isinstance(item, dict) and str(item.get("pattern") or "").strip()
+        ]
+        reusable = {
+            "nouns": self._clean_string_list(payload.get("nouns"), limit=5) or self._nounish_terms_from_text(enhancement, covered_areas),
+            "verbs": self._clean_string_list(payload.get("verbs"), limit=4) or self._verbish_terms_from_text(enhancement),
+            "phrases": self._clean_string_list(payload.get("phrases"), limit=5) or self._matching_terms(text, phrase_candidates, limit=3),
+            "collocations": self._clean_string_list(payload.get("collocations"), limit=5) or self._collocations_from_enhancement(enhancement),
+            "sentence_structures": self._clean_string_list(payload.get("sentenceStructures") or payload.get("sentence_structures"), limit=3) or self._matching_terms(text, structure_candidates, limit=2) or ["The image shows ..."],
+            "positioning_language": self._clean_string_list(payload.get("positioningLanguage") or payload.get("positioning_language"), limit=4) or self._positioning_language_from_text(enhancement),
+            "atmosphere_language": self._clean_string_list(payload.get("atmosphereLanguage") or payload.get("atmosphere_language"), limit=4) or self._atmosphere_language_from_text(enhancement),
+        }
+        return reusable
+
+    def _nounish_terms_from_text(self, text: str, covered_areas: list[str]) -> list[str]:
+        candidates = [*covered_areas]
+        candidates.extend(re.findall(r"\b[a-zA-Z][a-zA-Z-]{3,}\b", text))
+        blocked = {"image", "shows", "clearer", "natural", "quiet", "lined"}
+        return self._clean_string_list(
+            [item for item in candidates if normalize_answer(item) not in blocked],
+            limit=5,
+        )
+
+    def _verbish_terms_from_text(self, text: str) -> list[str]:
+        verbs = re.findall(r"\b(?:shows|has|includes|stands|sits|runs|lines|appears|looks|describes|covered|lined)\b", text, flags=re.I)
+        return self._clean_string_list(verbs, limit=4)
+
+    def _collocations_from_enhancement(self, text: str) -> list[str]:
+        patterns = [
+            r"\bquiet urban road\b",
+            r"\btall buildings\b",
+            r"\blined with [a-z\s-]+\b",
+            r"\bin the background\b",
+            r"\bin the foreground\b",
+            r"\b[a-z]+ road\b",
+        ]
+        found: list[str] = []
+        for pattern in patterns:
+            found.extend(match.group(0) for match in re.finditer(pattern, text, flags=re.I))
+        return self._clean_string_list(found, limit=5)
+
+    def _positioning_language_from_text(self, text: str) -> list[str]:
+        terms = re.findall(r"\b(?:in the background|in the foreground|beside|near|behind|lined with|along|under|over|around)\b", text, flags=re.I)
+        return self._clean_string_list(terms, limit=4)
+
+    def _atmosphere_language_from_text(self, text: str) -> list[str]:
+        terms = re.findall(r"\b(?:quiet|busy|calm|crowded|shaded|sunny|bright|peaceful|urban|natural)\b", text, flags=re.I)
+        return self._clean_string_list(terms, limit=4)
+
+    def _matching_terms(self, text_key: str, candidates: list[str], *, limit: int) -> list[str]:
+        return self._clean_string_list(
+            [item for item in candidates if normalize_answer(item) in text_key],
+            limit=limit,
+        )
+
+    def _join_short_list(self, items: list[str]) -> str:
+        clean = self._clean_string_list(items, limit=4)
+        if not clean:
+            return ""
+        if len(clean) == 1:
+            return clean[0]
+        if len(clean) == 2:
+            return f"{clean[0]} and {clean[1]}"
+        return f"{', '.join(clean[:-1])}, and {clean[-1]}"
 
     def _normalize_feedback_readiness(
         self,

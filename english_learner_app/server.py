@@ -40,6 +40,16 @@ from .utils import (
     utc_now,
 )
 
+LEARNING_STAGES = {
+    "initial_attempt",
+    "coverage_feedback",
+    "coverage_layers",
+    "coverage_complete",
+    "polish_stage",
+    "final_reveal",
+    "quiz_ready",
+}
+
 
 def build_app(config: AppConfig | None = None) -> web.Application:
     config = config or AppConfig.from_env()
@@ -299,6 +309,7 @@ def serialize_session_detail(
         "difficulty_label": level_label(row["difficulty_band"]),
         "source_mode": row["source_mode"],
         "created_at": row["created_at"],
+        "learning_stage": "initial_attempt",
         "mastery_percent": float(row.get("mastery_percent") or 0.0),
         "image_url": f"/api/sessions/{row['id']}/image",
         "analysis": {
@@ -331,6 +342,149 @@ def serialize_session_detail(
             for item in quiz_preview
         ],
     }
+
+
+def learning_stage_from_feedback(feedback: dict[str, Any], *, attempt_index: int) -> str:
+    if attempt_index <= 1:
+        return "coverage_feedback"
+    coverage = feedback.get("coverage") if isinstance(feedback.get("coverage"), dict) else {}
+    readiness = feedback.get("readiness") if isinstance(feedback.get("readiness"), dict) else {}
+    coverage_percent = _safe_int(
+        coverage.get("coveragePercent")
+        or coverage.get("coverageScore")
+        or feedback.get("coverage_score")
+    )
+    required_parts = [
+        part
+        for part in coverage.get("imageParts", [])
+        if isinstance(part, dict) and part.get("required", True)
+    ]
+    covered_parts = [
+        part
+        for part in required_parts
+        if _coverage_part_is_covered(part)
+    ]
+    missing_parts = [
+        part
+        for part in required_parts
+        if not _coverage_part_is_covered(part)
+    ]
+    ready = bool(readiness.get("ready"))
+    criteria = readiness.get("criteria") if isinstance(readiness.get("criteria"), dict) else {}
+    has_main_focus = bool(criteria.get("mainSubject", coverage.get("mainSubjectMentioned") is not False))
+    has_action = bool(criteria.get("mainAction", coverage.get("mainActionMentioned") is not False))
+    has_setting = bool(criteria.get("settingBackground")) or _covered_part_matches(
+        covered_parts, ("setting", "background", "environment", "context")
+    )
+    detail_count = sum(
+        1
+        for part in covered_parts
+        if _part_matches(
+            part,
+            (
+                "important",
+                "object",
+                "foreground",
+                "detail",
+                "setting",
+                "background",
+                "environment",
+                "vehicle",
+                "building",
+                "tree",
+                "lighting",
+                "shadow",
+                "condition",
+                "atmosphere",
+                "composition",
+                "position",
+            ),
+        )
+    )
+    natural_english = bool(criteria.get("naturalEnglish", coverage_percent >= 70))
+    not_word_list = bool(criteria.get("notAWordList", True))
+    enough_coverage = (
+        has_main_focus
+        and has_action
+        and has_setting
+        and detail_count >= 1
+        and (ready or natural_english)
+        and not_word_list
+        and coverage_percent >= 68
+        and not _high_priority_missing_parts(missing_parts)
+    )
+    return "coverage_complete" if enough_coverage else "coverage_layers"
+
+
+def _coverage_part_is_covered(part: dict[str, Any]) -> bool:
+    status = str(part.get("coverageStatus") or "").casefold()
+    return bool(part.get("covered")) or status in {"covered", "partially_covered"}
+
+
+def _part_matches(part: dict[str, Any], terms: tuple[str, ...]) -> bool:
+    text = " ".join(
+        str(part.get(key) or "")
+        for key in ("type", "name", "description")
+    ).casefold()
+    return any(term in text for term in terms)
+
+
+def _covered_part_matches(parts: list[dict[str, Any]], terms: tuple[str, ...]) -> bool:
+    return any(_part_matches(part, terms) for part in parts)
+
+
+def _high_priority_missing_parts(parts: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [
+        part
+        for part in parts
+        if _part_matches(
+            part,
+            (
+                "main_subject",
+                "main subject",
+                "main_action",
+                "main action",
+                "setting",
+                "background",
+                "environment",
+                "important",
+                "object",
+                "foreground",
+                "detail",
+            ),
+        )
+    ]
+
+
+def _safe_int(value: Any) -> int:
+    try:
+        return int(float(value or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _coverage_area_labels(feedback: dict[str, Any], *, covered: bool) -> list[str]:
+    coverage = feedback.get("coverage") if isinstance(feedback.get("coverage"), dict) else {}
+    labels: list[str] = []
+    for part in coverage.get("imageParts", []):
+        if not isinstance(part, dict) or _coverage_part_is_covered(part) is not covered:
+            continue
+        label = str(part.get("name") or part.get("type") or part.get("description") or "").strip()
+        if label:
+            labels.append(label.replace("_", " "))
+    if not covered:
+        for item in coverage.get("missingMajorParts", []) or feedback.get("missing_details", []):
+            label = str(item or "").strip()
+            if label:
+                labels.append(label)
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for label in labels:
+        key = normalize_answer(label)
+        if key and key not in seen:
+            seen.add(key)
+            deduped.append(label)
+    return deduped[:6]
 
 
 def serialize_quiz_question(item: dict[str, Any], *, total_questions: int) -> dict[str, Any]:
@@ -1355,9 +1509,26 @@ async def session_feedback(request: web.Request) -> web.Response:
         reward_meta["phrase_bonus"] = phrase_bonus
         stats = db.get_stats(user_id=user["id"], now_iso=to_iso(now))
 
+    learning_stage = learning_stage_from_feedback(feedback, attempt_index=attempt_index)
+    feedback["learning_stage"] = learning_stage
+    covered_areas = _coverage_area_labels(feedback, covered=True)
+    missing_areas = _coverage_area_labels(feedback, covered=False)
+    feedback["learning_flow"] = {
+        "stage": learning_stage,
+        "coverage_complete": learning_stage == "coverage_complete",
+        "coverage_before_articulation": True,
+        "coverage_focus": "visual_parts",
+        "articulation_focus": "natural_polish",
+        "covered_visual_areas": covered_areas,
+        "missing_visual_areas": missing_areas,
+        "reusable_language": feedback.get("phrase_usage") or feedback.get("reusableLanguage") or {},
+        "articulation_locked": learning_stage != "coverage_complete",
+    }
+
     return web.json_response(
         {
             "feedback": feedback,
+            "learning_stage": learning_stage,
             "progress": progress,
             "stats": stats,
             "reward": reward_meta,

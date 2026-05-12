@@ -2011,6 +2011,37 @@ textarea {
   }
 }
 
+@keyframes focus-card-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px) scale(0.995);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+@keyframes popover-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes final-reveal-in {
+  from {
+    opacity: 0;
+    transform: translateY(12px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
 @keyframes score-sheen {
   to {
     transform: translateX(120%);
@@ -2571,6 +2602,7 @@ body {
 
 .focused-writing-card {
   position: relative;
+  animation: focus-card-in 260ms var(--ease-out) both;
 }
 
 .focused-writing-card::before {
@@ -3077,6 +3109,7 @@ body {
 .improve-focus-card {
   border-color: rgba(255, 108, 67, 0.22);
   background: rgba(255, 108, 67, 0.08);
+  animation: focus-card-in 240ms var(--ease-out) both;
 }
 
 .improve-focus-card h4,
@@ -3206,11 +3239,11 @@ body {
   box-shadow: 0 0 0 0.22rem rgba(255, 108, 67, 0.14);
 }
 
-.articulation-next-preview {
+.articulation-current-focus {
   margin: -0.25rem 0 0;
-  color: var(--muted);
-  font-size: 0.86rem;
-  font-weight: 750;
+  color: var(--teal);
+  font-size: 0.92rem;
+  font-weight: 900;
 }
 
 .articulation-layer-row {
@@ -3358,6 +3391,7 @@ body {
 
 .inline-upgrade-target.active .inline-upgrade-popover {
   display: flex;
+  animation: popover-in 130ms var(--ease-out) both;
 }
 
 .inline-upgrade-target.show-below .inline-upgrade-popover {
@@ -3469,6 +3503,30 @@ body {
   background: rgba(255, 108, 67, 0.08);
 }
 
+.final-reveal-card {
+  gap: 1rem;
+  border-color: rgba(20, 111, 102, 0.24);
+  background: linear-gradient(180deg, rgba(20, 111, 102, 0.1), rgba(255, 108, 67, 0.07));
+  animation: final-reveal-in 320ms var(--ease-out) both;
+}
+
+.final-progress-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.final-progress-row span {
+  padding: 0.42rem 0.62rem;
+  border: 1px solid rgba(20, 111, 102, 0.2);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.78);
+  color: var(--teal);
+  font-size: 0.82rem;
+  font-weight: 900;
+  animation: reward-pop 220ms var(--ease-out) both;
+}
+
 .answer-comparison-grid {
   display: grid;
   gap: 0.75rem;
@@ -3478,6 +3536,30 @@ body {
   color: var(--ink);
   font-weight: 750;
   line-height: 1.65;
+}
+
+.final-language-box,
+.final-reward-box {
+  display: grid;
+  gap: 0.55rem;
+  padding: 0.9rem;
+  border: 1px solid rgba(18, 32, 49, 0.08);
+  border-radius: 0.9rem;
+  background: rgba(255, 255, 255, 0.74);
+}
+
+.final-reward-box {
+  grid-template-columns: 1fr auto;
+  align-items: center;
+}
+
+.final-reward-box strong {
+  display: block;
+  margin-top: 0.12rem;
+  color: var(--accent-deep);
+  font-size: 1.45rem;
+  line-height: 1;
+  animation: reward-pop 260ms var(--ease-out) both;
 }
 
 .inline-upgrade-section {

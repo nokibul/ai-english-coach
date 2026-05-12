@@ -28,6 +28,7 @@ from english_learner_app.server import (
     apply_progress_event,
     build_highlight_terms,
     build_quiz_xp_breakdown,
+    learning_stage_from_feedback,
 )
 from english_learner_app.utils import from_iso, highlight_phrases
 
@@ -54,6 +55,70 @@ class AssessmentTests(unittest.TestCase):
             }
         )
         self.assertEqual(result["difficulty_band"], "advancing")
+
+
+class LearningStageTests(unittest.TestCase):
+    def test_first_feedback_uses_coverage_feedback_stage(self) -> None:
+        feedback = {
+            "coverage": {
+                "coveragePercent": 90,
+                "imageParts": [
+                    {"type": "main_subject", "covered": True, "required": True},
+                ],
+            }
+        }
+        self.assertEqual(
+            learning_stage_from_feedback(feedback, attempt_index=1),
+            "coverage_feedback",
+        )
+
+    def test_later_feedback_stays_in_layers_until_coverage_is_ready(self) -> None:
+        feedback = {
+            "coverage": {
+                "coveragePercent": 45,
+                "imageParts": [
+                    {"type": "main_subject", "covered": True, "required": True},
+                    {"type": "background", "covered": False, "required": True},
+                ],
+            }
+        }
+        self.assertEqual(
+            learning_stage_from_feedback(feedback, attempt_index=2),
+            "coverage_layers",
+        )
+
+    def test_later_feedback_unlocks_coverage_complete_when_ready(self) -> None:
+        feedback = {
+            "readiness": {"ready": True},
+            "coverage": {
+                "coveragePercent": 82,
+                "imageParts": [
+                    {"type": "main_subject", "covered": True, "required": True},
+                    {"type": "background", "coverageStatus": "partially_covered", "required": True},
+                ],
+            },
+        }
+        self.assertEqual(
+            learning_stage_from_feedback(feedback, attempt_index=3),
+            "coverage_complete",
+        )
+
+    def test_ready_flag_does_not_skip_missing_major_visual_area(self) -> None:
+        feedback = {
+            "readiness": {"ready": True},
+            "coverage": {
+                "coveragePercent": 88,
+                "imageParts": [
+                    {"type": "main_subject", "covered": True, "required": True},
+                    {"type": "setting", "covered": True, "required": True},
+                    {"type": "important_object", "covered": False, "required": True},
+                ],
+            },
+        }
+        self.assertEqual(
+            learning_stage_from_feedback(feedback, attempt_index=3),
+            "coverage_layers",
+        )
 
 
 class ConfigTests(unittest.TestCase):
@@ -286,10 +351,9 @@ const subjectOnly = feedback(
   { mainSubject: true, mainAction: false, settingBackground: false },
   [{ type: "main_subject", covered: true, coverageStatus: "covered" }]
 );
-let state = context.buildArticulationState(subjectOnly, session, "Two people.");
-assert(state.layers[0].completed, "subject layer should be completed");
-assert(state.currentLayer.key === "action", "action should be the next layer");
-assert(context.buildLayerCurrentFocus(state.currentLayer, session, { level: 1 }) === "Explain what is happening", "action layer should use layer wording");
+let state = context.buildCoverageLayerState(subjectOnly, session, "Two people.");
+assert(state.currentLayer.label.toLowerCase().includes("action"), "action should be the next coverage focus");
+assert(/action|happening|walking/.test(context.buildLayerCurrentFocus(state.currentLayer, session, { level: 1 }).toLowerCase()), "action layer should use action wording");
 
 const throughEnvironment = feedback(
   { mainSubject: true, mainAction: true, settingBackground: true },
@@ -299,9 +363,9 @@ const throughEnvironment = feedback(
     { type: "setting", covered: true, coverageStatus: "covered" },
   ]
 );
-state = context.buildArticulationState(throughEnvironment, session, "Two people are walking along the path in a sunny park.");
-assert(state.layers.slice(0, 3).every((layer) => layer.completed), "first three layers should be complete");
-assert(state.currentLayer.key === "details", "details should be next after environment");
+state = context.buildCoverageLayerState(throughEnvironment, session, "Two people are walking along the path in a sunny park.");
+assert(state.currentLayer, "coverage should continue until meaningful details are added");
+assert(/detail|object|visual/i.test(state.currentLayer.label), "details should be next after environment");
 const detailIssue = context.buildLayerFeedbackIssue(state.currentLayer, throughEnvironment, session);
 const detailHints = context.buildImproveHintGroups(session, throughEnvironment, detailIssue, "Two people are walking along the path.", { level: 1 })
   .flatMap((group) => group.items)
@@ -321,13 +385,14 @@ const complete = feedback(
   ],
   ["calm", "well-kept"]
 );
-state = context.buildArticulationState(
+complete.coverage.coveragePercent = 90;
+state = context.buildCoverageLayerState(
   complete,
   session,
   "Two people are walking along the paved path in a sunny park with palm trees. The area looks calm and well-kept."
 );
-assert(state.complete, "all articulation layers should be complete");
-assert(state.layers.every((layer) => layer.completed), "completed state should mark every layer");
+assert(state.complete, "coverage should be complete before articulation polish");
+assert(state.layers.length === 0, "completed coverage should not show more visual layers");
 """
         result = subprocess.run(
             ["node", "-e", script],
@@ -364,6 +429,7 @@ const session = {
 };
 const feedback = {
   coverage: {
+    coveragePercent: 90,
     imageParts: [
       { type: "main_subject", covered: true, coverageStatus: "covered" },
       { type: "main_action", covered: true, coverageStatus: "covered" },
@@ -380,10 +446,12 @@ function assert(condition, message) {
   if (!condition) throw new Error(message);
 }
 const answer = "The image shows grass and trees in a nice place.";
-const articulation = context.buildArticulationState(feedback, session, answer);
-assert(articulation.complete, "coverage layers should be complete before upgrade suggestions");
+const coverage = context.buildCoverageLayerState(feedback, session, answer);
+assert(coverage.complete, "coverage layers should be complete before upgrade suggestions");
 const suggestions = context.buildArticulationUpgradeSuggestions(session, feedback, answer);
-assert(suggestions.length > 0 && suggestions.length <= 3, "upgrade stage should show 1-3 suggestions");
+assert(suggestions.length > 0 && suggestions.length <= 5, "upgrade stage should show a short list of suggestions");
+assert(suggestions.every((item) => ["vocabulary", "verb", "positioning", "atmosphere", "sentence_flow", "visual_quality"].includes(item.type)), "polish upgrades should use the final upgrade type set");
+assert(suggestions.every((item) => answer.toLowerCase().includes(item.oldText.toLowerCase())), "upgrades should target words already in the learner answer");
 assert(suggestions.some((item) => item.oldText === "grass" && item.newText === "grassy lawn"), "should suggest a vocabulary upgrade tied to the sentence");
 assert(suggestions.some((item) => item.oldText === "trees" && item.newText === "tall palm trees"), "should suggest reusable image language");
 let upgradeState = context.normalizeArticulationUpgradeState(null, answer, suggestions);
@@ -392,6 +460,459 @@ const upgraded = context.replaceFirstTextOccurrence(upgradeState.answer, grassUp
 assert(upgraded.includes("grassy lawn"), "applying should update only the targeted phrase");
 assert(!upgraded.includes("grass and"), "old phrase should be replaced");
 assert(context.xpForUpgradeType(grassUpgrade.type) === 5, "vocabulary upgrades should award 5 XP");
+"""
+        result = subprocess.run(
+            ["node", "-e", script],
+            cwd=Path(__file__).resolve().parents[1],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    @unittest.skipIf(shutil.which("node") is None, "node is required for static polish stage tests")
+    def test_polish_stage_generates_controlled_full_answer_upgrades(self) -> None:
+        script = r"""
+const fs = require("fs");
+const vm = require("vm");
+const code = fs.readFileSync("english_learner_app/static/app.js", "utf8");
+const context = {
+  document: { addEventListener() {}, getElementById() { return null; }, querySelectorAll() { return []; } },
+  window: { setTimeout() {}, clearTimeout() {} },
+  console,
+};
+vm.createContext(context);
+vm.runInContext(code, context);
+
+function assert(condition, message) {
+  if (!condition) throw new Error(message);
+}
+
+const session = {
+  analysis: {
+    objects: [{ name: "two people" }, { name: "tall buildings" }, { name: "green trees" }],
+    actions: [{ verb: "walking", phrase: "walking along the road" }],
+    environment: "quiet urban street",
+    environment_details: ["green trees along the road", "tall buildings in the background"],
+    vocabulary: [{ word: "quiet" }, { word: "shaded" }],
+    phrases: [{ phrase: "along the road" }, { phrase: "in the background" }],
+  },
+};
+const feedback = {
+  coverage: {
+    coveragePercent: 90,
+    imageParts: [
+      { type: "main_subject", covered: true, coverageStatus: "covered" },
+      { type: "main_action", covered: true, coverageStatus: "covered" },
+      { type: "setting", covered: true, coverageStatus: "covered" },
+      { type: "important_object", covered: true, coverageStatus: "covered" },
+      { type: "foreground_detail", covered: true, coverageStatus: "covered" },
+    ],
+  },
+  readiness: { criteria: { mainSubject: true, mainAction: true, settingBackground: true, naturalEnglish: true, notAWordList: true } },
+  specific_guidance: { nouns: ["two people", "tall buildings", "green trees"], verbs: ["walking"], details: ["in the background"], words: ["quiet", "shaded"] },
+};
+const answer = "There are people on a road. The place is nice and there are trees and buildings in the background.";
+const coverage = context.buildCoverageLayerState(feedback, session, answer);
+assert(coverage.complete, "polish should only run after coverage is complete");
+const suggestions = context.buildArticulationUpgradeSuggestions(session, feedback, answer);
+assert(suggestions.length >= 3 && suggestions.length <= 5, "full polish stage should generate 3-5 upgrades for a weak covered answer");
+assert(new Set(suggestions.map((item) => item.type)).size >= 3, "polish should cover multiple articulation dimensions");
+assert(suggestions.some((item) => item.type === "vocabulary"), "should include weak/simple noun upgrades");
+assert(suggestions.some((item) => item.type === "atmosphere"), "should include atmosphere language when the answer is flat");
+assert(suggestions.some((item) => item.type === "sentence_flow" || item.type === "positioning"), "should include flow or positioning opportunities");
+assert(!suggestions.some((item) => /^(composition|impression|flow)$/.test(item.type)), "old upgrade categories should be normalized");
+assert(suggestions.every((item) => answer.toLowerCase().includes(item.oldText.toLowerCase())), "the learner should stay in control through inline replacements");
+"""
+        result = subprocess.run(
+            ["node", "-e", script],
+            cwd=Path(__file__).resolve().parents[1],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    @unittest.skipIf(shutil.which("node") is None, "node is required for inline upgrade UI tests")
+    def test_inline_upgrade_markup_highlights_spans_and_keeps_popovers_closed(self) -> None:
+        script = r"""
+const fs = require("fs");
+const vm = require("vm");
+const code = fs.readFileSync("english_learner_app/static/app.js", "utf8");
+const context = {
+  document: { addEventListener() {}, getElementById() { return null; }, querySelectorAll() { return []; } },
+  window: { setTimeout() {}, clearTimeout() {} },
+  console,
+};
+vm.createContext(context);
+vm.runInContext(code, context);
+
+function assert(condition, message) {
+  if (!condition) throw new Error(message);
+}
+
+const answer = "The image shows trees and it looks nice.";
+const suggestions = [
+  { id: "vocabulary-0-trees", oldText: "trees", newText: "leafy branches", type: "vocabulary", xp: 5 },
+  { id: "atmosphere-1-looks-nice", oldText: "looks nice", newText: "creates a calm atmosphere", type: "atmosphere", xp: 10 },
+];
+const annotated = context.buildInlineUpgradeMarkup(answer, suggestions);
+assert(annotated.count === 2, "two exact text spans should be highlighted");
+assert(annotated.markup.includes("inline-upgrade-target"), "original phrases should be wrapped as clickable targets");
+assert(annotated.markup.includes("inline-upgrade-original\">trees"), "the original phrase should remain visible");
+assert(annotated.markup.includes("leafy branches"), "popover should contain the upgraded phrase");
+assert(annotated.markup.includes("inline-upgrade-dismiss"), "popover should include an X dismiss button");
+assert(annotated.markup.includes('aria-expanded="false"'), "popovers should start closed");
+assert(annotated.markup.includes('tabindex="0"'), "targets should be keyboard reachable");
+assert(context.replaceFirstTextOccurrence(answer, "trees", "leafy branches").includes("leafy branches"), "clicking an upgrade should replace only the target span");
+assert(context.polishRewardLabel("vocabulary") === "stronger wording", "reward feedback should use friendly wording");
+"""
+        result = subprocess.run(
+            ["node", "-e", script],
+            cwd=Path(__file__).resolve().parents[1],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    @unittest.skipIf(shutil.which("node") is None, "node is required for final reveal UI tests")
+    def test_final_polished_reveal_shows_growth_language_reward_and_quiz_cta(self) -> None:
+        script = r"""
+const fs = require("fs");
+const vm = require("vm");
+const code = fs.readFileSync("english_learner_app/static/app.js", "utf8");
+const context = {
+  document: { addEventListener() {}, getElementById() { return null; }, querySelectorAll() { return []; } },
+  window: { setTimeout() {}, clearTimeout() {} },
+  console,
+};
+vm.createContext(context);
+vm.runInContext(code, context);
+vm.runInContext('state.sessionFlow = { attempts: [{ text: "There is road and trees." }] };', context);
+
+function assert(condition, message) {
+  if (!condition) throw new Error(message);
+}
+
+const suggestions = [
+  { id: "vocabulary-0-trees", oldText: "trees", newText: "leafy branches", type: "vocabulary", xp: 5 },
+  { id: "atmosphere-1-nice", oldText: "nice", newText: "calm atmosphere", type: "atmosphere", xp: 10 },
+];
+const upgradeState = {
+  original: "The image shows a road, trees, and buildings.",
+  answer: "The image shows a road, leafy branches, and buildings with a calm atmosphere.",
+  applied: ["vocabulary-0-trees", "atmosphere-1-nice"],
+  skipped: [],
+  xp: 15,
+  finalized: true,
+};
+const feedback = { phrase_usage: { suggested: ["in the background"] } };
+const session = { analysis: { phrases: [{ phrase: "along the road" }] } };
+const html = context.renderFinalPolishedReveal(upgradeState, suggestions, feedback, session);
+
+assert(html.includes("Look how far your description improved."), "reveal should feel rewarding");
+assert(html.includes("Original first attempt"), "should label the original first attempt");
+assert(html.includes("There is road and trees."), "should show the actual first attempt");
+assert(html.includes("Final evolved version"), "should label the evolved answer");
+assert(html.includes("leafy branches"), "should show the final upgraded wording");
+assert(html.includes("Reusable language learned"), "should show reusable language learned");
+assert(html.includes("3 reusable phrases learned"), "progress should count learned reusable language");
+assert(html.includes("+15 XP"), "should show polish XP reward");
+assert(html.includes("Continue to Quiz"), "should include quiz CTA");
+"""
+        result = subprocess.run(
+            ["node", "-e", script],
+            cwd=Path(__file__).resolve().parents[1],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    @unittest.skipIf(shutil.which("node") is None, "node is required for flow UX tests")
+    def test_learning_flow_ui_keeps_current_focus_simple(self) -> None:
+        script = r"""
+const fs = require("fs");
+const vm = require("vm");
+const code = fs.readFileSync("english_learner_app/static/app.js", "utf8");
+const context = {
+  document: { addEventListener() {}, getElementById() { return null; }, querySelectorAll() { return []; } },
+  window: { setTimeout() {}, clearTimeout() {} },
+  console,
+};
+vm.createContext(context);
+vm.runInContext(code, context);
+
+function assert(condition, message) {
+  if (!condition) throw new Error(message);
+}
+
+const coverage = {
+  layers: [
+    { key: "greenery", label: "Add more detail about the greenery", visualFocus: "greenery", category: "environment", completed: false, current: true },
+    { key: "vehicles", label: "Describe the vehicles near the road", visualFocus: "vehicles near the road", category: "positioning", completed: false },
+  ],
+  currentIndex: 0,
+  currentLayer: { key: "greenery", label: "Add more detail about the greenery", visualFocus: "greenery", category: "environment", completed: false, current: true },
+};
+const progress = context.renderCoverageLayerProgress(coverage);
+assert(progress.includes("Focus 1 of 2"), "coverage progress should show current focus count");
+assert(progress.includes("greenery"), "coverage progress should name the current visual focus");
+assert(!progress.includes("Next:"), "coverage progress should hide upcoming-focus complexity");
+
+const hintHtml = context.renderImproveHintsCard([
+  { label: "Nouns", items: ["trees", "branches", "leaves", "road", "buildings"] },
+  { label: "Verbs", items: ["stretching", "covering", "standing"] },
+  { label: "Adjectives", items: ["green", "shaded", "quiet"] },
+  { label: "Phrases", items: ["above the road"] },
+]);
+assert(hintHtml.includes("Focused hints"), "coverage hints should be labeled as focused");
+const groupCount = (hintHtml.match(/improve-hint-group/g) || []).length;
+assert(groupCount <= 3, "coverage should avoid long hint lists");
+
+const polishHtml = context.renderArticulationUpgradeStage(
+  { original: "There are trees.", answer: "There are trees.", applied: [], skipped: [], finalized: false },
+  [{ id: "vocabulary-0-trees", oldText: "trees", newText: "leafy branches", type: "vocabulary", xp: 5 }]
+);
+assert(polishHtml.includes("Upgrade your articulation"), "polish stage should have a direct title");
+assert(polishHtml.includes("inline-upgrade-target"), "polish stage should center the inline highlights");
+assert(!polishHtml.includes("Manual edit"), "polish stage should hide extra form complexity");
+"""
+        result = subprocess.run(
+            ["node", "-e", script],
+            cwd=Path(__file__).resolve().parents[1],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    @unittest.skipIf(shutil.which("node") is None, "node is required for static Improve hint tests")
+    def test_coverage_layers_follow_missing_visual_areas(self) -> None:
+        script = r"""
+const fs = require("fs");
+const vm = require("vm");
+const code = fs.readFileSync("english_learner_app/static/app.js", "utf8");
+const context = {
+  document: { addEventListener() {}, getElementById() { return null; }, querySelectorAll() { return []; } },
+  window: { setTimeout() {}, clearTimeout() {} },
+  console,
+};
+vm.createContext(context);
+vm.runInContext(code, context);
+
+function assert(condition, message) {
+  if (!condition) throw new Error(message);
+}
+
+const session = {
+  analysis: {
+    articulation_targets: [
+      {
+        id: "greenery",
+        label: "Add more detail about the greenery",
+        visual_focus: "greenery along the road",
+        category: "environment",
+        hints: ["trees", "leaves", "greenery along the roadside"],
+        evidence: ["branches stretching over the road"],
+      },
+      {
+        id: "vehicles",
+        label: "Describe the vehicles near the road",
+        visual_focus: "vehicles near the road",
+        category: "positioning",
+        hints: ["parked motorcycle", "moving car", "near the roadside"],
+        evidence: ["traffic along the street"],
+      },
+      {
+        id: "lighting",
+        label: "Describe the lighting and shadows",
+        visual_focus: "lighting and shadows",
+        category: "lighting",
+        hints: ["bright daylight", "shadows on the road"],
+        evidence: ["sunlight through the trees"],
+      },
+    ],
+    objects: [{ name: "road" }, { name: "buildings" }, { name: "trees" }, { name: "motorcycle" }],
+    actions: [],
+    environment: "urban road",
+    environment_details: ["trees near the road", "vehicles near the roadside", "bright daylight"],
+    phrases: [{ phrase: "near the roadside" }, { phrase: "in the background" }],
+    sentence_patterns: [{ pattern: "In the background, there are ___" }],
+  },
+};
+
+const feedback = {
+  learning_flow: { missing_visual_areas: ["greenery", "vehicles near the road", "lighting and shadows"] },
+  initial_attempt_feedback: { missing_visual_areas: ["greenery", "vehicles near the road", "lighting and shadows"] },
+  coverage: {
+    coveragePercent: 45,
+    imageParts: [
+      { name: "road", type: "setting", covered: true, coverageStatus: "covered" },
+      { name: "greenery", type: "background", covered: false, coverageStatus: "missing" },
+      { name: "vehicles near the road", type: "important_object", covered: false, coverageStatus: "missing" },
+      { name: "lighting and shadows", type: "atmosphere", covered: false, coverageStatus: "missing" },
+    ],
+  },
+};
+
+const state = context.buildCoverageLayerState(feedback, session, "There is a road and buildings.");
+assert(state.layers.length === 3, "coverage should build one layer per missing visual area");
+assert(state.currentLayer.label === "Add more detail about the greenery", "first layer should focus on the first missing visual area");
+assert(state.currentLayer.visualFocus.includes("greenery"), "current layer should keep an image-specific visual focus");
+
+const issue = context.buildLayerFeedbackIssue(state.currentLayer, feedback, session);
+const hints = context.buildImproveHintGroups(session, feedback, issue, "There is a road and buildings.", { level: 1 });
+const hintText = hints.flatMap((group) => group.items).join(" | ").toLowerCase();
+assert(hintText.includes("trees") || hintText.includes("greenery") || hintText.includes("leaves"), "greenery layer should show greenery hints");
+assert(!hintText.includes("motorcycle"), "greenery layer should not show unrelated vehicle hints");
+assert(hints.some((group) => /sentence/i.test(group.label) && group.items.some((item) => item.includes("___"))), "current layer should include sentence frames with blanks");
+
+const nextFeedback = {
+  learning_flow: { missing_visual_areas: ["vehicles near the road", "lighting and shadows"] },
+  coverage: {
+    coveragePercent: 62,
+    imageParts: [
+      { name: "greenery", type: "background", covered: true, coverageStatus: "covered" },
+      { name: "vehicles near the road", type: "important_object", covered: false, coverageStatus: "missing" },
+      { name: "lighting and shadows", type: "atmosphere", covered: false, coverageStatus: "missing" },
+    ],
+  },
+};
+const nextState = context.buildCoverageLayerState(nextFeedback, session, "There is a road and buildings with trees along the roadside.");
+assert(nextState.currentLayer.label === "Describe the vehicles near the road", "covered greenery should advance to the next missing area");
+"""
+        result = subprocess.run(
+            ["node", "-e", script],
+            cwd=Path(__file__).resolve().parents[1],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    @unittest.skipIf(shutil.which("node") is None, "node is required for static Improve hint tests")
+    def test_coverage_layer_support_progresses_when_stuck(self) -> None:
+        script = r"""
+const fs = require("fs");
+const vm = require("vm");
+const code = fs.readFileSync("english_learner_app/static/app.js", "utf8");
+const context = {
+  document: { addEventListener() {}, getElementById() { return null; }, querySelectorAll() { return []; } },
+  window: { setTimeout() {}, clearTimeout() {} },
+  console,
+};
+vm.createContext(context);
+vm.runInContext(code, context);
+
+function assert(condition, message) {
+  if (!condition) throw new Error(message);
+}
+
+const session = {
+  analysis: {
+    articulation_targets: [{
+      id: "greenery",
+      label: "Add more detail about the greenery",
+      visual_focus: "tree branches and leaves above the road",
+      category: "environment",
+      hints: ["tree branches", "leaves", "create shade"],
+      evidence: ["branches extend over the road"],
+    }],
+    objects: [{ name: "road" }, { name: "tree branches" }],
+    environment: "road",
+    environment_details: ["tree branches above the road", "leaves creating shade"],
+  },
+};
+const feedback = {
+  learning_flow: { missing_visual_areas: ["greenery"] },
+  coverage: {
+    coveragePercent: 45,
+    imageParts: [
+      { name: "greenery", type: "background", covered: false, coverageStatus: "missing" },
+    ],
+  },
+};
+const answer = "There is a road and buildings.";
+const layer = context.buildCoverageLayerState(feedback, session, answer).currentLayer;
+const attempts = Array.from({ length: 5 }, () => ({ text: answer, feedback, score: 40 }));
+
+assert(context.dynamicTargetPrompt(layer, session, 1) === "Add more detail about the greenery.", "attempt 1 should use light guidance");
+assert(context.dynamicTargetPrompt(layer, session, 2).includes("Notice"), "attempt 2 should use guided noticing");
+assert(context.dynamicTargetPrompt(layer, session, 3).includes("Does this part feel"), "attempt 3 should use choices");
+assert(context.dynamicTargetPrompt(layer, session, 4).includes("___"), "attempt 4 should use a sentence scaffold");
+assert(context.dynamicTargetPrompt(layer, session, 5).startsWith("Try mentioning"), "attempt 5 should give direct short help");
+
+const issue = context.buildLayerFeedbackIssue(layer, feedback, session);
+const escalation = context.buildImproveEscalationContext(session, attempts, issue, layer);
+assert(escalation.level === 5, "five attempts should produce level 5 support");
+assert(escalation.canMoveForward === true, "level 5 should allow moving forward");
+assert(!/wrong|failed/i.test(escalation.message), "support message should not use wrong/failed wording");
+"""
+        result = subprocess.run(
+            ["node", "-e", script],
+            cwd=Path(__file__).resolve().parents[1],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    @unittest.skipIf(shutil.which("node") is None, "node is required for static coverage gate tests")
+    def test_coverage_completion_gate_unlocks_polish_without_stale_initial_missing_areas(self) -> None:
+        script = r"""
+const fs = require("fs");
+const vm = require("vm");
+const code = fs.readFileSync("english_learner_app/static/app.js", "utf8");
+const context = {
+  document: { addEventListener() {}, getElementById() { return null; }, querySelectorAll() { return []; } },
+  window: { setTimeout() {}, clearTimeout() {} },
+  console,
+};
+vm.createContext(context);
+vm.runInContext(code, context);
+
+function assert(condition, message) {
+  if (!condition) throw new Error(message);
+}
+
+const session = {
+  analysis: {
+    objects: [{ name: "road" }, { name: "buildings" }],
+    actions: [],
+    environment: "urban road",
+    environment_details: ["buildings along the road"],
+  },
+};
+const feedback = {
+  initial_attempt_feedback: { missing_visual_areas: ["trees", "vehicles"] },
+  readiness: {
+    ready: true,
+    criteria: {
+      mainSubject: true,
+      mainAction: true,
+      settingBackground: true,
+      naturalEnglish: true,
+      notAWordList: true,
+    },
+  },
+  coverage: {
+    coveragePercent: 80,
+    imageParts: [
+      { name: "urban road", type: "main_subject", covered: true, coverageStatus: "covered" },
+      { name: "buildings", type: "setting", covered: true, coverageStatus: "covered" },
+      { name: "roadside details", type: "important_object", covered: true, coverageStatus: "covered" },
+    ],
+  },
+};
+
+const gate = context.coverageCompletionGate(feedback, session);
+const layers = context.buildCoverageLayerState(feedback, session, "The image shows an urban road lined with buildings and roadside details.");
+assert(gate.complete === true, "gate should complete when the scene is reasonably covered");
+assert(layers.complete === true, "coverage layers should unlock polish when the gate passes");
+assert(layers.layers.length === 0, "stale first-attempt missing areas should not recreate layers after completion");
+assert(context.isExplanationReady(feedback, session) === true, "ready helper should use the coverage completion gate");
 """
         result = subprocess.run(
             ["node", "-e", script],
@@ -428,6 +949,7 @@ const session = {
 };
 const feedback = {
   coverage: { imageParts: [{ type: "main_subject", covered: true, coverageStatus: "covered" }] },
+  learning_flow: { missing_visual_areas: ["flower appearance"] },
   readiness: { criteria: { mainSubject: true, mainAction: false, settingBackground: false, notAWordList: true } },
   specific_guidance: {
     nouns: ["flower", "petals", "leaves"],
@@ -440,11 +962,11 @@ function assert(condition, message) {
   if (!condition) throw new Error(message);
 }
 assert(context.classifyImproveImageType(session.analysis) === "object", "flower image should be object-focused");
-const state = context.buildArticulationState(feedback, session, "A flower.");
+const state = context.buildCoverageLayerState(feedback, session, "A flower.");
 const keys = state.layers.map((layer) => layer.key).join("|");
 assert(!keys.includes("action"), "object-focused layer set should not include action");
-assert(state.currentLayer.key === "appearance", "after naming the flower, the next layer should be appearance");
-assert(context.buildLayerCurrentFocus(state.currentLayer, session, { level: 1 }) === "Add visual details", "static image prompt should ask for visual details");
+assert(state.currentLayer.category === "appearance", "after naming the flower, the next layer should be appearance");
+assert(context.buildLayerCurrentFocus(state.currentLayer, session, { level: 1 }).toLowerCase().includes("flower appearance"), "static image prompt should ask for flower appearance");
 const issue = context.buildLayerFeedbackIssue(state.currentLayer, feedback, session);
 const hints = context.buildImproveHintGroups(session, feedback, issue, "A flower.", { level: 1 })
   .flatMap((group) => group.items)
@@ -749,6 +1271,7 @@ class AIAnalyzerTests(unittest.TestCase):
             original_text="",
             analysis={"natural_explanation": "A man is smiling in a busy cafe."},
             learner_level="beginner",
+            attempt_index=2,
         )
 
         self.assertIn("Judge coverage of the whole image before language quality", prompt)
@@ -760,6 +1283,70 @@ class AIAnalyzerTests(unittest.TestCase):
         self.assertIn("If the learner does not mention the main subject", prompt)
         self.assertIn("Do not let good English override poor coverage", prompt)
         self.assertIn('"coverage": {"level": "low"', prompt)
+
+    def test_first_feedback_prompt_requires_covered_only_enhancement(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with patch.dict(os.environ, {}, clear=True):
+                config = AppConfig.from_env(base_dir=Path(temp_dir))
+
+        analyzer = AIAnalyzer(config)
+        prompt = analyzer._build_explanation_feedback_prompt(
+            learner_text="There is a road and buildings.",
+            original_text="There is a road and buildings.",
+            analysis={"natural_explanation": "A road has buildings, trees, vehicles, and shade."},
+            learner_level="beginner",
+            attempt_index=1,
+        )
+
+        self.assertIn("FIRST ATTEMPT FEEDBACK MODE", prompt)
+        self.assertIn("enhance ONLY what the learner covered", prompt)
+        self.assertIn("Do not add major missing details yet", prompt)
+        self.assertIn("initialAttemptFeedback", prompt)
+
+    def test_initial_attempt_feedback_replaces_full_answer_with_covered_enhancement(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with patch.dict(os.environ, {}, clear=True):
+                config = AppConfig.from_env(base_dir=Path(temp_dir))
+
+        analyzer = AIAnalyzer(config)
+        feedback = {
+            "coverage": {
+                "imageParts": [
+                    {"name": "road", "covered": True, "coverageStatus": "covered"},
+                    {"name": "buildings", "covered": True, "coverageStatus": "covered"},
+                    {"name": "trees", "covered": False, "coverageStatus": "missing"},
+                    {"name": "motorcycle", "covered": False, "coverageStatus": "missing"},
+                ],
+                "missingMajorParts": ["trees", "motorcycle"],
+            },
+            "better_version": "The image shows a road, buildings, trees, and a motorcycle.",
+            "missing_details": ["trees", "motorcycle"],
+        }
+        analyzer._attach_initial_attempt_feedback(
+            feedback,
+            payload={
+                "initialAttemptFeedback": {
+                    "acknowledgement": "Nice start — you described the road and buildings.",
+                    "coveredEnhancement": "The image shows a quiet urban road lined with tall buildings.",
+                    "reusableLanguageFromEnhancement": {
+                        "nouns": ["road", "buildings"],
+                        "phrases": ["lined with tall buildings"],
+                    },
+                    "missingVisualAreas": ["trees", "motorcycle"],
+                }
+            },
+            learner_text="There is a road and buildings.",
+            analysis={},
+        )
+
+        initial = feedback["initial_attempt_feedback"]
+        self.assertEqual(
+            "The image shows a quiet urban road lined with tall buildings.",
+            initial["covered_enhancement"],
+        )
+        self.assertEqual(initial["covered_enhancement"], feedback["better_version"])
+        self.assertIn("road", initial["reusable_language"]["nouns"])
+        self.assertEqual(["trees", "motorcycle"], initial["missing_visual_areas"])
 
     def test_extract_required_image_parts_from_reference_analysis(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
