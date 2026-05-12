@@ -8,7 +8,6 @@ import sqlite3
 import subprocess
 import tempfile
 import unittest
-import asyncio
 from unittest.mock import patch
 
 from english_learner_app.assessment import evaluate_assessment
@@ -58,7 +57,7 @@ class AssessmentTests(unittest.TestCase):
 
 
 class ConfigTests(unittest.TestCase):
-    def test_config_defaults_to_vllm_model_settings(self) -> None:
+    def test_config_defaults_to_demo_without_api_key(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             with patch.dict(os.environ, {}, clear=True):
                 config = AppConfig.from_env(base_dir=Path(temp_dir))
@@ -70,34 +69,21 @@ class ConfigTests(unittest.TestCase):
             config.database_path,
             Path(temp_dir) / "app_data" / "english_learner.sqlite3",
         )
-        self.assertEqual(config.vllm_base_url, "http://127.0.0.1:8000/v1")
-        self.assertEqual(config.vllm_api_key, "local-dev")
-        self.assertEqual(config.vllm_model, "Qwen/Qwen2.5-VL-7B-Instruct-AWQ")
-        self.assertEqual(config.vllm_max_concurrency, 8)
-        self.assertEqual(config.vllm_batch_interval_ms, 30)
-        self.assertEqual(config.vllm_batch_max_size, 8)
 
-    def test_config_reads_vllm_settings_from_env(self) -> None:
+    def test_config_uses_openai_when_api_key_is_set(self) -> None:
         env = {
-            "AI_BACKEND": "vllm",
-            "VLLM_BASE_URL": "http://127.0.0.1:9000/v1/",
-            "VLLM_API_KEY": "abc123",
-            "VLLM_MODEL": "Qwen/custom",
-            "VLLM_MAX_CONCURRENCY": "5",
-            "VLLM_BATCH_INTERVAL_MS": "45",
-            "VLLM_BATCH_MAX_SIZE": "6",
+            "OPENAI_API_KEY": "test-key",
+            "OPENAI_MODEL": "gpt-test",
+            "OPENAI_BASE_URL": "https://example.test/v1/",
         }
         with tempfile.TemporaryDirectory() as temp_dir:
             with patch.dict(os.environ, env, clear=True):
                 config = AppConfig.from_env(base_dir=Path(temp_dir))
 
-        self.assertEqual(config.ai_backend, "vllm")
-        self.assertEqual(config.vllm_base_url, "http://127.0.0.1:9000/v1")
-        self.assertEqual(config.vllm_api_key, "abc123")
-        self.assertEqual(config.vllm_model, "Qwen/custom")
-        self.assertEqual(config.vllm_max_concurrency, 5)
-        self.assertEqual(config.vllm_batch_interval_ms, 45)
-        self.assertEqual(config.vllm_batch_max_size, 6)
+        self.assertEqual(config.ai_backend, "openai")
+        self.assertEqual(config.openai_api_key, "test-key")
+        self.assertEqual(config.openai_model, "gpt-test")
+        self.assertEqual(config.openai_base_url, "https://example.test/v1")
 
     def test_config_reads_runtime_data_paths_from_env(self) -> None:
         env = {
@@ -1491,111 +1477,6 @@ class AIAnalyzerTests(unittest.TestCase):
         self.assertGreaterEqual(full_description["score"], 85)
         self.assertGreater(full_description["score"], action_only["score"])
 
-    def test_vllm_error_raises_when_demo_mode_disabled(self) -> None:
-        with tempfile.TemporaryDirectory() as temp_dir:
-            env = {
-                "AI_BACKEND": "vllm",
-                "DEMO_MODE": "false",
-            }
-            with patch.dict(os.environ, env, clear=True):
-                config = AppConfig.from_env(base_dir=Path(temp_dir))
-
-        analyzer = AIAnalyzer(config)
-
-        async def boom(**kwargs):
-            raise RuntimeError("vllm down")
-
-        analyzer._vllm_response = boom  # type: ignore[method-assign]
-
-        with self.assertRaises(RuntimeError):
-            asyncio.run(
-                analyzer.analyze_image(
-                    image_bytes=b"fake",
-                    mime_type="image/png",
-                    filename="test.png",
-                    image_path=Path("/tmp/test.png"),
-                    difficulty_band="beginner",
-                    notes="",
-                )
-            )
-
-    def test_large_vllm_image_is_downscaled_before_request(self) -> None:
-        from PIL import Image
-
-        with tempfile.TemporaryDirectory() as temp_dir:
-            env = {
-                "AI_BACKEND": "vllm",
-                "DEMO_MODE": "false",
-                "IMAGE_MAX_PIXELS": "200704",
-            }
-            with patch.dict(os.environ, env, clear=True):
-                config = AppConfig.from_env(base_dir=Path(temp_dir))
-
-        analyzer = AIAnalyzer(config)
-        runtime = analyzer._get_local_runtime()
-        uploads_dir = config.uploads_dir
-        uploads_dir.mkdir(parents=True, exist_ok=True)
-        image_path = uploads_dir / "large.png"
-        Image.new("RGB", (4000, 3000), color=(200, 120, 80)).save(image_path)
-
-        prepared_path, temp_path = runtime._prepare_image_for_vllm(image_path)
-
-        self.assertIsNotNone(temp_path)
-        self.assertTrue(prepared_path.exists())
-        with Image.open(prepared_path) as prepared:
-            self.assertLessEqual(prepared.width * prepared.height, config.image_max_pixels)
-        temp_path.unlink(missing_ok=True)
-
-    def test_vllm_json_repair_is_used_when_first_parse_fails(self) -> None:
-        with tempfile.TemporaryDirectory() as temp_dir:
-            env = {
-                "AI_BACKEND": "vllm",
-                "DEMO_MODE": "false",
-            }
-            with patch.dict(os.environ, env, clear=True):
-                config = AppConfig.from_env(base_dir=Path(temp_dir))
-
-        analyzer = AIAnalyzer(config)
-
-        class FakeRuntime:
-            async def generate(self, **kwargs):
-                return '{"title":"Bad "quote","scene_summary_simple":"x"}'
-
-            async def repair_json(self, *, output_text: str):
-                return (
-                    '{"title":"Recovered lesson","scene_summary_simple":"Simple summary.",'
-                    '"scene_summary_natural":"First sentence.\\n\\nSecond sentence.",'
-                    '"objects":[{"name":"book","description":"A book.","importance":0.8,"color":"","position":"center"}],'
-                    '"actions":[{"verb":"hold","subject":"A person","object":"a book","phrase":"hold a book","description":"A person holds a book.","importance":0.8}],'
-                    '"environment":{"setting":"room","details":["indoor scene"],"mood":"calm"},'
-                    '"vocabulary":[{"word":"book","part_of_speech":"noun","meaning_simple":"something you read","example":"This is a book.","frequency_priority":"high"},'
-                    '{"word":"hold","part_of_speech":"verb","meaning_simple":"keep something in your hand","example":"She can hold it.","frequency_priority":"high"}],'
-                    '"phrases":[{"phrase":"hold a book","meaning_simple":"keep a book in your hand","example":"He can hold a book.","reusable":true,"collocation_type":"phrase"}],'
-                    '"sentence_patterns":[{"pattern":"There is a ...","example":"There is a book on the table.","usage_note":"Use it to describe what you see."}],'
-                    '"quiz_candidates":[{"quiz_type":"recognition","prompt":"What object is visible?","answer":"book","distractors":["chair","table","lamp"],"explanation":"The book is visible.","source_text":"book"},'
-                    '{"quiz_type":"phrase_completion","prompt":"Which phrase means keep a book in your hand?","answer":"hold a book","distractors":["open a door","sit on a chair","look at a wall"],"explanation":"It describes the action.","source_text":"hold a book"},'
-                    '{"quiz_type":"situation_understanding","prompt":"What is happening?","answer":"A person is holding a book.","distractors":["A person is sleeping.","A person is running.","A person is cooking."],"explanation":"The action is visible.","source_text":"A person is holding a book."},'
-                    '{"quiz_type":"recognition","prompt":"Which word means something you read?","answer":"book","distractors":["lamp","window","floor"],"explanation":"Book is the correct word.","source_text":"book"}],'
-                    '"difficulty_recommendation":"Keep the next practice simple.",'
-                    '"teaching_notes":["Focus on the main object first."]}'
-                )
-
-        analyzer._get_local_runtime = lambda: FakeRuntime()  # type: ignore[method-assign]
-
-        result = asyncio.run(
-            analyzer.analyze_image(
-                image_bytes=b"fake",
-                mime_type="image/png",
-                filename="test.png",
-                image_path=Path("/tmp/test.png"),
-                difficulty_band="beginner",
-                notes="",
-            )
-        )
-
-        self.assertEqual(result["title"], "Recovered lesson")
-        self.assertEqual(result["source_mode"], "vllm")
-
     def test_normalize_analysis_syncs_explanation_with_phrases_and_words(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             with patch.dict(os.environ, {}, clear=True):
@@ -2215,103 +2096,6 @@ class AIAnalyzerTests(unittest.TestCase):
         self.assertGreaterEqual(len(reusable_items), 3)
         self.assertEqual(reusable_items[0]["text"].lower(), "cat")
         self.assertIn("there is a ...", [item["text"].lower() for item in reusable_items])
-
-
-class VLLMRuntimeQueueTests(unittest.IsolatedAsyncioTestCase):
-    async def asyncSetUp(self) -> None:
-        from PIL import Image
-
-        self.temp_dir = tempfile.TemporaryDirectory()
-        env = {
-            "AI_BACKEND": "vllm",
-            "DEMO_MODE": "false",
-            "VLLM_MAX_CONCURRENCY": "2",
-            "VLLM_BATCH_INTERVAL_MS": "40",
-            "VLLM_BATCH_MAX_SIZE": "4",
-        }
-        self.env_patcher = patch.dict(os.environ, env, clear=True)
-        self.env_patcher.start()
-
-        self.config = AppConfig.from_env(base_dir=Path(self.temp_dir.name))
-        analyzer = AIAnalyzer(self.config)
-        self.runtime = analyzer._get_local_runtime()
-        self.config.uploads_dir.mkdir(parents=True, exist_ok=True)
-        self.image_path = self.config.uploads_dir / "queue-test.png"
-        Image.new("RGB", (128, 128), color=(120, 160, 200)).save(self.image_path)
-
-    async def asyncTearDown(self) -> None:
-        await self.runtime.close()
-        self.env_patcher.stop()
-        self.temp_dir.cleanup()
-
-    async def test_runtime_bursts_requests_after_batch_interval(self) -> None:
-        start_times: list[float] = []
-        base_time = asyncio.get_running_loop().time()
-
-        async def fake_execute(payload: dict[str, object]) -> str:
-            start_times.append(asyncio.get_running_loop().time() - base_time)
-            await asyncio.sleep(0.01)
-            return '{"title":"Queued"}'
-
-        self.runtime._execute_chat_completion = fake_execute  # type: ignore[method-assign]
-
-        await asyncio.gather(
-            self.runtime.generate(
-                image_path=self.image_path,
-                prompt="first",
-                max_new_tokens=32,
-                temperature=0.0,
-            ),
-            self.runtime.generate(
-                image_path=self.image_path,
-                prompt="second",
-                max_new_tokens=32,
-                temperature=0.0,
-            ),
-        )
-
-        self.assertEqual(len(start_times), 2)
-        self.assertGreaterEqual(start_times[0], 0.03)
-        self.assertLess(abs(start_times[0] - start_times[1]), 0.03)
-
-    async def test_runtime_caps_inflight_vllm_requests(self) -> None:
-        running = 0
-        max_running = 0
-
-        async def fake_execute(payload: dict[str, object]) -> str:
-            nonlocal running, max_running
-            running += 1
-            max_running = max(max_running, running)
-            await asyncio.sleep(0.05)
-            running -= 1
-            return '{"title":"Queued"}'
-
-        self.runtime._execute_chat_completion = fake_execute  # type: ignore[method-assign]
-
-        await asyncio.gather(
-            self.runtime.generate(
-                image_path=self.image_path,
-                prompt="first",
-                max_new_tokens=32,
-                temperature=0.0,
-            ),
-            self.runtime.generate(
-                image_path=self.image_path,
-                prompt="second",
-                max_new_tokens=32,
-                temperature=0.0,
-            ),
-            self.runtime.generate(
-                image_path=self.image_path,
-                prompt="third",
-                max_new_tokens=32,
-                temperature=0.0,
-            ),
-        )
-
-        self.assertEqual(max_running, 2)
-
-
 class HighlightTests(unittest.TestCase):
     def test_highlight_wraps_common_phrases(self) -> None:
         html = highlight_phrases(

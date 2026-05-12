@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import json
 import sqlite3
 from datetime import timedelta
@@ -58,7 +57,6 @@ def build_app(config: AppConfig | None = None) -> web.Application:
     app["db"] = db
     app["mailer"] = Mailer(config)
     app["analyzer"] = AIAnalyzer(config)
-    app["warmup_task"] = None
     app.on_cleanup.append(close_background_clients)
 
     app.router.add_get("/", index)
@@ -89,26 +87,7 @@ def build_app(config: AppConfig | None = None) -> web.Application:
     return app
 
 
-async def start_vllm_warmup(app: web.Application) -> None:
-    app["warmup_task"] = asyncio.create_task(run_vllm_warmup(app))
-
-
-async def run_vllm_warmup(app: web.Application) -> None:
-    try:
-        await app["analyzer"].warmup_vllm_model()
-        print("[ai-vllm-warmup] ready")
-    except asyncio.CancelledError:
-        raise
-    except Exception as exc:
-        print(f"[ai-vllm-warmup-warning] {type(exc).__name__}: {exc}")
-
-
 async def close_background_clients(app: web.Application) -> None:
-    warmup_task = app.get("warmup_task")
-    if warmup_task is not None and not warmup_task.done():
-        warmup_task.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await warmup_task
     await app["analyzer"].close()
 
 

@@ -6,10 +6,7 @@ __pycache__/
 # Runtime app state: SQLite databases and uploaded user images.
 app_data/
 
-# Local model weights/cache live outside runtime app state.
-models/
-
-# Legacy runtime/model location from older local setups.
+# Legacy runtime location from older local setups.
 data/
 
 # Local tool or accidental install artifacts.

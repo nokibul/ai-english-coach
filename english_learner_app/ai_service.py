@@ -1,13 +1,8 @@
 from __future__ import annotations
 
-import asyncio
 import base64
-import contextlib
 import json
-import math
 import re
-import threading
-from dataclasses import dataclass
 from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any
@@ -24,17 +19,9 @@ from .utils import (
 )
 
 
-@dataclass(slots=True)
-class _QueuedVLLMRequest:
-    payload: dict[str, Any]
-    future: asyncio.Future[str]
-
-
 class AIAnalyzer:
     def __init__(self, config: AppConfig) -> None:
         self.config = config
-        self._vllm_runtime: VLLMVisionRuntime | None = None
-        self._runtime_lock = threading.Lock()
 
     async def analyze_image(
         self,
@@ -46,28 +33,6 @@ class AIAnalyzer:
         difficulty_band: str,
         notes: str,
     ) -> dict[str, Any]:
-        if self.config.ai_backend == "vllm":
-            if image_path is None:
-                raise ValueError("A local image path is required for the vLLM backend.")
-            try:
-                return await self._vllm_response(
-                    image_path=image_path,
-                    difficulty_band=difficulty_band,
-                    notes=notes,
-                )
-            except Exception as exc:
-                print(f"[ai-vllm-fallback] {type(exc).__name__}: {exc}")
-                if not self.config.demo_mode:
-                    raise
-                return self._demo_response(
-                    filename=filename,
-                    difficulty_band=difficulty_band,
-                    notes=notes,
-                    fallback_reason=(
-                        "The local vLLM server could not finish a structured lesson for this image, "
-                        "so the app used a local fallback lesson instead."
-                    ),
-                )
         if self.config.ai_backend == "openai" and self.config.openai_api_key:
             return await self._openai_response(
                 image_bytes=image_bytes,
@@ -79,52 +44,8 @@ class AIAnalyzer:
             return self._demo_response(filename=filename, difficulty_band=difficulty_band, notes=notes)
         raise ValueError(f"Unsupported AI backend: {self.config.ai_backend}")
 
-    async def warmup_vllm_model(self) -> None:
-        if self.config.ai_backend != "vllm":
-            return
-        runtime = self._get_local_runtime()
-        await runtime.warmup()
-
     async def close(self) -> None:
-        runtime = self._vllm_runtime
-        if runtime is not None:
-            await runtime.close()
-
-    def _get_vllm_runtime(self) -> "VLLMVisionRuntime":
-        with self._runtime_lock:
-            if self._vllm_runtime is None:
-                self._vllm_runtime = VLLMVisionRuntime(self.config, self._build_prompt)
-            return self._vllm_runtime
-
-    def _get_local_runtime(self) -> "VLLMVisionRuntime":
-        return self._get_vllm_runtime()
-
-    async def _vllm_response(
-        self,
-        *,
-        image_path: Path,
-        difficulty_band: str,
-        notes: str,
-    ) -> dict[str, Any]:
-        runtime = self._get_local_runtime()
-        output_text = await runtime.generate(
-            image_path=image_path,
-            prompt=self._build_prompt(difficulty_band=difficulty_band, notes=notes),
-            max_new_tokens=self._analysis_max_new_tokens(),
-            temperature=self.config.inference_temperature,
-        )
-        try:
-            analysis = self._parse_analysis_output(output_text)
-        except Exception:
-            repaired_text = await runtime.repair_json(output_text=output_text)
-            analysis = self._parse_analysis_output(repaired_text)
-        normalized = self._normalize_analysis(analysis, difficulty_band=difficulty_band)
-        normalized = await self._populate_generated_examples(
-            normalized,
-            difficulty_band=difficulty_band,
-        )
-        normalized["source_mode"] = "vllm"
-        return normalized
+        return None
 
     def _analysis_max_new_tokens(self) -> int:
         return min(max(self.config.inference_max_new_tokens, 500), 900)
@@ -383,10 +304,7 @@ class AIAnalyzer:
             try:
                 payload = extract_json_payload(output_text)
             except Exception:
-                if self.config.ai_backend != "vllm":
-                    raise
-                repaired_text = await self._get_local_runtime().repair_json(output_text=output_text)
-                payload = extract_json_payload(repaired_text)
+                raise
             normalized = self._normalize_explanation_feedback(payload, fallback=fallback)
             return self._apply_progressive_coaching(
                 normalized,
@@ -3877,14 +3795,6 @@ class AIAnalyzer:
         max_output_tokens: int,
         temperature: float,
     ) -> str:
-        if self.config.ai_backend == "vllm":
-            runtime = self._get_vllm_runtime()
-            return await runtime.generate_text(
-                prompt=prompt,
-                max_tokens=max_output_tokens,
-                temperature=temperature,
-            )
-
         if self.config.ai_backend == "openai" and self.config.openai_api_key:
             payload = {
                 "model": self.config.openai_model,
@@ -6191,337 +6101,3 @@ class AIAnalyzer:
         self._apply_generated_examples(normalized, {})
         normalized["source_mode"] = "demo"
         return normalized
-
-
-class VLLMVisionRuntime:
-    def __init__(self, config: AppConfig, prompt_builder) -> None:
-        self.config = config
-        self.prompt_builder = prompt_builder
-        self._loop: asyncio.AbstractEventLoop | None = None
-        self._queue: asyncio.Queue[_QueuedVLLMRequest] | None = None
-        self._semaphore: asyncio.Semaphore | None = None
-        self._dispatcher_task: asyncio.Task[None] | None = None
-        self._active_tasks: set[asyncio.Task[None]] = set()
-        self._http_client: httpx.AsyncClient | None = None
-        self._state_lock = threading.Lock()
-
-    def _repair_max_new_tokens(self) -> int:
-        return min(max(self.config.inference_max_new_tokens, 260), 360)
-
-    async def warmup(self) -> None:
-        from tempfile import NamedTemporaryFile
-
-        from PIL import Image, ImageDraw
-
-        self.config.uploads_dir.mkdir(parents=True, exist_ok=True)
-        with NamedTemporaryFile(
-            suffix=".png",
-            dir=self.config.uploads_dir,
-        ) as handle:
-            image = Image.new("RGB", (96, 96), color=(223, 235, 255))
-            draw = ImageDraw.Draw(image)
-            draw.rectangle((16, 18, 80, 78), outline=(33, 66, 120), width=3)
-            draw.ellipse((28, 30, 68, 70), fill=(201, 88, 65))
-            image.save(handle.name, format="PNG")
-            await self.generate(
-                image_path=Path(handle.name),
-                prompt=self.prompt_builder(
-                    difficulty_band="beginner",
-                    notes="Warm up the local vLLM vision-language model.",
-                ),
-                max_new_tokens=48,
-                temperature=0.0,
-            )
-
-    async def close(self) -> None:
-        with self._state_lock:
-            dispatcher_task = self._dispatcher_task
-            active_tasks = list(self._active_tasks)
-            http_client = self._http_client
-            self._dispatcher_task = None
-            self._active_tasks = set()
-            self._http_client = None
-            self._queue = None
-            self._semaphore = None
-            self._loop = None
-
-        if dispatcher_task is not None:
-            dispatcher_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await dispatcher_task
-
-        for task in active_tasks:
-            task.cancel()
-        if active_tasks:
-            await asyncio.gather(*active_tasks, return_exceptions=True)
-
-        if http_client is not None:
-            await http_client.aclose()
-
-    async def generate(
-        self,
-        *,
-        image_path: Path,
-        prompt: str,
-        max_new_tokens: int,
-        temperature: float,
-    ) -> str:
-        resolved_path, temp_path = self._prepare_image_for_vllm(image_path)
-        payload = {
-            "model": self.config.vllm_model,
-            "messages": [
-                {
-                    "role": "system",
-                    "content": (
-                        "You are a careful English-learning coach. "
-                        "Always return valid JSON and no markdown. "
-                        "Do not use teacher-style meta wording such as 'let's look at' "
-                        "inside the explanation."
-                    ),
-                },
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": prompt},
-                        {
-                            "type": "image_url",
-                            "image_url": {"url": f"file://{resolved_path}"},
-                        },
-                    ],
-                },
-            ],
-            "max_tokens": max_new_tokens,
-            "temperature": temperature,
-        }
-        try:
-            return await self._submit_chat_completion(payload)
-        finally:
-            if temp_path is not None:
-                temp_path.unlink(missing_ok=True)
-
-    async def repair_json(self, *, output_text: str) -> str:
-        payload = {
-            "model": self.config.vllm_model,
-            "messages": [
-                {
-                    "role": "system",
-                    "content": (
-                        "You repair malformed JSON. "
-                        "Return valid JSON only. "
-                        "Do not add markdown or explanation. "
-                        "Preserve the original meaning and keys as much as possible."
-                    ),
-                },
-                {
-                    "role": "user",
-                    "content": (
-                        "Fix the following malformed JSON so it becomes valid JSON. "
-                        "Keep the same top-level structure and data whenever possible.\n\n"
-                        f"{output_text}"
-                    ),
-                },
-            ],
-            "max_tokens": self._repair_max_new_tokens(),
-            "temperature": 0.0,
-        }
-        return await self._submit_chat_completion(payload)
-
-    async def generate_text(
-        self,
-        *,
-        prompt: str,
-        max_tokens: int,
-        temperature: float,
-    ) -> str:
-        payload = {
-            "model": self.config.vllm_model,
-            "messages": [
-                {
-                    "role": "system",
-                    "content": (
-                        "You are a careful English-learning coach. "
-                        "Always return valid JSON and no markdown."
-                    ),
-                },
-                {
-                    "role": "user",
-                    "content": prompt,
-                },
-            ],
-            "max_tokens": max_tokens,
-            "temperature": temperature,
-        }
-        return await self._submit_chat_completion(payload)
-
-    async def _submit_chat_completion(self, payload: dict[str, Any]) -> str:
-        await self._ensure_dispatcher()
-        queue = self._queue
-        if queue is None:
-            raise RuntimeError("The vLLM request queue is unavailable.")
-
-        loop = asyncio.get_running_loop()
-        future: asyncio.Future[str] = loop.create_future()
-        await queue.put(_QueuedVLLMRequest(payload=payload, future=future))
-        return await future
-
-    async def _ensure_dispatcher(self) -> None:
-        loop = asyncio.get_running_loop()
-
-        with self._state_lock:
-            if self._loop is None:
-                self._loop = loop
-                self._queue = asyncio.Queue()
-                self._semaphore = asyncio.Semaphore(self.config.vllm_max_concurrency)
-            elif self._loop is not loop:
-                raise RuntimeError("The vLLM runtime cannot be shared across multiple event loops.")
-
-            if self._http_client is None:
-                connection_limit = max(
-                    self.config.vllm_max_concurrency * 2,
-                    self.config.vllm_batch_max_size,
-                )
-                self._http_client = httpx.AsyncClient(
-                    timeout=self.config.vllm_timeout_seconds,
-                    limits=httpx.Limits(
-                        max_connections=connection_limit,
-                        max_keepalive_connections=self.config.vllm_max_concurrency,
-                    ),
-                )
-
-            if self._dispatcher_task is None or self._dispatcher_task.done():
-                self._dispatcher_task = asyncio.create_task(
-                    self._dispatch_loop(),
-                    name="vllm-dispatcher",
-                )
-
-    async def _dispatch_loop(self) -> None:
-        queue = self._queue
-        if queue is None:
-            return
-
-        batch_interval_seconds = self.config.vllm_batch_interval_ms / 1000
-        batch_max_size = max(
-            self.config.vllm_max_concurrency,
-            self.config.vllm_batch_max_size,
-        )
-        loop = asyncio.get_running_loop()
-
-        while True:
-            request = await queue.get()
-            if request.future.cancelled():
-                continue
-
-            batch = [request]
-            if batch_interval_seconds <= 0:
-                while len(batch) < batch_max_size:
-                    try:
-                        next_request = queue.get_nowait()
-                    except asyncio.QueueEmpty:
-                        break
-                    if next_request.future.cancelled():
-                        continue
-                    batch.append(next_request)
-            else:
-                deadline = loop.time() + batch_interval_seconds
-                while len(batch) < batch_max_size:
-                    try:
-                        timeout = deadline - loop.time()
-                        if timeout <= 0:
-                            break
-                        next_request = await asyncio.wait_for(queue.get(), timeout=timeout)
-                    except asyncio.TimeoutError:
-                        break
-                    if next_request.future.cancelled():
-                        continue
-                    batch.append(next_request)
-
-            for item in batch:
-                task = asyncio.create_task(self._run_request(item))
-                self._track_task(task)
-
-    def _track_task(self, task: asyncio.Task[None]) -> None:
-        active_tasks = self._active_tasks
-        active_tasks.add(task)
-        task.add_done_callback(active_tasks.discard)
-
-    async def _run_request(self, request: _QueuedVLLMRequest) -> None:
-        semaphore = self._semaphore
-        if semaphore is None:
-            if not request.future.done():
-                request.future.set_exception(RuntimeError("The vLLM concurrency limiter is unavailable."))
-            return
-
-        try:
-            async with semaphore:
-                content = await self._execute_chat_completion(request.payload)
-        except Exception as exc:
-            if not request.future.done():
-                request.future.set_exception(exc)
-            return
-
-        if not request.future.done():
-            request.future.set_result(content)
-
-    async def _execute_chat_completion(self, payload: dict[str, Any]) -> str:
-        client = self._http_client
-        if client is None:
-            raise RuntimeError("The vLLM HTTP client is unavailable.")
-
-        headers = {
-            "Authorization": f"Bearer {self.config.vllm_api_key}",
-            "Content-Type": "application/json",
-        }
-
-        response = await client.post(
-            f"{self.config.vllm_base_url}/chat/completions",
-            headers=headers,
-            json=payload,
-        )
-        response.raise_for_status()
-
-        data = response.json()
-        choices = data.get("choices")
-        if not isinstance(choices, list) or not choices:
-            raise ValueError("The vLLM response did not include any choices.")
-
-        message = choices[0].get("message")
-        if not isinstance(message, dict):
-            raise ValueError("The vLLM response was missing the assistant message.")
-
-        content = message.get("content")
-        if isinstance(content, str) and content.strip():
-            return content
-        if isinstance(content, list):
-            text_parts: list[str] = []
-            for item in content:
-                if not isinstance(item, dict):
-                    continue
-                if item.get("type") == "text" and item.get("text"):
-                    text_parts.append(str(item["text"]))
-            if text_parts:
-                return "\n".join(text_parts)
-        raise ValueError("The vLLM response did not include any text output.")
-
-    def _prepare_image_for_vllm(self, image_path: Path) -> tuple[Path, Path | None]:
-        from PIL import Image
-
-        with Image.open(image_path) as source:
-            width, height = source.size
-            pixel_count = width * height
-            max_pixels = self.config.image_max_pixels
-            if pixel_count <= max_pixels:
-                return image_path.resolve(), None
-
-            scale = math.sqrt(max_pixels / pixel_count)
-            resized_width = max(28, int(width * scale))
-            resized_height = max(28, int(height * scale))
-            resized_width = max(28, resized_width - (resized_width % 28))
-            resized_height = max(28, resized_height - (resized_height % 28))
-
-            resized = source.convert("RGB")
-            resized.thumbnail((resized_width, resized_height))
-
-            self.config.uploads_dir.mkdir(parents=True, exist_ok=True)
-            temp_path = image_path.with_name(f"{image_path.stem}-vllm.png")
-            resized.save(temp_path, format="PNG")
-            return temp_path.resolve(), temp_path
