@@ -41,13 +41,17 @@ const SESSION_CHUNK_SIZE = 6;
 const IMAGE_UPLOAD_TARGET_BYTES = 4 * 1024 * 1024;
 const IMAGE_UPLOAD_MAX_DIMENSION = 1920;
 const LEARNING_STAGES = Object.freeze({
+  UPLOAD_IMAGE: "upload_image",
   INITIAL_ATTEMPT: "initial_attempt",
-  COVERAGE_FEEDBACK: "coverage_feedback",
+  FIRST_FEEDBACK: "first_feedback",
+  REUSABLE_LANGUAGE: "reusable_language",
+  MISSING_VISUAL_AREAS: "missing_visual_areas",
   COVERAGE_LAYERS: "coverage_layers",
+  LAYER_SUCCESS: "layer_success",
   COVERAGE_COMPLETE: "coverage_complete",
   POLISH_STAGE: "polish_stage",
   FINAL_REVEAL: "final_reveal",
-  QUIZ_READY: "quiz_ready",
+  QUIZ: "quiz",
 });
 let sessionListObserver = null;
 
@@ -62,6 +66,7 @@ function cacheElements() {
     "xpValue",
     "streakValue",
     "newSessionButton",
+    "uploadBackButton",
     "dashboardButton",
     "closeDashboardButton",
     "dashboardModal",
@@ -77,7 +82,10 @@ function cacheElements() {
     "uploadPlaceholder",
     "imagePreviewShell",
     "imagePreview",
+    "uploadProcessingLabel",
     "analyzeButton",
+    "takePhotoButton",
+    "chooseGalleryButton",
     "sessionWorkspace",
     "sessionDetailPanel",
     "sessionLibrarySection",
@@ -124,6 +132,14 @@ function bindEvents() {
 
   els.imageInput.addEventListener("change", onFileChange);
   els.analyzeForm.addEventListener("submit", onAnalyze);
+  els.analyzeButton.addEventListener("click", (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    openImagePicker("gallery");
+  });
+  els.takePhotoButton.addEventListener("click", () => openImagePicker("camera"));
+  els.chooseGalleryButton.addEventListener("click", () => openImagePicker("gallery"));
+  els.uploadBackButton.addEventListener("click", openNewSessionComposer);
   els.newSessionButton.addEventListener("click", openNewSessionComposer);
   els.dashboardButton.addEventListener("click", openDashboardModal);
   els.closeDashboardButton.addEventListener("click", closeDashboardModal);
@@ -228,7 +244,7 @@ function applyUserState(user, stats, progress) {
   state.learnView = "compose";
   els.userBadge.textContent = `${user.full_name} · ${user.difficulty_label || formatBand(user.difficulty_band)}`;
   els.dashboardButton.disabled = false;
-  els.analyzeButton.disabled = !els.imageInput.files[0];
+  els.analyzeButton.disabled = false;
   showAuthOverlay(false);
   renderProgressHeader();
   renderLearnMode();
@@ -330,7 +346,21 @@ function createInitialSessionFlow(session = {}) {
 
 function normalizeLearningStage(stage) {
   const value = String(stage || "").trim();
-  return Object.values(LEARNING_STAGES).includes(value) ? value : "";
+  const aliases = {
+    coverage_feedback: LEARNING_STAGES.FIRST_FEEDBACK,
+    quiz_ready: LEARNING_STAGES.QUIZ,
+    learn: LEARNING_STAGES.UPLOAD_IMAGE,
+    image: LEARNING_STAGES.UPLOAD_IMAGE,
+    guided_write: LEARNING_STAGES.INITIAL_ATTEMPT,
+    write: LEARNING_STAGES.INITIAL_ATTEMPT,
+    submit: LEARNING_STAGES.FIRST_FEEDBACK,
+    feedback: LEARNING_STAGES.FIRST_FEEDBACK,
+    improve: LEARNING_STAGES.COVERAGE_LAYERS,
+    upgrade: LEARNING_STAGES.POLISH_STAGE,
+    reward: LEARNING_STAGES.QUIZ,
+  };
+  const normalized = aliases[value] || value;
+  return Object.values(LEARNING_STAGES).includes(normalized) ? normalized : "";
 }
 
 function renderSessionStep(step, updates = {}) {
@@ -346,6 +376,7 @@ function renderSessionStep(step, updates = {}) {
   };
   state.sessionFlow.stage = explicitStage || inferLearningStage(step, state.sessionFlow, session);
   state.sessionFlow.learningStage = state.sessionFlow.stage;
+  updateAppHeaderForStage(state.sessionFlow.stage);
   if (state.currentSession) {
     state.currentSession.learning_stage = state.sessionFlow.stage;
   }
@@ -376,11 +407,52 @@ function renderSessionStep(step, updates = {}) {
   animateStepTransition();
 }
 
+function updateAppHeaderForStage(stage) {
+  const normalized = normalizeLearningStage(stage) || LEARNING_STAGES.UPLOAD_IMAGE;
+  const topbar = document.querySelector(".app-topbar");
+  const label = document.querySelector(".upload-progress-head strong");
+  const dots = [...document.querySelectorAll(".upload-progress-dots span")];
+  const stepMap = {
+    [LEARNING_STAGES.UPLOAD_IMAGE]: 1,
+    [LEARNING_STAGES.INITIAL_ATTEMPT]: 1,
+    [LEARNING_STAGES.FIRST_FEEDBACK]: 2,
+    [LEARNING_STAGES.REUSABLE_LANGUAGE]: 2,
+    [LEARNING_STAGES.MISSING_VISUAL_AREAS]: 2,
+    [LEARNING_STAGES.COVERAGE_LAYERS]: 3,
+    [LEARNING_STAGES.LAYER_SUCCESS]: 3,
+    [LEARNING_STAGES.COVERAGE_COMPLETE]: 5,
+    [LEARNING_STAGES.POLISH_STAGE]: 5,
+    [LEARNING_STAGES.FINAL_REVEAL]: 5,
+    [LEARNING_STAGES.QUIZ]: 5,
+  };
+  const stepNumber = stepMap[normalized] || 1;
+  topbar?.classList.toggle("upload-app-header", true);
+  if (label) {
+    label.textContent = `Step ${stepNumber} of 5`;
+  }
+  dots.forEach((dot, index) => {
+    dot.classList.toggle("active", index < stepNumber);
+  });
+}
+
+function updateAppHeaderForCoverageFocus(current, total) {
+  const topbar = document.querySelector(".app-topbar");
+  const label = document.querySelector(".upload-progress-head strong");
+  const dots = [...document.querySelectorAll(".upload-progress-dots span")];
+  topbar?.classList.add("upload-app-header");
+  if (label) {
+    label.textContent = `Focus ${Math.max(1, current)} of ${Math.max(1, total)}`;
+  }
+  dots.forEach((dot, index) => {
+    dot.classList.toggle("active", index < Math.max(1, current));
+  });
+}
+
 function inferLearningStage(step, flow, session) {
   const current = normalizeLearningStage(flow?.stage);
   const upgrade = flow?.articulationUpgrade;
-  if (flow?.quizLaunchStarted || current === LEARNING_STAGES.QUIZ_READY) {
-    return LEARNING_STAGES.QUIZ_READY;
+  if (flow?.quizLaunchStarted || current === LEARNING_STAGES.QUIZ) {
+    return LEARNING_STAGES.QUIZ;
   }
   if (upgrade?.finalized || flow?.finalPolishedText || current === LEARNING_STAGES.FINAL_REVEAL) {
     return LEARNING_STAGES.FINAL_REVEAL;
@@ -392,7 +464,7 @@ function inferLearningStage(step, flow, session) {
     return LEARNING_STAGES.INITIAL_ATTEMPT;
   }
   if (step === "feedback") {
-    return LEARNING_STAGES.COVERAGE_FEEDBACK;
+    return current || LEARNING_STAGES.FIRST_FEEDBACK;
   }
   const latestAttempt = (flow?.attempts || []).at(-1) || {};
   const latestFeedback = latestAttempt.feedback || flow?.feedback || {};
@@ -415,25 +487,30 @@ function setFocusedSessionLayout(focused) {
 
 function renderStepProgress(activeStep) {
   const steps = [
+    ["upload_image", "Image"],
     ["initial_attempt", "Attempt"],
-    ["coverage_feedback", "Coverage"],
+    ["first_feedback", "Feedback"],
+    ["reusable_language", "Language"],
+    ["missing_visual_areas", "Missing"],
     ["coverage_layers", "Layers"],
+    ["layer_success", "Success"],
+    ["coverage_complete", "Covered"],
     ["polish_stage", "Polish"],
     ["final_reveal", "Final"],
-    ["quiz_ready", "Quiz"],
+    ["quiz", "Quiz"],
   ];
   const activeStage = normalizeLearningStage(activeStep) || normalizeLearningStage(state.sessionFlow?.stage) || LEARNING_STAGES.INITIAL_ATTEMPT;
   const stageAliases = {
-    image: LEARNING_STAGES.INITIAL_ATTEMPT,
+    image: LEARNING_STAGES.UPLOAD_IMAGE,
     guided_write: LEARNING_STAGES.INITIAL_ATTEMPT,
     write: LEARNING_STAGES.INITIAL_ATTEMPT,
-    submit: LEARNING_STAGES.COVERAGE_FEEDBACK,
-    feedback: LEARNING_STAGES.COVERAGE_FEEDBACK,
+    submit: LEARNING_STAGES.FIRST_FEEDBACK,
+    feedback: LEARNING_STAGES.FIRST_FEEDBACK,
     improve: LEARNING_STAGES.COVERAGE_LAYERS,
-    coverage_complete: LEARNING_STAGES.COVERAGE_LAYERS,
+    coverage_complete: LEARNING_STAGES.COVERAGE_COMPLETE,
     upgrade: LEARNING_STAGES.POLISH_STAGE,
-    quiz: LEARNING_STAGES.QUIZ_READY,
-    reward: LEARNING_STAGES.QUIZ_READY,
+    quiz: LEARNING_STAGES.QUIZ,
+    reward: LEARNING_STAGES.QUIZ,
   };
   const activeKey = stageAliases[activeStage] || activeStage;
   const activeIndex = steps.findIndex(([key]) => key === activeStep);
@@ -702,68 +779,49 @@ function onLanguageCardClick(event) {
 }
 
 function renderWriteStep(session) {
-  const hintGroups = buildWritingHintGroups(session);
-  const starterOptions = getWritingStarters(session);
-  const starterText = starterOptions[0] || "The image shows ";
-  const draftText = state.sessionFlow.explanation || starterText;
+  const nounChips = getVisibleNounChips(session);
+  const draftText = state.sessionFlow.explanation || "";
   els.sessionDetailPanel.innerHTML = `
-    <div class="journey-shell focused-step-shell">
-      ${renderStepProgress("guided_write")}
-      <section class="focused-writing-card">
+    <div class="journey-shell focused-step-shell initial-attempt-shell">
+      ${renderStepProgress(LEARNING_STAGES.INITIAL_ATTEMPT)}
+      <section class="focused-writing-card initial-attempt-card">
+        <div class="focused-copy">
+          <h3>Describe this image in 1-2 sentences.</h3>
+          <p class="muted initial-attempt-helper">Start simple. You can improve it later.</p>
+        </div>
         <div class="focused-image-frame">
           <img class="focused-image-preview" src="${session.image_url}" alt="Image to describe">
         </div>
-        <div class="focused-copy">
-          <p class="eyebrow">Guided Write</p>
-          <h3>Describe this in 1 sentence.</h3>
-        </div>
-        <div class="mini-suggestion-row sentence-starter-row" aria-label="Sentence starters">
-          ${starterOptions
-            .map(
-              (starter, index) => `
-                <button class="sentence-starter-button ${index === 0 ? "selected" : ""}" type="button" data-insert-starter="${escapeHtml(starter)}">
-                  ${escapeHtml(starter.trim())}
-                </button>
-              `
-            )
-            .join("")}
-        </div>
-        <textarea
-          id="learnerExplanationInput"
-          class="focused-writing-input guided-writing-input"
-          rows="4"
-          maxlength="900"
-          placeholder="${escapeHtml(starterText)}"
-        >${escapeHtml(draftText)}</textarea>
         ${
-          hintGroups.some((group) => group.items.length)
+          nounChips.length
             ? `
-              <section class="guided-hint-panel" aria-label="Writing hints">
-                ${hintGroups
-                  .filter((group) => group.items.length)
-                  .map(
-                    (group) => `
-                      <div class="guided-hint-group">
-                        <span class="field-label">${escapeHtml(group.label)}</span>
-                        <div class="mini-suggestion-row">
-                          ${group.items
-                            .map(
-                              (item) => `
-                                <button class="guidance-pill hint-chip-button" type="button" data-insert-hint="${escapeHtml(item)}">
-                                  ${escapeHtml(item)}
-                                </button>
-                              `
-                            )
-                            .join("")}
-                        </div>
-                      </div>
-                    `
-                  )
-                  .join("")}
+              <section class="starter-ideas-panel">
+                <h4>Starter ideas <span>(tap to use)</span></h4>
+                <div class="mini-suggestion-row sentence-starter-row" aria-label="Starter ideas">
+                  ${nounChips
+                    .map(
+                      (noun) => `
+                        <button class="sentence-starter-button noun-chip-button" type="button" data-insert-hint="${escapeHtml(noun)}">
+                          ${escapeHtml(noun)}
+                        </button>
+                      `
+                    )
+                    .join("")}
+                </div>
               </section>
             `
             : ""
         }
+        <div class="writing-box-wrap">
+        <textarea
+          id="learnerExplanationInput"
+          class="focused-writing-input guided-writing-input"
+          rows="4"
+          maxlength="250"
+          placeholder="Write your description here..."
+        >${escapeHtml(draftText)}</textarea>
+          <div id="initialAttemptCount" class="character-count">${draftText.length}/250</div>
+        </div>
         <button id="submitWritingButton" class="primary-button journey-primary-button" type="button">
           Submit
         </button>
@@ -773,15 +831,6 @@ function renderWriteStep(session) {
 
   document.getElementById("submitWritingButton").addEventListener("click", () => {
     submitExplanationFeedback(session, { mode: "first" });
-  });
-  els.sessionDetailPanel.querySelectorAll("[data-insert-starter]").forEach((button) => {
-    button.addEventListener("click", () => {
-      replaceWritingStarter(button.dataset.insertStarter || "");
-      playTapAnimation(button);
-      els.sessionDetailPanel.querySelectorAll("[data-insert-starter]").forEach((item) => {
-        item.classList.toggle("selected", item === button);
-      });
-    });
   });
   els.sessionDetailPanel.querySelectorAll("[data-insert-hint]").forEach((button) => {
     button.addEventListener("click", () => {
@@ -799,6 +848,26 @@ function renderWriteStep(session) {
   window.setTimeout(() => {
     writingInput?.focus();
   }, 50);
+}
+
+function getVisibleNounChips(session) {
+  const analysis = session?.analysis || {};
+  return uniqueWritingHints([
+    ...(analysis.objects || []).map((item) => item?.name || item),
+    ...(analysis.environment_details || []).flatMap((item) => nounChipsFromText(item)),
+    analysis.environment,
+  ])
+    .map((item) => cleanUiText(item).replace(/^(the|a|an)\s+/i, ""))
+    .filter((item) => item && item.split(/\s+/).length <= 3)
+    .slice(0, 8);
+}
+
+function nounChipsFromText(value) {
+  return cleanUiText(value)
+    .replace(/[.!?]+$/g, "")
+    .split(/\s*,\s*|\s+and\s+/)
+    .map((item) => item.trim())
+    .filter(Boolean);
 }
 
 function getWritingStarters(session) {
@@ -989,47 +1058,55 @@ function renderFeedbackStep(session, feedback) {
 }
 
 function renderInitialAttemptFeedbackStep(session, feedback, initialFeedback) {
+  const latestAttempt = (state.sessionFlow.attempts || []).at(-1) || {};
+  const originalAttempt = latestAttempt.text || state.sessionFlow.explanation || "";
   const missingAreas = cleanUiList(initialFeedback.missing_visual_areas || feedback.missing_details || [], 5);
   const reusable = initialFeedback.reusable_language || {};
-  const languageGroups = [
-    ["Nouns", reusable.nouns],
-    ["Verbs", reusable.verbs],
-    ["Phrases", reusable.phrases],
-    ["Collocations", reusable.collocations],
-    ["Sentence structures", reusable.sentence_structures],
-    ["Positioning", reusable.positioning_language],
-    ["Atmosphere", reusable.atmosphere_language],
-  ]
-    .map(([label, items]) => ({ label, items: cleanUiList(items, 5) }))
-    .filter((group) => group.items.length);
+  const reusableGroups = buildFirstFeedbackReusableGroups(reusable);
+  const flatLanguageGroups = reusableGroups.map((group) => ({ label: group.label, items: group.items }));
+  const upgradeItems = buildInitialFeedbackUpgradeItems(initialFeedback, feedback, flatLanguageGroups);
+  const enhancedMarkup = renderEnhancedAttemptMarkup(
+    initialFeedback.covered_enhancement || feedback.better_version || "",
+    upgradeItems
+  );
 
   els.sessionDetailPanel.innerHTML = `
-    <div class="journey-shell focused-step-shell diagnosis-shell">
-      ${renderStepProgress(LEARNING_STAGES.COVERAGE_FEEDBACK)}
-      <section class="feedback-screen-card fast-feedback-card diagnosis-card">
-        <section class="diagnosis-line-card diagnosis-good-card coach-reveal" ${coachRevealStyle(0)}>
-          <p><span aria-hidden="true">✓</span> ${escapeHtml(initialFeedback.acknowledgement || "Nice start — you described part of the image.")}</p>
+    <div class="journey-shell focused-step-shell diagnosis-shell first-feedback-shell">
+      <section class="feedback-screen-card fast-feedback-card diagnosis-card first-feedback-card">
+        <section class="encouragement-banner coach-reveal" ${coachRevealStyle(0)}>
+          <span aria-hidden="true">✦</span>
+          <p>${escapeHtml(initialFeedback.acknowledgement || "Nice start - you described part of the image.")}</p>
         </section>
 
-        <section class="simple-feedback-section coach-reveal" ${coachRevealStyle(1)}>
-          <h4>Enhanced only from your answer</h4>
-          <p>${escapeHtml(initialFeedback.covered_enhancement || feedback.better_version || "")}</p>
+        <div class="feedback-section-title coach-reveal" ${coachRevealStyle(1)}>
+          <span aria-hidden="true">✧</span>
+          <h3>AI enhancement</h3>
+        </div>
+
+        <section class="enhanced-version-card coach-reveal" ${coachRevealStyle(2)}>
+          <div class="enhanced-version-text">${enhancedMarkup}</div>
+          <small>Tap any highlighted part to learn why it is stronger.</small>
+        </section>
+
+        <section class="original-attempt-card coach-reveal" ${coachRevealStyle(3)}>
+          <h4>Your original attempt</h4>
+          <p>${escapeHtml(originalAttempt)}</p>
         </section>
 
         ${
-          languageGroups.length
+          reusableGroups.some((group) => group.items.length)
             ? `
-              <section class="simple-feedback-section phrase-usage-section coach-reveal" ${coachRevealStyle(2)}>
-                <h4>Reusable language from that upgrade</h4>
-                <div class="language-feedback-grid initial-language-grid">
-                  ${languageGroups
+              <section class="reusable-language-card coach-reveal" ${coachRevealStyle(4)}>
+                <h4>Reusable language</h4>
+                <div class="first-feedback-language-grid">
+                  ${reusableGroups
                     .map(
                       (group) => `
-                        <div>
-                          <span class="field-label">${escapeHtml(group.label)}</span>
-                          <div class="mini-suggestion-row">
-                            ${group.items.map((item) => `<span class="phrase-chip suggested">${escapeHtml(item)}</span>`).join("")}
-                          </div>
+                        <div class="first-feedback-language-column">
+                          <span>${escapeHtml(group.label)}</span>
+                          ${group.items.length
+                            ? group.items.map((item) => `<span class="phrase-chip suggested">${escapeHtml(item)}</span>`).join("")
+                            : `<small class="muted">More soon</small>`}
                         </div>
                       `
                     )
@@ -1040,16 +1117,19 @@ function renderInitialAttemptFeedbackStep(session, feedback, initialFeedback) {
             : ""
         }
 
-        <section class="diagnosis-line-card diagnosis-issue-card coach-reveal" ${coachRevealStyle(3)}>
-          <p><strong>Missing visual areas:</strong> ${escapeHtml(
-            missingAreas.length
-              ? `You could also describe ${joinReadableList(missingAreas)}.`
-              : "You covered the main visual areas; next we can polish the wording."
-          )}</p>
+        <section class="missing-visual-card coach-reveal" ${coachRevealStyle(5)}>
+          <h4>You could also describe</h4>
+          <div class="missing-visual-grid">
+            ${
+              missingAreas.length
+                ? missingAreas.map((item) => `<span class="missing-visual-chip"><span>${escapeHtml(missingAreaIcon(item))}</span>${escapeHtml(item)}</span>`).join("")
+                : `<span class="missing-visual-chip">No major visual area is missing</span>`
+            }
+          </div>
         </section>
 
         <button id="feedbackPrimaryButton" class="primary-button journey-primary-button diagnosis-cta coach-reveal" ${coachRevealStyle(4)} type="button">
-          Start Guided Coverage Layers
+          Continue Exploring
         </button>
       </section>
     </div>
@@ -1059,6 +1139,173 @@ function renderInitialAttemptFeedbackStep(session, feedback, initialFeedback) {
     renderSessionStep("improve", { stage: LEARNING_STAGES.COVERAGE_LAYERS });
     window.scrollTo({ top: 0, behavior: "smooth" });
   });
+  bindInitialFeedbackUpgradePopovers();
+}
+
+function buildFirstFeedbackReusableGroups(reusable = {}) {
+  const nouns = uniqueWritingHints([
+    ...cleanUiList(reusable.nouns, 4),
+    ...cleanUiList(reusable.collocations, 4).filter((item) => !/\b(with|in|on|near|behind|beside)\b/i.test(item)),
+  ]).slice(0, 4);
+  const phrases = uniqueWritingHints([
+    ...cleanUiList(reusable.phrases, 4),
+    ...cleanUiList(reusable.positioning_language, 3),
+    ...cleanUiList(reusable.atmosphere_language, 2),
+  ]).slice(0, 4);
+  const structures = uniqueWritingHints([
+    ...cleanUiList(reusable.sentence_structures, 3),
+    "The image shows ___.",
+  ]).slice(0, 3);
+  return [
+    { label: "Nouns", items: nouns },
+    { label: "Phrases", items: phrases },
+    { label: "Sentence structures", items: structures },
+  ];
+}
+
+function missingAreaIcon(value) {
+  const text = normalizeClientText(value);
+  if (/\b(tree|branch|leaf|leaves|plant|greenery)\b/.test(text)) return "🌳";
+  if (/\broad|lane|marking|street\b/.test(text)) return "🛣️";
+  if (/\bshade|shadow|atmosphere|sky|cloud\b/.test(text)) return "☁️";
+  if (/\bvehicle|car|motorcycle|bike\b/.test(text)) return "🏍️";
+  if (/\bbuilding|background|house|architecture\b/.test(text)) return "🏠";
+  return "•";
+}
+
+function buildInitialFeedbackUpgradeItems(initialFeedback = {}, feedback = {}, languageGroups = []) {
+  const enhancement = cleanUiText(initialFeedback.covered_enhancement || feedback.better_version || "");
+  const directTerms = uniqueWritingHints(languageGroups.flatMap((group) => group.items || []))
+    .filter((item) => item && enhancement.toLowerCase().includes(item.toLowerCase()));
+  const fallbackTerms = enhancement
+    .match(/\b[a-z][a-z-]*(?:\s+[a-z][a-z-]*){1,3}\b/gi)
+    ?.filter((phrase) => !/^(the image|image shows|there is|there are)$/i.test(phrase))
+    ?.slice(0, 4) || [];
+  return uniqueWritingHints([...directTerms, ...fallbackTerms])
+    .slice(0, 5)
+    .map((phrase, index) => ({
+      id: `initial-upgrade-${index}`,
+      phrase,
+      why: initialUpgradeWhy(phrase),
+      meaning: initialUpgradeMeaning(phrase),
+      example: initialUpgradeExample(phrase),
+    }));
+}
+
+function renderEnhancedAttemptMarkup(text, upgradeItems = []) {
+  const rawText = String(text || "");
+  if (!rawText || !upgradeItems.length) {
+    return escapeHtml(rawText);
+  }
+  const spans = [];
+  const lowered = rawText.toLowerCase();
+  upgradeItems.forEach((item, index) => {
+    const phrase = cleanUiText(item.phrase);
+    if (!phrase) return;
+    const start = lowered.indexOf(phrase.toLowerCase());
+    if (start < 0) return;
+    const end = start + phrase.length;
+    if (spans.some((span) => start < span.end && end > span.start)) return;
+    spans.push({ start, end, item, index });
+  });
+  if (!spans.length) {
+    return escapeHtml(rawText);
+  }
+  spans.sort((a, b) => a.start - b.start);
+  let cursor = 0;
+  let markup = "";
+  spans.forEach((span) => {
+    markup += escapeHtml(rawText.slice(cursor, span.start));
+    const phrase = rawText.slice(span.start, span.end);
+    markup += `
+      <span class="initial-upgrade-highlight" role="button" tabindex="0" data-initial-upgrade="${span.index}" aria-expanded="false">
+        ${escapeHtml(phrase)}
+        <span class="initial-upgrade-popover" role="dialog">
+          <button class="initial-upgrade-close" type="button" data-close-initial-upgrade aria-label="Close">×</button>
+          <strong>${escapeHtml(phrase)}</strong>
+          <span class="popover-label">Meaning</span>
+          <small>${escapeHtml(span.item.meaning)}</small>
+          <span class="popover-label">Why it’s stronger</span>
+          <small>${escapeHtml(span.item.why)}</small>
+          <span class="popover-label">Example</span>
+          <em>${escapeHtml(span.item.example)}</em>
+          <button type="button" data-apply-initial-upgrade="${span.index}">Apply</button>
+        </span>
+      </span>
+    `;
+    cursor = span.end;
+  });
+  markup += escapeHtml(rawText.slice(cursor));
+  return markup;
+}
+
+function bindInitialFeedbackUpgradePopovers() {
+  els.sessionDetailPanel.querySelectorAll("[data-initial-upgrade]").forEach((target) => {
+    target.addEventListener("click", (event) => {
+      if (event.target.closest("[data-apply-initial-upgrade]")) {
+        return;
+      }
+      toggleInitialUpgradePopover(target);
+    });
+    target.addEventListener("keydown", (event) => {
+      if (event.key !== "Enter" && event.key !== " ") return;
+      event.preventDefault();
+      toggleInitialUpgradePopover(target);
+    });
+  });
+  els.sessionDetailPanel.querySelectorAll("[data-apply-initial-upgrade]").forEach((button) => {
+    button.addEventListener("click", (event) => {
+      event.stopPropagation();
+      const target = button.closest("[data-initial-upgrade]");
+      target?.classList.add("applied");
+      target?.classList.remove("active");
+      target?.setAttribute("aria-expanded", "false");
+      button.textContent = "Applied";
+      button.disabled = true;
+    });
+  });
+  els.sessionDetailPanel.querySelectorAll("[data-close-initial-upgrade]").forEach((button) => {
+    button.addEventListener("click", (event) => {
+      event.stopPropagation();
+      const target = button.closest("[data-initial-upgrade]");
+      target?.classList.remove("active");
+      target?.setAttribute("aria-expanded", "false");
+    });
+  });
+}
+
+function toggleInitialUpgradePopover(target) {
+  const active = target.classList.contains("active");
+  els.sessionDetailPanel.querySelectorAll(".initial-upgrade-highlight.active").forEach((item) => {
+    item.classList.remove("active");
+    item.setAttribute("aria-expanded", "false");
+  });
+  if (!active) {
+    target.classList.add("active");
+    target.setAttribute("aria-expanded", "true");
+  }
+}
+
+function initialUpgradeWhy(phrase) {
+  const text = normalizeClientText(phrase);
+  if (text.includes("lined with")) return "It connects the road and buildings naturally.";
+  if (text.includes("quiet") || text.includes("urban")) return "It adds a clearer quality without adding new image facts.";
+  if (text.includes("residential")) return "It makes the building type more specific.";
+  return "This phrase sounds more natural and expressive.";
+}
+
+function initialUpgradeMeaning(phrase) {
+  const text = normalizeClientText(phrase);
+  if (text.includes("lined with")) return "Use it when things continue along both sides of a place.";
+  if (text.includes("urban")) return "Use it for scenes connected to a city or town.";
+  if (text.includes("residential")) return "Use it for places where people live.";
+  return "Reusable meaning: a stronger way to describe the same idea.";
+}
+
+function initialUpgradeExample(phrase) {
+  const text = cleanUiText(phrase);
+  if (normalizeClientText(text).includes("lined with")) return "Example: The street is lined with shops.";
+  return `Example: The scene shows ${text}.`;
 }
 
 function joinReadableList(items = []) {
@@ -1615,7 +1862,7 @@ function renderImproveStep(session) {
   const latestAttempt = attempts[attempts.length - 1] || null;
   const latestFeedback = latestAttempt?.feedback || state.sessionFlow.feedback || {};
   const latestText = latestAttempt?.text || state.sessionFlow.explanation || "";
-  const rewriteDraft = latestText;
+  const rewriteDraft = evolvingParagraphText(latestText, latestFeedback);
   const attemptNumber = attempts.length;
   const coverageLayers = buildCoverageLayerState(latestFeedback, session, latestText);
   state.sessionFlow.coverageLayers = coverageLayers;
@@ -1628,7 +1875,9 @@ function renderImproveStep(session) {
     upgradeSuggestions
   );
   state.sessionFlow.articulationUpgrade = upgradeState;
-  const showUpgrade = coverageLayers.complete && !upgradeState.finalized;
+  const coverageAcknowledged = Boolean(state.sessionFlow.coverageCompleteAcknowledged);
+  const showCoverageComplete = coverageLayers.complete && !coverageAcknowledged && !upgradeState.finalized;
+  const showUpgrade = coverageLayers.complete && coverageAcknowledged && !upgradeState.finalized;
   const showMoveOption = coverageLayers.complete && upgradeState.finalized;
   const showEditor = !coverageLayers.complete;
   const ready = showMoveOption;
@@ -1646,6 +1895,8 @@ function renderImproveStep(session) {
       ? LEARNING_STAGES.POLISH_STAGE
       : coverageLayers.complete
         ? LEARNING_STAGES.COVERAGE_COMPLETE
+        : state.sessionFlow.stage === LEARNING_STAGES.LAYER_SUCCESS
+          ? LEARNING_STAGES.LAYER_SUCCESS
         : LEARNING_STAGES.COVERAGE_LAYERS;
   const currentLayerNumber = coverageLayers.currentIndex >= 0 ? coverageLayers.currentIndex + 1 : Math.max(1, attemptNumber);
   const layerTotal = Math.max(coverageLayers.layers?.length || 0, currentLayerNumber);
@@ -1653,6 +1904,8 @@ function renderImproveStep(session) {
     ? "Final reveal"
     : showUpgrade
       ? "Polish stage"
+      : stage === LEARNING_STAGES.LAYER_SUCCESS
+        ? "Layer success"
       : `Focus ${currentLayerNumber} of ${layerTotal}`;
   const headerTitle = showMoveOption
     ? "Look how far it improved"
@@ -1666,43 +1919,46 @@ function renderImproveStep(session) {
   if (state.currentSession) {
     state.currentSession.learning_stage = stage;
   }
+  if (showEditor) {
+    updateAppHeaderForCoverageFocus(currentLayerNumber, layerTotal);
+  } else {
+    updateAppHeaderForStage(stage);
+  }
 
   els.sessionDetailPanel.innerHTML = `
-    <div class="journey-shell focused-step-shell">
-      ${renderStepProgress(stage)}
-      <section class="focused-writing-card improve-action-card">
-        <div class="focused-image-frame">
-          <img class="focused-image-preview" src="${session.image_url}" alt="Image to describe">
-        </div>
-        <div class="focused-copy">
-          <p class="eyebrow">${escapeHtml(headerEyebrow)}</p>
-          <h3>${escapeHtml(headerTitle)}</h3>
-          ${
-            headerSupport
-              ? `<p class="muted">${escapeHtml(headerSupport)}</p>`
-              : ""
-          }
-        </div>
-        ${renderCoverageLayerProgress(coverageLayers)}
-        ${showEditor ? renderImproveEditor({ rewriteDraft, currentFocus, hintGroups, articulation: coverageLayers, escalation }) : ""}
+    <div class="journey-shell focused-step-shell ${showEditor || showCoverageComplete ? "coverage-layer-shell" : ""}">
+      ${showEditor || showCoverageComplete ? "" : renderStepProgress(stage)}
+      <section class="focused-writing-card improve-action-card ${showEditor ? "coverage-layer-card" : ""}">
+        ${showEditor ? renderImproveEditor({ rewriteDraft, currentFocus, hintGroups, articulation: coverageLayers, escalation, session, latestText, latestFeedback }) : ""}
+        ${showCoverageComplete ? renderCoverageCompleteStage(latestFeedback, session, coverageLayers) : ""}
         ${showUpgrade ? renderArticulationUpgradeStage(upgradeState, upgradeSuggestions) : ""}
         ${showMoveOption && upgradeState.finalized ? renderFinalPolishedReveal(upgradeState, upgradeSuggestions, latestFeedback, session) : ""}
         ${showEditor ? `
           <button id="submitImproveButton" class="primary-button journey-primary-button" type="button">
-            Add This Layer
+            ${(escalation.level || 1) > 1 ? "Try Again" : "Add This Detail"}
           </button>
         ` : ""}
       </section>
     </div>
   `;
 
-  document.getElementById("submitImproveButton")?.addEventListener("click", () => {
-    const improvedText = document.getElementById("learnerImproveInput").value.trim();
-    if (!improvedText) {
-      showToast("Write your improved version first.", true);
+  document.getElementById("submitImproveButton")?.addEventListener("click", async () => {
+    const detailText = document.getElementById("learnerImproveInput").value.trim();
+    if (!detailText) {
+      showToast("Add one detail first.", true);
       return;
     }
+    const baseText = cleanUiText(document.getElementById("evolvingParagraph")?.textContent || rewriteDraft);
+    const improvedText = mergeParagraphDetail(baseText, detailText);
+    const preview = document.getElementById("liveMergePreview");
+    preview?.classList.add("merge-insert-glow");
+    showCoverageLayerSuccess(coverageLayers.currentLayer);
+    await new Promise((resolve) => window.setTimeout(resolve, 420));
     requestImprovementFeedback(session, state.sessionFlow.explanation, improvedText);
+  });
+  document.getElementById("upgradeMyArticulationButton")?.addEventListener("click", () => {
+    state.sessionFlow.coverageCompleteAcknowledged = true;
+    renderImproveStep(session);
   });
   document.getElementById("moveToNextCoverageLayerButton")?.addEventListener("click", () => {
     moveToNextCoverageLayer();
@@ -1763,7 +2019,12 @@ function renderImproveStep(session) {
     });
   });
   window.setTimeout(() => {
-    document.getElementById("learnerImproveInput")?.focus();
+    const detailInput = document.getElementById("learnerImproveInput");
+    detailInput?.focus();
+    detailInput?.addEventListener("input", () => updateLiveMergePreview(rewriteDraft));
+    document.getElementById("editEvolvingParagraphButton")?.addEventListener("click", () => {
+      enableEvolvingParagraphEdit(rewriteDraft);
+    });
     positionInlineUpgradePopovers();
   }, 50);
 }
@@ -1818,28 +2079,364 @@ function positionInlineUpgradePopover(target) {
   }
 }
 
-function renderImproveEditor({ rewriteDraft, currentFocus, hintGroups, articulation, escalation = {} }) {
+function renderImproveEditor({ rewriteDraft, currentFocus, hintGroups, articulation, escalation = {}, session = {}, latestText = "", latestFeedback = {} }) {
   const focus = buildLayerFocusDisplay(articulation?.currentLayer, currentFocus, escalation);
-  const stuckUpgrade = buildStuckLayerUpgrade(rewriteDraft, articulation?.currentLayer, escalation);
+  const supportActive = (escalation.level || 1) > 1;
+  const hints = supportActive
+    ? progressiveSupportHints(hintGroups, escalation, currentFocus).slice(0, 6)
+    : focusedMiniHints(hintGroups).slice(0, 6);
+  const nextLayer = nextCoverageLayer(articulation);
+  const originalAttempt = (state.sessionFlow.attempts || [])[0]?.text || state.sessionFlow.explanation || latestText || "";
   return `
-    <section class="improve-focus-card coach-reveal" ${coachRevealStyle(0)}>
-      <span class="field-label">Current focus</span>
-      <h4>${escapeHtml(focus.title)}</h4>
-      <p>${escapeHtml(focus.support)}</p>
-      ${renderLayerSupportMessage(escalation)}
-      <small>${escapeHtml(focus.microPrompt)}</small>
+    ${renderTinyCoverageProgress(articulation)}
+    <details class="original-attempt-collapse coach-reveal" ${coachRevealStyle(0)}>
+      <summary>
+        <span aria-hidden="true">♙</span>
+        <strong>Your original attempt</strong>
+      </summary>
+      <p>${escapeHtml(originalAttempt)}</p>
+    </details>
+
+    ${supportActive ? renderProgressiveSupportBanner(escalation, currentFocus) : ""}
+
+    <section class="evolving-paragraph-section coach-reveal" ${coachRevealStyle(supportActive ? 2 : 1)}>
+      <div class="coverage-section-head">
+        <h3>Your evolving description</h3>
+        <span aria-hidden="true">🔊</span>
+      </div>
+      <div id="evolvingParagraph" class="evolving-paragraph-card" tabindex="0">
+        ${renderEvolvingParagraphMarkup(rewriteDraft, latestFeedback, session)}
+      </div>
+      <button id="editEvolvingParagraphButton" class="edit-paragraph-button" type="button">✎ Edit paragraph</button>
     </section>
-    ${renderMoveForwardLayerOption(articulation, escalation)}
-    ${renderImproveHintsCard(hintGroups)}
-    ${renderStuckLayerUpgrade(stuckUpgrade)}
-    <textarea
-      id="learnerImproveInput"
-      class="focused-writing-input guided-writing-input"
-      rows="6"
-      maxlength="900"
-      placeholder="Keep your answer and add this layer..."
-    >${escapeHtml(rewriteDraft)}</textarea>
+
+    <section class="single-focus-card coach-reveal" ${coachRevealStyle(2)}>
+      <div class="single-focus-icon" aria-hidden="true">${escapeHtml(focusVisualIcon(articulation?.currentLayer, focus.title))}</div>
+      <div>
+        <span>Current focus</span>
+        <h4>${escapeHtml(cleanFocusTitle(focus.title))}</h4>
+        <p>${escapeHtml(progressiveSupportHelper(focus, escalation, currentFocus) || "Add one more clear detail.")}</p>
+        ${nextLayer ? `<small>Next: ${escapeHtml(shortFocusPreview(nextLayer))}</small>` : ""}
+      </div>
+      <span class="single-focus-arrow" aria-hidden="true">›</span>
+    </section>
+
+    ${hints.length ? `
+      <div class="coverage-mini-hints coach-reveal" ${coachRevealStyle(3)}>
+        ${hints.map((hint) => `<button class="phrase-chip phrase-insert-chip improve-hint-chip" type="button" data-insert-phrase="${escapeHtml(hint)}">${escapeHtml(hint)}</button>`).join("")}
+      </div>
+    ` : ""}
+
+    <section class="continuation-input-section coach-reveal" ${coachRevealStyle(4)}>
+      <h4>Continue your description</h4>
+      <div class="continuation-input-wrap">
+        <textarea
+          id="learnerImproveInput"
+          class="continuation-input"
+          rows="2"
+          maxlength="260"
+          placeholder="Add one more detail..."
+        ></textarea>
+        <span class="continuation-mic" aria-hidden="true">🎙</span>
+      </div>
+    </section>
+
+    <section class="live-merge-section coach-reveal" ${coachRevealStyle(5)}>
+      <h4><span aria-hidden="true">◉</span> Live preview</h4>
+      <div id="liveMergePreview" class="live-merge-card">
+        ${renderEvolvingParagraphMarkup(rewriteDraft, latestFeedback, session)}
+      </div>
+    </section>
   `;
+}
+
+function renderProgressiveSupportBanner(escalation = {}, currentFocus = "") {
+  const level = escalation.level || 1;
+  const message = cleanUiText(escalation.message) || progressiveSupportTone(level, currentFocus);
+  return `
+    <section class="progressive-support-banner coach-reveal" ${coachRevealStyle(1)}>
+      <span aria-hidden="true">✦</span>
+      <div>
+        <strong>Let's make this easier.</strong>
+        <p>${escapeHtml(message)}</p>
+      </div>
+    </section>
+  `;
+}
+
+function progressiveSupportTone(level, currentFocus = "") {
+  const focus = cleanUiText(currentFocus);
+  if (level >= 5) return focus || "Try one short supported sentence.";
+  if (level >= 4) return "Use the sentence frame and fill in the blanks.";
+  if (level >= 3) return "Choose one option that matches what you see.";
+  return focus || "Look closely at one visible clue.";
+}
+
+function progressiveSupportHelper(focus = {}, escalation = {}, currentFocus = "") {
+  const level = escalation.level || 1;
+  const guidance = cleanUiText(currentFocus);
+  if (level >= 2 && guidance) {
+    return guidance.replace(/^👀\s*/u, "Look closely: ");
+  }
+  return focus.microPrompt || focus.support || "";
+}
+
+function progressiveSupportHints(hintGroups = [], escalation = {}, currentFocus = "") {
+  const level = escalation.level || 1;
+  const focus = cleanUiText(currentFocus);
+  const baseHints = focusedMiniHints(hintGroups);
+  const promptHints = [];
+  if (level >= 3 && focus.includes(":")) {
+    promptHints.push(...focus.split(":").slice(1).join(":").replace(/[?.]/g, "").split(/,|\bor\b/));
+  }
+  if (level >= 4 && focus.includes("___")) {
+    promptHints.unshift(focus);
+  }
+  if (level >= 5 && /^try mentioning/i.test(focus)) {
+    promptHints.unshift(focus.replace(/^try mentioning that\s+/i, "").replace(/^try mentioning\s+/i, ""));
+  }
+  return uniqueWritingHints([...promptHints, ...baseHints])
+    .map((item) => cleanUiText(item))
+    .filter((item) => item && item.length <= 90)
+    .slice(0, 6);
+}
+
+function evolvingParagraphText(latestText, latestFeedback = {}) {
+  return cleanUiText(
+    latestFeedback?.initial_attempt_feedback?.covered_enhancement
+    || latestFeedback?.better_version
+    || latestText
+  );
+}
+
+function mergeParagraphDetail(base, detail) {
+  const cleanBase = cleanUiText(base).replace(/\s+$/g, "");
+  const cleanDetail = cleanUiText(detail);
+  if (!cleanBase) return ensureSentencePunctuation(cleanDetail);
+  if (!cleanDetail) return ensureSentencePunctuation(cleanBase);
+  const separator = /[.!?]$/.test(cleanBase) ? " " : ". ";
+  return `${cleanBase}${separator}${ensureSentencePunctuation(cleanDetail)}`.trim();
+}
+
+function ensureSentencePunctuation(value) {
+  const text = cleanUiText(value);
+  return text && !/[.!?]$/.test(text) ? `${text}.` : text;
+}
+
+function renderEvolvingParagraphMarkup(text, feedback = {}, session = {}) {
+  const raw = cleanUiText(text);
+  const highlightTerms = uniqueWritingHints([
+    ...cleanUiList(feedback?.initial_attempt_feedback?.reusable_language?.phrases || [], 5),
+    ...cleanUiList(feedback?.initial_attempt_feedback?.reusable_language?.collocations || [], 5),
+    ...cleanUiList(feedback?.initial_attempt_feedback?.reusable_language?.positioning_language || [], 4),
+    ...((session?.analysis?.phrases || []).map((item) => item?.phrase || item)),
+  ]).filter((item) => item && raw.toLowerCase().includes(item.toLowerCase()));
+  return highlightTextTerms(raw, highlightTerms.slice(0, 5), "evolving-ai-highlight");
+}
+
+function highlightTextTerms(text, terms, className) {
+  const raw = String(text || "");
+  if (!raw || !terms?.length) return escapeHtml(raw);
+  const spans = [];
+  const lowered = raw.toLowerCase();
+  terms
+    .slice()
+    .sort((a, b) => b.length - a.length)
+    .forEach((term) => {
+      const needle = String(term || "").toLowerCase();
+      const start = lowered.indexOf(needle);
+      if (start < 0) return;
+      const end = start + needle.length;
+      if (spans.some((span) => start < span.end && end > span.start)) return;
+      spans.push({ start, end });
+    });
+  spans.sort((a, b) => a.start - b.start);
+  let cursor = 0;
+  let html = "";
+  spans.forEach((span) => {
+    html += escapeHtml(raw.slice(cursor, span.start));
+    html += `<mark class="${className}">${escapeHtml(raw.slice(span.start, span.end))}</mark>`;
+    cursor = span.end;
+  });
+  html += escapeHtml(raw.slice(cursor));
+  return html;
+}
+
+function focusedMiniHints(hintGroups = []) {
+  return uniqueWritingHints(
+    simplifyHintGroups(hintGroups)
+      .flatMap((group) => group.items || [])
+      .filter((item) => cleanUiText(item).split(/\s+/).length <= 6)
+  ).slice(0, 6);
+}
+
+function nextCoverageLayer(articulation) {
+  const layers = articulation?.layers || [];
+  const currentIndex = Number(articulation?.currentIndex ?? -1);
+  return layers.find((layer, index) => index > currentIndex && !layer.completed) || null;
+}
+
+function renderTinyCoverageProgress(articulation) {
+  const total = Math.max(1, articulation?.layers?.length || 1);
+  const current = Math.max(1, (articulation?.currentIndex || 0) + 1);
+  return `
+    <div class="tiny-coverage-progress">
+      <span>Focus ${current} of ${total}</span>
+      <div>
+        ${Array.from({ length: Math.min(total, 6) }, (_, index) => `<i class="${index + 1 === current ? "active" : index + 1 < current ? "done" : ""}"></i>`).join("")}
+      </div>
+    </div>
+  `;
+}
+
+function cleanFocusTitle(title) {
+  return cleanUiText(title)
+    .replace(/^[^\w]+/, "")
+    .replace(/\?$/g, "")
+    .replace(/^(Add detail about|Add more detail about|Describe|Explain the appearance of)\s+/i, "")
+    || "One clear detail";
+}
+
+function focusVisualIcon(layer, title = "") {
+  const text = normalizeClientText(`${layer?.category || ""} ${layer?.visualFocus || ""} ${layer?.label || ""} ${title}`);
+  if (/\b(building|apartment|residential|architecture)\b/.test(text)) return "🏢";
+  if (/\b(tree|plant|greenery|leaf|branches)\b/.test(text)) return "🌿";
+  if (/\b(light|shadow|shade|sun)\b/.test(text)) return "☀️";
+  if (/\b(road|street|vehicle|car|motorcycle)\b/.test(text)) return "🛣️";
+  return "✦";
+}
+
+function updateLiveMergePreview(baseText) {
+  const preview = document.getElementById("liveMergePreview");
+  const input = document.getElementById("learnerImproveInput");
+  if (!preview || !input) return;
+  const editableBase = cleanUiText(document.getElementById("evolvingParagraph")?.textContent || baseText);
+  const merged = mergeParagraphDetail(editableBase, input.value);
+  const highlightTerms = [...document.querySelectorAll("#evolvingParagraph mark")]
+    .map((item) => cleanUiText(item.textContent))
+    .filter(Boolean);
+  preview.innerHTML = highlightTextTerms(merged, highlightTerms, "evolving-ai-highlight");
+}
+
+function enableEvolvingParagraphEdit(originalText) {
+  const paragraph = document.getElementById("evolvingParagraph");
+  if (!paragraph) return;
+  paragraph.setAttribute("contenteditable", "true");
+  paragraph.classList.add("editable");
+  paragraph.addEventListener("input", () => updateLiveMergePreview(originalText));
+  paragraph.focus();
+  const range = document.createRange();
+  range.selectNodeContents(paragraph);
+  range.collapse(false);
+  const selection = window.getSelection();
+  selection?.removeAllRanges();
+  selection?.addRange(range);
+}
+
+function showCoverageLayerSuccess(layer) {
+  const label = cleanFocusTitle(shortFocusPreview(layer) || layer?.label || "Detail");
+  showToast(`✓ ${label} added`);
+  awardLocalXp(10);
+}
+
+function renderCoverageCompleteStage(feedback = {}, session = {}, coverageLayers = {}) {
+  const items = coverageCompleteChecklistItems(feedback, session, coverageLayers);
+  return `
+    <section class="coverage-complete-stage coach-reveal" ${coachRevealStyle(0)}>
+      <div class="coverage-success-hero">
+        <div class="success-sparkles" aria-hidden="true">
+          <i></i><i></i><i></i><i></i><i></i><i></i>
+        </div>
+        <div class="success-checkmark" aria-hidden="true">✓</div>
+        <h3><span aria-hidden="true">✓</span> Scene covered</h3>
+        <p>You described the important parts of the image.</p>
+      </div>
+
+      <section class="coverage-checklist-card">
+        <h4>What you covered</h4>
+        <div class="coverage-checklist-items">
+          ${items.map((item) => `
+            <div class="coverage-check-item">
+              <span class="coverage-check-icon" aria-hidden="true">${escapeHtml(item.icon)}</span>
+              <strong>${escapeHtml(item.label)}</strong>
+              <span class="coverage-check-done" aria-hidden="true">✓</span>
+            </div>
+          `).join("")}
+        </div>
+      </section>
+
+      <section class="coverage-transition-card">
+        <span aria-hidden="true">✦</span>
+        <p>Great job! Now let's make it <strong>sound more natural.</strong></p>
+      </section>
+
+      <button id="upgradeMyArticulationButton" class="primary-button journey-primary-button coverage-complete-cta" type="button">
+        ✦ Upgrade My Articulation
+      </button>
+    </section>
+  `;
+}
+
+function coverageCompleteChecklistItems(feedback = {}, session = {}, coverageLayers = {}) {
+  const coverageParts = Array.isArray(feedback?.coverage?.imageParts) ? feedback.coverage.imageParts : [];
+  const partLabels = coverageParts
+    .filter((part) => isCoveragePartCovered(part) || coverageLayers?.complete)
+    .map((part) => cleanUiText(part?.name || part?.description || part?.type || ""))
+    .filter(Boolean);
+  const analysis = session?.analysis || {};
+  const fallbackLabels = [
+    ...((analysis.objects || []).map((item) => cleanUiText(item?.name || item))),
+    analysis.environment,
+    ...(analysis.environment_details || []),
+    primaryAtmosphereHint(analysis),
+  ].filter(Boolean);
+  const labels = uniqueWritingHints([...partLabels, ...fallbackLabels])
+    .map(coverageChecklistLabel)
+    .filter(Boolean);
+  const preferred = prioritizeCoverageChecklist(labels);
+  return preferred.slice(0, 5).map((label) => ({
+    label,
+    icon: coverageChecklistIcon(label),
+  }));
+}
+
+function coverageChecklistLabel(value) {
+  const text = normalizeClientText(value);
+  if (!text) return "";
+  if (/\b(building|apartment|house|architecture|residential)\b/.test(text)) return "Buildings";
+  if (/\b(tree|greenery|plant|leaf|leaves|branches|bush)\b/.test(text)) return "Greenery";
+  if (/\b(road|street|lane|path|sidewalk)\b/.test(text)) return "Road";
+  if (/\b(atmosphere|mood|shade|shadow|sunlight|light|peaceful|busy|quiet|calm)\b/.test(text)) return "Atmosphere";
+  if (/\b(background|setting|environment|place|area)\b/.test(text)) return "Setting";
+  if (/\b(vehicle|car|motorcycle|bike|traffic)\b/.test(text)) return "Vehicles";
+  if (/\b(person|people|man|woman|child)\b/.test(text)) return "People";
+  if (/\b(composition|foreground|background|position|layout)\b/.test(text)) return "Composition";
+  return titleCaseWords(cleanUiText(value).split(/\s+/).slice(0, 3).join(" "));
+}
+
+function titleCaseWords(value) {
+  return cleanUiText(value).replace(/\b\w/g, (letter) => letter.toUpperCase());
+}
+
+function prioritizeCoverageChecklist(labels = []) {
+  const unique = uniqueWritingHints(labels);
+  const order = ["Buildings", "Greenery", "Road", "Atmosphere", "Setting", "Vehicles", "People", "Composition"];
+  return [
+    ...order.filter((item) => unique.includes(item)),
+    ...unique.filter((item) => !order.includes(item)),
+  ];
+}
+
+function coverageChecklistIcon(label = "") {
+  const text = normalizeClientText(label);
+  if (text.includes("building")) return "🏢";
+  if (text.includes("greenery") || text.includes("tree")) return "🌳";
+  if (text.includes("road") || text.includes("street")) return "🛣️";
+  if (text.includes("atmosphere") || text.includes("light")) return "☁️";
+  if (text.includes("vehicle")) return "🚗";
+  if (text.includes("people")) return "👤";
+  if (text.includes("composition")) return "◐";
+  return "✓";
 }
 
 function renderMoveForwardLayerOption(coverageLayers, escalation = {}) {
@@ -1900,27 +2497,60 @@ function moveToNextCoverageLayer() {
 function renderArticulationUpgradeStage(upgradeState, suggestions) {
   const answer = upgradeState.answer || upgradeState.original || "";
   const handled = new Set([...(upgradeState.applied || []), ...(upgradeState.skipped || [])]);
-  const activeSuggestions = suggestions.filter((item) => !handled.has(item.id));
-  const annotated = buildInlineUpgradeMarkup(answer, activeSuggestions);
+  const activeSuggestions = suggestions.filter((item) => !handled.has(item.id)).slice(0, 5);
+  const annotated = buildInlineUpgradeMarkup(answer, activeSuggestions, upgradeState.lastAppliedNewText || "");
+  const originalAttempt = (state.sessionFlow.attempts || [])[0]?.text || upgradeState.original || "";
+  const upgradeTags = richnessUpgradeTypes(activeSuggestions.length ? activeSuggestions : suggestions).slice(0, 5);
   return `
-    <section class="articulation-upgrade-card richness-upgrade-card coach-reveal" ${coachRevealStyle(1)}>
-      <div class="upgrade-heading">
-        <span class="field-label">Upgrade your articulation</span>
-        <h4>Tap a highlight to make it richer.</h4>
-        <p class="muted">Choose only the upgrades you like. Your meaning stays yours.</p>
+    <section class="articulation-polish-stage coach-reveal" ${coachRevealStyle(0)}>
+      <details class="original-attempt-collapse polish-original-attempt">
+        <summary>
+          <span aria-hidden="true">♙</span>
+          <strong>Your original attempt</strong>
+        </summary>
+        <p>${escapeHtml(originalAttempt)}</p>
+      </details>
+
+      <div class="polish-stage-heading">
+        <div>
+          <h3>Upgrade your articulation</h3>
+          <p>Tap highlighted phrases to improve your description.</p>
+        </div>
+        <span aria-hidden="true">✦</span>
       </div>
-      <div class="inline-upgrade-editor">
+
+      <section class="articulation-upgrade-card richness-upgrade-card">
+        <div class="coverage-section-head polish-paragraph-head">
+          <h4>Your evolving description</h4>
+          <span aria-hidden="true">🔊</span>
+        </div>
         <div class="inline-upgrade-answer ${upgradeState.justApplied ? "replacement-flash" : ""}" aria-live="polite">
           ${annotated.markup || escapeHtml(answer)}
         </div>
+
+        <div class="polish-focus-panel">
+          <div class="single-focus-icon" aria-hidden="true">🪄</div>
+          <div>
+            <strong>Polish focus</strong>
+            <p>We'll improve flow, word choice and clarity.</p>
+          </div>
+        </div>
+
+        ${upgradeTags.length ? `
+          <div class="polish-upgrade-tags" aria-label="What we'll improve">
+            ${upgradeTags.map((tag) => `<span>${escapeHtml(polishTagIcon(tag))} ${escapeHtml(tag)}</span>`).join("")}
+          </div>
+        ` : ""}
+
         ${
           annotated.count
-            ? `<p class="muted inline-upgrade-help">${annotated.count} small upgrade${pluralize(annotated.count)} available.</p>`
-            : `<p class="muted inline-upgrade-help">All upgrades handled. Ready for the reveal.</p>`
+            ? `<p class="muted inline-upgrade-help">${annotated.count} optional upgrade${pluralize(annotated.count)}. Apply only the ones you want.</p>`
+            : `<p class="polish-complete-note"><span aria-hidden="true">✓</span> You handled the available upgrades. Ready for the reveal.</p>`
         }
-      </div>
-      <button id="finishArticulationUpgradeButton" class="secondary-button" type="button">
-        ${annotated.count ? "Preview final version" : "Show final reveal"}
+      </section>
+
+      <button id="finishArticulationUpgradeButton" class="primary-button journey-primary-button" type="button">
+        ✦ Reveal Polished Version
       </button>
     </section>
   `;
@@ -1938,19 +2568,35 @@ function richnessUpgradeTypes(suggestions = []) {
   return uniqueWritingHints((suggestions || []).map((item) => labels[item.type] || upgradeTypeLabel(item.type))).slice(0, 5);
 }
 
-function buildInlineUpgradeMarkup(answer, suggestions) {
+function polishTagIcon(label = "") {
+  const text = normalizeClientText(label);
+  if (text.includes("visual")) return "🌿";
+  if (text.includes("atmosphere")) return "✨";
+  if (text.includes("position")) return "📍";
+  if (text.includes("sentence") || text.includes("flow")) return "🧠";
+  if (text.includes("vocabulary")) return "🎨";
+  return "✦";
+}
+
+function buildInlineUpgradeMarkup(answer, suggestions, appliedText = "") {
   const text = String(answer || "");
   if (!text) {
     return { markup: "", count: 0 };
   }
   const targets = nonOverlappingUpgradeTargets(text, suggestions);
-  if (!targets.length) {
-    return { markup: escapeHtml(text), count: 0 };
-  }
+  const appliedTarget = buildAppliedUpgradeTarget(text, appliedText, targets);
+  const allTargets = [...targets, ...(appliedTarget ? [appliedTarget] : [])].sort((a, b) => a.start - b.start);
+  if (!allTargets.length) return { markup: escapeHtml(text), count: 0 };
 
   let cursor = 0;
   const pieces = [];
-  targets.forEach((target) => {
+  allTargets.forEach((target) => {
+    if (target.applied) {
+      pieces.push(escapeHtml(text.slice(cursor, target.start)));
+      pieces.push(`<mark class="inline-upgrade-applied">${escapeHtml(text.slice(target.start, target.end))}</mark>`);
+      cursor = target.end;
+      return;
+    }
     const item = target.item;
     pieces.push(escapeHtml(text.slice(cursor, target.start)));
     pieces.push(`
@@ -1964,10 +2610,9 @@ function buildInlineUpgradeMarkup(answer, suggestions) {
         aria-label="Show upgrade for ${escapeHtml(text.slice(target.start, target.end))}"
       >
         <span class="inline-upgrade-popover">
-          <button class="inline-upgrade-choice" type="button" data-apply-upgrade="${escapeHtml(item.id)}">
-            ${escapeHtml(item.newText)}
-            <small>${escapeHtml(upgradeTypeLabel(item.type))} · +${item.xp} XP</small>
-          </button>
+          <strong>${escapeHtml(item.newText)}</strong>
+          <small>${escapeHtml(upgradeTypeReason(item.type))}</small>
+          <button class="inline-upgrade-choice" type="button" data-apply-upgrade="${escapeHtml(item.id)}">Apply</button>
           <button class="inline-upgrade-dismiss" type="button" data-skip-upgrade="${escapeHtml(item.id)}" aria-label="Dismiss upgrade">×</button>
         </span>
         <span class="inline-upgrade-original">${escapeHtml(text.slice(target.start, target.end))}</span>
@@ -1980,6 +2625,16 @@ function buildInlineUpgradeMarkup(answer, suggestions) {
     markup: pieces.join(""),
     count: targets.length,
   };
+}
+
+function buildAppliedUpgradeTarget(text, appliedText, activeTargets = []) {
+  const phrase = cleanUiText(appliedText);
+  if (!phrase) return null;
+  const start = text.toLowerCase().indexOf(phrase.toLowerCase());
+  if (start < 0) return null;
+  const end = start + phrase.length;
+  if (activeTargets.some((target) => start < target.end && end > target.start)) return null;
+  return { start, end, applied: true };
 }
 
 function nonOverlappingUpgradeTargets(answer, suggestions) {
@@ -2016,54 +2671,99 @@ function renderFinalPolishedReveal(upgradeState, suggestions = [], feedback = {}
   const firstAttempt = (state.sessionFlow.attempts || [])[0]?.text || upgradeState.original || "";
   const finalAnswer = upgradeState.answer || upgradeState.original || firstAttempt;
   const learnedLanguage = finalRevealReusableLanguage(upgradeState, suggestions, feedback, session);
-  const appliedCount = (upgradeState.applied || []).length;
-  const phraseCount = learnedLanguage.length;
-  const progressItems = [
-    "Scene covered",
-    appliedCount ? `Articulation upgraded` : "Articulation reviewed",
-    `${phraseCount} reusable phrase${pluralize(phraseCount)} learned`,
-  ];
+  const reward = finalRevealRewardSummary(upgradeState, learnedLanguage, feedback, session, finalAnswer);
   return `
-    <section class="articulation-upgrade-card upgrade-preview-card final-reveal-card coach-reveal" ${coachRevealStyle(1)}>
-      <div class="upgrade-heading">
-        <span class="field-label">Final reveal</span>
-        <h4>Look how far your description improved.</h4>
-        <p class="muted">You kept your own meaning and made it clearer, fuller, and more natural.</p>
-      </div>
-      <div class="final-progress-row">
-        ${progressItems.map((item) => `<span>${escapeHtml(item)}</span>`).join("")}
-      </div>
-      <div class="answer-comparison-grid">
-        <div class="previous-answer-box">
-          <span class="field-label">Original first attempt</span>
-          <p>${escapeHtml(firstAttempt)}</p>
+    <section class="final-reveal-stage coach-reveal" ${coachRevealStyle(0)}>
+      <div class="final-reveal-hero">
+        <div class="success-sparkles final-sparkles" aria-hidden="true">
+          <i></i><i></i><i></i><i></i><i></i><i></i>
         </div>
-        <div class="previous-answer-box improved-version-box">
-          <span class="field-label">Final evolved version</span>
-          <p>${escapeHtml(finalAnswer)}</p>
-        </div>
+        <div class="final-flame-badge" aria-hidden="true">🔥</div>
+        <h3>🔥 Your description evolved</h3>
+        <p>You turned a simple start into a clear, natural description.</p>
       </div>
-      ${
-        learnedLanguage.length
-          ? `
-            <div class="final-language-box">
-              <span class="field-label">Reusable language learned</span>
-              <div class="mini-suggestion-row">
-                ${learnedLanguage.map((item) => `<span class="phrase-chip suggested">${escapeHtml(item)}</span>`).join("")}
-              </div>
-            </div>
-          `
-          : ""
-      }
-      <div class="final-reward-box">
+
+      <div class="final-comparison-stack">
+        <section class="final-before-card">
+          <span class="final-section-pill">Before</span>
+          <div>
+            <small>Your first attempt</small>
+            <p>${escapeHtml(firstAttempt)}</p>
+          </div>
+          <span class="final-card-icon" aria-hidden="true">♙</span>
+        </section>
+
+        <div class="final-down-arrow" aria-hidden="true">↓</div>
+
+        <section class="final-after-card">
+          <div class="final-after-head">
+            <span class="final-section-pill after">After ✦</span>
+            <span class="final-card-icon" aria-hidden="true">🔊</span>
+          </div>
+          <small>Your final description</small>
+          <p>${highlightTextTerms(finalAnswer, learnedLanguage, "final-learned-highlight")}</p>
+          ${
+            learnedLanguage.length
+              ? `
+                <div class="final-language-box">
+                  <span aria-hidden="true">📖</span>
+                  <div>
+                    <strong>Reusable language you learned</strong>
+                    <div class="mini-suggestion-row">
+                      ${learnedLanguage.map((item) => `<span class="phrase-chip suggested">${escapeHtml(item)}</span>`).join("")}
+                    </div>
+                  </div>
+                </div>
+              `
+              : ""
+          }
+        </section>
+      </div>
+
+      <section class="final-reward-summary" aria-label="Reward summary">
         <div>
-          <span class="field-label">Progress reward</span>
-          <strong>+${Number(upgradeState.xp || 0)} XP</strong>
+          <span aria-hidden="true">✦</span>
+          <strong>+${reward.xp} XP</strong>
+          <small>Earned</small>
         </div>
-        <button id="continueToQuizButton" class="primary-button" type="button">Continue to Quiz</button>
-      </div>
+        <div>
+          <span aria-hidden="true">🎯</span>
+          <strong>${reward.focuses}</strong>
+          <small>Focuses Completed</small>
+        </div>
+        <div>
+          <span aria-hidden="true">💬</span>
+          <strong>${reward.phrases}</strong>
+          <small>Phrases Learned</small>
+        </div>
+      </section>
+
+      <button id="continueToQuizButton" class="primary-button journey-primary-button final-quiz-cta" type="button">
+        ✦ Continue to Quiz
+      </button>
     </section>
   `;
+}
+
+function finalRevealRewardSummary(upgradeState = {}, learnedLanguage = [], feedback = {}, session = {}, finalAnswer = "") {
+  const focusCount = finalRevealFocusCount(feedback, session, finalAnswer);
+  const phraseCount = learnedLanguage.length;
+  const coverageXp = Math.max(0, focusCount * 10 + (state.sessionFlow.allLayersBonusAwarded ? 20 : 0));
+  const polishXp = Number(upgradeState.xp || 0);
+  return {
+    xp: Math.max(polishXp + coverageXp, polishXp, 0),
+    focuses: focusCount,
+    phrases: phraseCount,
+  };
+}
+
+function finalRevealFocusCount(feedback = {}, session = {}, finalAnswer = "") {
+  const coverageParts = Array.isArray(feedback?.coverage?.imageParts) ? feedback.coverage.imageParts : [];
+  const coveredParts = coverageParts.filter((part) => isCoveragePartCovered(part)).length;
+  const rewardedLayers = (state.sessionFlow.layerRewards || []).length;
+  const checklist = coverageCompleteChecklistItems(feedback, session, { complete: true }).length;
+  const sentenceCount = cleanUiText(finalAnswer).split(/[.!?]+/).filter((item) => item.trim()).length;
+  return Math.max(coveredParts, rewardedLayers, checklist, Math.min(5, sentenceCount));
 }
 
 function finalRevealReusableLanguage(upgradeState = {}, suggestions = [], feedback = {}, session = {}) {
@@ -3591,6 +4291,17 @@ function upgradeTypeLabel(type) {
   }[type] || "Upgrade";
 }
 
+function upgradeTypeReason(type) {
+  return {
+    vocabulary: "🎨 Rich vocabulary",
+    visual_quality: "🌿 More vivid description",
+    verb: "🧠 More precise action",
+    positioning: "📍 Clearer placement",
+    sentence_flow: "🧠 More natural phrasing",
+    atmosphere: "✨ Stronger atmosphere",
+  }[type] || "✨ More natural wording";
+}
+
 function polishRewardLabel(type) {
   return {
     vocabulary: "stronger wording",
@@ -3620,6 +4331,7 @@ function normalizeArticulationUpgradeState(existing, answer, suggestions) {
       xp: 0,
       finalized: false,
       justApplied: false,
+      lastAppliedNewText: "",
     };
   }
   return {
@@ -3632,6 +4344,7 @@ function normalizeArticulationUpgradeState(existing, answer, suggestions) {
     finalized: Boolean(existing.finalized),
     multiBonusAwarded: Boolean(existing.multiBonusAwarded),
     justApplied: Boolean(existing.justApplied),
+    lastAppliedNewText: cleanUiText(existing.lastAppliedNewText),
   };
 }
 
@@ -3659,13 +4372,10 @@ function applyArticulationUpgrade(id, suggestions) {
   upgradeState.skipped = upgradeState.skipped.filter((item) => item !== id);
   upgradeState.xp += upgrade.xp;
   upgradeState.justApplied = true;
+  upgradeState.lastAppliedNewText = upgrade.newText;
   awardLocalXp(upgrade.xp);
   showToast(`+${upgrade.xp} XP — ${polishRewardLabel(upgrade.type)}`);
   maybeAwardUpgradeBonus(upgradeState);
-  if (allArticulationUpgradesHandled(upgradeState, suggestions)) {
-    finalizeArticulationUpgrade(upgradeState, suggestions);
-    return;
-  }
   renderSessionStep("improve", { articulationUpgrade: upgradeState });
 }
 
@@ -3686,10 +4396,6 @@ function skipArticulationUpgrade(id, suggestions) {
   upgradeState.answer = currentUpgradeAnswer();
   upgradeState.skipped = uniqueWritingHints([...upgradeState.skipped, id]);
   upgradeState.justApplied = false;
-  if (allArticulationUpgradesHandled(upgradeState, suggestions)) {
-    finalizeArticulationUpgrade(upgradeState, suggestions);
-    return;
-  }
   renderSessionStep("improve", { articulationUpgrade: upgradeState });
 }
 
@@ -4641,11 +5347,22 @@ function replaceWritingStarter(starter) {
 
 function limitWritingInput(event) {
   const input = event.target;
+  if (input.id === "learnerExplanationInput") {
+    input.value = String(input.value || "").slice(0, 250);
+    const count = document.getElementById("initialAttemptCount");
+    if (count) {
+      count.textContent = `${input.value.length}/250`;
+    }
+  }
   const sentences = String(input.value || "").match(/[^.!?]+[.!?]*/g) || [];
-  if (sentences.length <= 6) {
+  if (sentences.length <= 2) {
     return;
   }
-  input.value = sentences.slice(0, 6).join("").trimStart();
+  input.value = sentences.slice(0, 2).join("").trimStart();
+  const count = document.getElementById("initialAttemptCount");
+  if (count) {
+    count.textContent = `${input.value.length}/250`;
+  }
 }
 
 function buildImprovePhraseSuggestions(session, feedback, currentText) {
@@ -4857,6 +5574,7 @@ function insertPhraseIntoImproveInput(phrase) {
   const needsSpace = value && !/\s$/.test(input.value);
   input.value = `${value}${needsSpace ? " " : ""}${phrase}`;
   input.focus();
+  input.dispatchEvent(new Event("input", { bubbles: true }));
 }
 
 function highlightSessionPhrases(text, session) {
@@ -5109,14 +5827,24 @@ function resetUploadPreview() {
   els.imagePreview.src = "";
   els.imagePreviewShell.classList.add("hidden");
   els.uploadPlaceholder.classList.remove("hidden");
-  els.fileNameLabel.textContent = `JPG, PNG, WEBP, or GIF up to ${formatBytes(state.settings.max_upload_bytes)}`;
+  els.uploadProcessingLabel?.classList.add("hidden");
+  els.fileNameLabel.textContent = "JPG, PNG up to 10MB";
 }
 
-function onFileChange() {
+function openImagePicker(mode = "gallery") {
+  if (mode === "camera") {
+    els.imageInput.setAttribute("capture", "environment");
+  } else {
+    els.imageInput.removeAttribute("capture");
+  }
+  els.imageInput.click();
+}
+
+async function onFileChange() {
   const file = els.imageInput.files[0];
   resetUploadPreview();
   if (!file) {
-    els.analyzeButton.disabled = true;
+    els.analyzeButton.disabled = !state.user;
     return;
   }
 
@@ -5126,6 +5854,11 @@ function onFileChange() {
   els.uploadPlaceholder.classList.add("hidden");
   els.fileNameLabel.textContent = `${file.name} (${formatBytes(file.size)})`;
   els.analyzeButton.disabled = !state.user;
+  if (!state.user) {
+    showToast("Please log in first.", true);
+    return;
+  }
+  await startImageAnalysis();
 }
 
 function openNewSessionComposer() {
@@ -5133,7 +5866,7 @@ function openNewSessionComposer() {
   closeLanguageModal();
   resetUploadPreview();
   els.analyzeForm.reset();
-  els.analyzeButton.disabled = true;
+  els.analyzeButton.disabled = !state.user;
   renderLearnPlaceholder();
   window.scrollTo({ top: 0, behavior: "smooth" });
 }
@@ -5241,7 +5974,11 @@ async function onResendOtp() {
 }
 
 async function onAnalyze(event) {
-  event.preventDefault();
+  event?.preventDefault?.();
+  await startImageAnalysis();
+}
+
+async function startImageAnalysis() {
   if (!state.user) {
     showToast("Please log in first.", true);
     return;
@@ -5253,6 +5990,7 @@ async function onAnalyze(event) {
     return;
   }
 
+  els.uploadProcessingLabel?.classList.remove("hidden");
   setButtonBusy(els.analyzeButton, true, "Preparing...");
   showSessionThinkingState("Preparing guided writing...", [
     "Analyzing the image",
@@ -5315,12 +6053,13 @@ async function onAnalyze(event) {
       renderLearnPlaceholder();
     }
   } finally {
-    setButtonBusy(els.analyzeButton, false, "Start Guided Write");
+    els.uploadProcessingLabel?.classList.add("hidden");
+    setButtonBusy(els.analyzeButton, false, "Choose Image");
   }
 }
 
 async function prepareImageForUpload(file) {
-  const maxBytes = Number(state.settings.max_upload_bytes || 25 * 1024 * 1024);
+  const maxBytes = Math.min(Number(state.settings.max_upload_bytes || 25 * 1024 * 1024), 10 * 1024 * 1024);
   if (!file.type.startsWith("image/")) {
     throw new Error("Please upload an image file.");
   }
@@ -5423,7 +6162,7 @@ async function submitExplanationFeedback(session) {
     renderDashboardContent();
     const feedback = data.feedback || {};
     renderSessionStep("feedback", {
-      stage: data.learning_stage || data.stage || feedback.learning_stage || LEARNING_STAGES.COVERAGE_FEEDBACK,
+      stage: data.learning_stage || data.stage || feedback.learning_stage || LEARNING_STAGES.FIRST_FEEDBACK,
       explanation,
       feedback,
       attempts: [
@@ -5467,6 +6206,12 @@ async function requestImprovementFeedback(session, explanation, improvedText) {
     renderProgressHeader();
     renderDashboardContent();
     const feedback = data.feedback || {};
+    const previousFeedback = (state.sessionFlow.attempts || []).at(-1)?.feedback || state.sessionFlow.feedback || {};
+    const serverStage = normalizeLearningStage(data.learning_stage || data.stage || feedback.learning_stage);
+    const nextStage =
+      serverStage === LEARNING_STAGES.COVERAGE_LAYERS && didCoverageImprove(previousFeedback, feedback)
+        ? LEARNING_STAGES.LAYER_SUCCESS
+        : serverStage || null;
     const attempts = [
       ...(state.sessionFlow.attempts || []),
       {
@@ -5476,7 +6221,7 @@ async function requestImprovementFeedback(session, explanation, improvedText) {
       },
     ];
     renderSessionStep("improve", {
-      stage: data.learning_stage || data.stage || feedback.learning_stage || null,
+      stage: nextStage,
       attempts,
       polishMode: false,
     });
@@ -5490,14 +6235,24 @@ async function requestImprovementFeedback(session, explanation, improvedText) {
   }
 }
 
+function didCoverageImprove(previousFeedback = {}, nextFeedback = {}) {
+  const before = Number(previousFeedback?.coverage_engine?.score || previousFeedback?.coverage?.coveragePercent || previousFeedback?.coverage?.coverageScore || 0);
+  const after = Number(nextFeedback?.coverage_engine?.score || nextFeedback?.coverage?.coveragePercent || nextFeedback?.coverage?.coverageScore || 0);
+  if (after >= before + 8) {
+    return true;
+  }
+  const beforeCovered = new Set(coveredFeedbackTypes(previousFeedback));
+  return coveredFeedbackTypes(nextFeedback).some((type) => !beforeCovered.has(type));
+}
+
 async function startPostImproveQuiz(session) {
   if (state.sessionFlow.quizLaunchStarted) {
     return;
   }
   state.sessionFlow.quizLaunchStarted = true;
-  state.sessionFlow.stage = LEARNING_STAGES.QUIZ_READY;
+  state.sessionFlow.stage = LEARNING_STAGES.QUIZ;
   if (state.currentSession) {
-    state.currentSession.learning_stage = LEARNING_STAGES.QUIZ_READY;
+    state.currentSession.learning_stage = LEARNING_STAGES.QUIZ;
   }
   const button = document.getElementById("continueToQuizButton");
   const attempts = state.sessionFlow.attempts || [];
@@ -5803,6 +6558,11 @@ function renderLearnMode() {
   const showSession = state.learnView === "session" && Boolean(state.currentSession);
   const showCompose = !showSession;
 
+  if (showCompose) {
+    updateAppHeaderForStage(LEARNING_STAGES.UPLOAD_IMAGE);
+  } else {
+    document.querySelector(".app-topbar")?.classList.remove("upload-app-header");
+  }
   els.learnIntro.classList.toggle("hidden", !showCompose);
   els.composePanel.classList.toggle("hidden", !showCompose);
   els.sessionWorkspace.classList.toggle("hidden", !showSession);

@@ -26,6 +26,7 @@ from english_learner_app.review import (
 )
 from english_learner_app.server import (
     apply_progress_event,
+    build_learning_engines_payload,
     build_highlight_terms,
     build_quiz_xp_breakdown,
     learning_stage_from_feedback,
@@ -58,7 +59,7 @@ class AssessmentTests(unittest.TestCase):
 
 
 class LearningStageTests(unittest.TestCase):
-    def test_first_feedback_uses_coverage_feedback_stage(self) -> None:
+    def test_first_feedback_uses_first_feedback_stage(self) -> None:
         feedback = {
             "coverage": {
                 "coveragePercent": 90,
@@ -69,8 +70,23 @@ class LearningStageTests(unittest.TestCase):
         }
         self.assertEqual(
             learning_stage_from_feedback(feedback, attempt_index=1),
-            "coverage_feedback",
+            "first_feedback",
         )
+
+    def test_learning_engines_keep_articulation_locked_until_coverage_complete(self) -> None:
+        feedback = {
+            "coverage": {
+                "coveragePercent": 50,
+                "imageParts": [
+                    {"type": "main_subject", "name": "main subject", "covered": True, "required": True},
+                    {"type": "background", "name": "background", "covered": False, "required": True},
+                ],
+            },
+            "language_quality": {"score": 82},
+        }
+        engines = build_learning_engines_payload(feedback, learning_stage="coverage_layers")
+        self.assertFalse(engines["coverage_engine"]["ready_for_articulation"])
+        self.assertTrue(engines["articulation_engine"]["locked"])
 
     def test_later_feedback_stays_in_layers_until_coverage_is_ready(self) -> None:
         feedback = {
@@ -611,14 +627,14 @@ const feedback = { phrase_usage: { suggested: ["in the background"] } };
 const session = { analysis: { phrases: [{ phrase: "along the road" }] } };
 const html = context.renderFinalPolishedReveal(upgradeState, suggestions, feedback, session);
 
-assert(html.includes("Look how far your description improved."), "reveal should feel rewarding");
-assert(html.includes("Original first attempt"), "should label the original first attempt");
+assert(html.includes("Your description evolved"), "reveal should feel rewarding");
+assert(html.includes("Your first attempt"), "should label the original first attempt");
 assert(html.includes("There is road and trees."), "should show the actual first attempt");
-assert(html.includes("Final evolved version"), "should label the evolved answer");
+assert(html.includes("Your final description"), "should label the evolved answer");
 assert(html.includes("leafy branches"), "should show the final upgraded wording");
-assert(html.includes("Reusable language learned"), "should show reusable language learned");
-assert(html.includes("3 reusable phrases learned"), "progress should count learned reusable language");
-assert(html.includes("+15 XP"), "should show polish XP reward");
+assert(html.includes("Reusable language you learned"), "should show reusable language learned");
+assert(html.includes("3") && html.includes("Phrases Learned"), "progress should count learned reusable language");
+assert(html.includes("XP"), "should show an XP reward");
 assert(html.includes("Continue to Quiz"), "should include quiz CTA");
 """
         result = subprocess.run(
@@ -849,6 +865,22 @@ const escalation = context.buildImproveEscalationContext(session, attempts, issu
 assert(escalation.level === 5, "five attempts should produce level 5 support");
 assert(escalation.canMoveForward === true, "level 5 should allow moving forward");
 assert(!/wrong|failed/i.test(escalation.message), "support message should not use wrong/failed wording");
+
+const hintGroups = context.buildImproveHintGroups(session, feedback, issue, answer, escalation);
+const supportHtml = context.renderImproveEditor({
+  rewriteDraft: "The image shows a quiet road.",
+  currentFocus: context.dynamicTargetPrompt(layer, session, escalation.level),
+  hintGroups,
+  articulation: { currentLayer: layer, layers: [layer], currentIndex: 0 },
+  escalation,
+  session,
+  latestText: answer,
+  latestFeedback: feedback,
+});
+assert(supportHtml.includes("Let's make this easier."), "support state should show a supportive tone banner");
+assert(supportHtml.includes("progressive-support-banner"), "support state should use the progressive support UI");
+assert(supportHtml.includes("Try mentioning"), "direct support should be visible in the updated helper");
+assert(!/wrong|failed/i.test(supportHtml), "support UI should not use punitive language");
 """
         result = subprocess.run(
             ["node", "-e", script],
@@ -913,6 +945,59 @@ assert(gate.complete === true, "gate should complete when the scene is reasonabl
 assert(layers.complete === true, "coverage layers should unlock polish when the gate passes");
 assert(layers.layers.length === 0, "stale first-attempt missing areas should not recreate layers after completion");
 assert(context.isExplanationReady(feedback, session) === true, "ready helper should use the coverage completion gate");
+
+const completeHtml = context.renderCoverageCompleteStage(feedback, session, layers);
+assert(completeHtml.includes("Scene covered"), "coverage complete screen should announce scene coverage");
+assert(completeHtml.includes("You described the important parts of the image."), "coverage complete screen should explain the accomplishment");
+assert(completeHtml.includes("Upgrade My Articulation"), "coverage complete screen should transition into articulation polish");
+assert(completeHtml.includes("Road") && completeHtml.includes("Buildings"), "coverage checklist should summarize covered visual areas");
+"""
+        result = subprocess.run(
+            ["node", "-e", script],
+            cwd=Path(__file__).resolve().parents[1],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    @unittest.skipIf(shutil.which("node") is None, "node is required for static polish UI tests")
+    def test_articulation_polish_requires_active_inline_upgrades(self) -> None:
+        script = r"""
+const fs = require("fs");
+const vm = require("vm");
+const code = fs.readFileSync("english_learner_app/static/app.js", "utf8");
+const context = {
+  document: { addEventListener() {}, getElementById() { return null; }, querySelectorAll() { return []; } },
+  window: { setTimeout() {}, clearTimeout() {} },
+  console,
+  state: { sessionFlow: { attempts: [{ text: "There is a road and buildings." }] } },
+};
+vm.createContext(context);
+vm.runInContext(code, context);
+
+function assert(condition, message) {
+  if (!condition) throw new Error(message);
+}
+
+const suggestions = [
+  { id: "vocab-1", oldText: "buildings", newText: "tall residential buildings", type: "vocabulary", xp: 5 },
+  { id: "atmo-1", oldText: "nice", newText: "calm and inviting", type: "atmosphere", xp: 10 },
+];
+const html = context.renderArticulationUpgradeStage({
+  original: "There is a road and buildings. It looks nice.",
+  answer: "There is a road and buildings. It looks nice.",
+  applied: [],
+  skipped: [],
+  justApplied: false,
+}, suggestions);
+
+assert(html.includes("Upgrade your articulation"), "polish stage should use the requested headline");
+assert(html.includes("Tap highlighted phrases to improve your description."), "polish stage should explain active tapping");
+assert(html.includes("inline-upgrade-target"), "weak phrases should be highlighted inline");
+assert(html.includes(">Apply<"), "popover should include an explicit Apply button");
+assert(html.includes("Reveal Polished Version"), "learner should explicitly move to the reveal");
+assert(!html.includes("textarea"), "polish stage should not be a rewrite form");
 """
         result = subprocess.run(
             ["node", "-e", script],

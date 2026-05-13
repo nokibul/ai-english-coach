@@ -41,13 +41,17 @@ from .utils import (
 )
 
 LEARNING_STAGES = {
+    "upload_image",
     "initial_attempt",
-    "coverage_feedback",
+    "first_feedback",
+    "reusable_language",
+    "missing_visual_areas",
     "coverage_layers",
+    "layer_success",
     "coverage_complete",
     "polish_stage",
     "final_reveal",
-    "quiz_ready",
+    "quiz",
 }
 
 
@@ -316,13 +320,17 @@ def serialize_session_detail(
             "simple_explanation": simple_explanation,
             "natural_explanation": natural_explanation,
             "highlighted_html": highlighted_html,
+            "image_type": summary.get("image_type", "other"),
             "objects": summary.get("objects", []),
             "actions": summary.get("actions", []),
             "environment": summary.get("environment", ""),
             "environment_details": summary.get("environment_details", []),
+            "visual_zones": summary.get("visual_zones", []),
+            "articulation_targets": summary.get("articulation_targets", []),
             "teaching_notes": summary.get("teaching_notes") or summary.get("scene_notes", []),
             "vocabulary": vocabulary or summary.get("vocabulary", []),
             "phrases": phrases or summary.get("phrases", []),
+            "sentence_starters": summary.get("sentence_starters", []),
             "sentence_patterns": summary.get("sentence_patterns", []),
             "quiz_candidates": summary.get("quiz_candidates", []),
             "reusable_language": summary.get("reusable_language", []),
@@ -346,7 +354,7 @@ def serialize_session_detail(
 
 def learning_stage_from_feedback(feedback: dict[str, Any], *, attempt_index: int) -> str:
     if attempt_index <= 1:
-        return "coverage_feedback"
+        return "first_feedback"
     coverage = feedback.get("coverage") if isinstance(feedback.get("coverage"), dict) else {}
     readiness = feedback.get("readiness") if isinstance(feedback.get("readiness"), dict) else {}
     coverage_percent = _safe_int(
@@ -414,6 +422,53 @@ def learning_stage_from_feedback(feedback: dict[str, Any], *, attempt_index: int
         and not _high_priority_missing_parts(missing_parts)
     )
     return "coverage_complete" if enough_coverage else "coverage_layers"
+
+
+def build_learning_engines_payload(
+    feedback: dict[str, Any],
+    *,
+    learning_stage: str,
+) -> dict[str, Any]:
+    coverage = feedback.get("coverage") if isinstance(feedback.get("coverage"), dict) else {}
+    language_quality = (
+        feedback.get("language_quality")
+        if isinstance(feedback.get("language_quality"), dict)
+        else {}
+    )
+    readiness = feedback.get("readiness") if isinstance(feedback.get("readiness"), dict) else {}
+    coverage_percent = _safe_int(
+        coverage.get("coveragePercent")
+        or coverage.get("coverageScore")
+        or feedback.get("coverage_score")
+    )
+    covered_areas = _coverage_area_labels(feedback, covered=True)
+    missing_areas = _coverage_area_labels(feedback, covered=False)
+    coverage_complete = learning_stage == "coverage_complete"
+    return {
+        "coverage_engine": {
+            "purpose": "Checks whether the learner described the important visual parts of the image.",
+            "status": "complete" if coverage_complete else "in_progress",
+            "score": coverage_percent,
+            "level": coverage.get("level", ""),
+            "covered_visual_areas": covered_areas,
+            "missing_visual_areas": missing_areas,
+            "image_parts": coverage.get("imageParts", []),
+            "ready_for_articulation": coverage_complete,
+            "reason": coverage.get("reason") or readiness.get("reason") or "",
+        },
+        "articulation_engine": {
+            "purpose": "Improves how naturally and expressively the learner says the covered idea.",
+            "locked": not coverage_complete,
+            "unlock_reason": (
+                "Coverage is reasonably complete, so expressive polish is available."
+                if coverage_complete
+                else "Full polish stays locked until the important visual areas are covered."
+            ),
+            "language_quality": language_quality,
+            "reusable_language": feedback.get("phrase_usage") or feedback.get("reusableLanguage") or {},
+            "word_phrase_upgrades": feedback.get("word_phrase_upgrades", []),
+        },
+    }
 
 
 def _coverage_part_is_covered(part: dict[str, Any]) -> bool:
@@ -1511,18 +1566,23 @@ async def session_feedback(request: web.Request) -> web.Response:
 
     learning_stage = learning_stage_from_feedback(feedback, attempt_index=attempt_index)
     feedback["learning_stage"] = learning_stage
-    covered_areas = _coverage_area_labels(feedback, covered=True)
-    missing_areas = _coverage_area_labels(feedback, covered=False)
+    engines = build_learning_engines_payload(feedback, learning_stage=learning_stage)
+    coverage_engine = engines["coverage_engine"]
+    articulation_engine = engines["articulation_engine"]
+    feedback["coverage_engine"] = coverage_engine
+    feedback["articulation_engine"] = articulation_engine
     feedback["learning_flow"] = {
         "stage": learning_stage,
         "coverage_complete": learning_stage == "coverage_complete",
         "coverage_before_articulation": True,
         "coverage_focus": "visual_parts",
         "articulation_focus": "natural_polish",
-        "covered_visual_areas": covered_areas,
-        "missing_visual_areas": missing_areas,
-        "reusable_language": feedback.get("phrase_usage") or feedback.get("reusableLanguage") or {},
-        "articulation_locked": learning_stage != "coverage_complete",
+        "covered_visual_areas": coverage_engine["covered_visual_areas"],
+        "missing_visual_areas": coverage_engine["missing_visual_areas"],
+        "reusable_language": articulation_engine["reusable_language"],
+        "articulation_locked": articulation_engine["locked"],
+        "coverage_engine": coverage_engine,
+        "articulation_engine": articulation_engine,
     }
 
     return web.json_response(
