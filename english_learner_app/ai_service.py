@@ -207,6 +207,7 @@ class AIAnalyzer:
             '  "vocabulary": [{"word":"","part_of_speech":"","meaning_simple":"","example":"","frequency_priority":"high"}],\n'
             '  "phrases": [{"phrase":"","meaning_simple":"","example":"","collocation_type":"phrase","reusable":true}],\n'
             '  "sentence_starters": ["The image shows ...", "Here we see ...", "This scene shows ..."],\n'
+            '  "starterHints": [{"label":"","type":"word|phrase|sentence_structure","meaning":"","example":""}],\n'
             '  "sentence_patterns": [{"pattern":"","example":"","usage_note":"","examples":["","",""]}],\n'
             '  "quiz_candidates": [{"quiz_type":"recognition","prompt":"","answer":"","distractors":["","",""],"explanation":""}],\n'
             '  "teaching_notes": [""]\n'
@@ -247,6 +248,23 @@ class AIAnalyzer:
             "- Include 5–8 useful phrases or sentence chunks that can be reused in many photos.\n"
             "- Include 4–6 generic sentence_starters for learners to begin their own description.\n"
             "- sentence_starters must NOT name or explain objects from this image. Good: 'The image shows ...', 'Here we see ...', 'This scene appears to show ...', 'In this picture, ...'. Bad: 'A man is mowing ...', 'The dog is sitting ...'.\n"
+            "- Include starterHints with ONLY 2-3 items total. These are tiny first-writing helpers, not a vocabulary list. Use the exact key starterHints; \"starter_hints\" is also accepted by the app.\n"
+            "- starterHints labels may be concrete visible objects, short useful phrases, or one generic sentence starter. Prefer visually obvious, beginner-friendly, high-signal details that help start the first sentence.\n"
+            "- When visible, prefer at least one higher-value articulation phrase such as 'climbing vines', 'lined with', 'roof overhang', or 'patches of shade' instead of only simple nouns.\n"
+            "- Prefer a balanced mix: one main visible subject and one object/location/action detail when possible.\n"
+            "- Avoid overly abstract labels, uncertain labels, sensitive labels unless obvious and necessary, tiny background details, or too many people descriptions when object/location hints are better.\n"
+            "- For each starterHints item, set type to word, phrase, or sentence_structure.\n"
+            "- starterHints meaning must be one short beginner-friendly usage note. It should explain the label only when it is not immediately obvious.\n"
+            "- Do not write dictionary-style or category-style meanings like 'a thing in the scene' or 'a person or group you can describe.' Say how the label helps describe this photo.\n"
+            "- starterHints examples must be one short natural general example that is NOT about THIS uploaded image.\n"
+            "- The example should show how to use the hint in another simple situation, so learners do not copy it as their answer.\n"
+            "- For word and phrase hints, the example should include the exact label naturally when possible.\n"
+            "- Do not mention visible objects, people, places, colors, or actions from the uploaded image in the example.\n"
+            "- Avoid examples that only say 'The image shows ...' plus the hint, unless the hint is a sentence_structure.\n"
+            "- Bad starterHints meaning: 'A person or group you can describe in the scene.' Good: 'A very small child, usually younger than a teenager. Use this when the person in the image looks very young.'\n"
+            "- Bad starterHints meaning: 'A thing in the scene.' Good: 'A soft place where someone can sit or lie down. Use this when describing where the person is sitting or resting.'\n"
+            "- Bad starterHints example: 'A curtain is visible behind the child.' Good: 'A curtain covers the sunny window.'\n"
+            "- Bad starterHints example: 'The child is sitting on a couch or bed surface.' Good: 'The couch is near the window.'\n"
             "- Phrases should be natural chunks like 'standing next to', 'in the background', 'appears to be', 'on the edge of', 'surrounded by', 'looking toward', 'partially hidden by', 'walking past'.\n"
             "- Include 3–5 rich reusable sentence_patterns for describing similar images.\n"
             "- Sentence patterns should help learners write better sentences, for example 'While ..., ...', 'The main subject appears to be ...', 'In the background, ...', 'The scene gives the impression that ...', 'One detail that stands out is ...'.\n"
@@ -382,7 +400,7 @@ class AIAnalyzer:
                 "- improvedVersion must enhance ONLY what the learner covered. Do not add major missing details yet.\n"
                 "- Example: if the learner says 'There is a road and buildings', improve only that idea, such as 'The image shows a quiet urban road lined with tall buildings.'\n"
                 "- Bad: adding trees, vehicles, sky, atmosphere, people, or other major details when the learner did not mention them.\n"
-                "- Fill initialAttemptFeedback with acknowledgement, coveredEnhancement, reusableLanguageFromEnhancement, and missingVisualAreas.\n"
+                "- Fill initialAttemptFeedback with acknowledgement, coveredEnhancement, improvements, message, reusableLanguageFromEnhancement, and missingVisualAreas.\n"
                 "- missingVisualAreas should name meaningful areas to cover next, but coveredEnhancement must not include them.\n"
                 "- This feedback prepares guided coverage layers; full polish/articulation is locked until coverage is reasonably complete.\n"
             )
@@ -414,8 +432,8 @@ class AIAnalyzer:
             '"nextStepInstructions": ["", "", ""], '
             '"reusableLanguage": {"usedWell": [""], "tryNext": [""], "misused": [{"phrase": "", "note": ""}], "message": ""}, '
             '"missingDetails": ["", "", ""], '
-            '"inlineImprovements": [{"old": "", "new": "", "why": ""}], '
-            '"initialAttemptFeedback": {"acknowledgement": "", "coveredEnhancement": "", "reusableLanguageFromEnhancement": {"nouns": [""], "verbs": [""], "phrases": [""], "collocations": [""], "sentenceStructures": [""], "positioningLanguage": [""], "atmosphereLanguage": [""]}, "missingVisualAreas": [""]}, '
+            '"inlineImprovements": [], '
+            '"initialAttemptFeedback": {"acknowledgement": "", "coveredEnhancement": "", "improvements": [{"id": "", "category": "subject_clarity", "title": "", "currentText": "", "suggestedText": "", "whyItHelps": "", "example": "", "xpReward": 5}], "message": "", "reusableLanguageFromEnhancement": {"nouns": [""], "verbs": [""], "phrases": [""], "collocations": [""], "sentenceStructures": [""], "positioningLanguage": [""], "atmosphereLanguage": [""]}, "missingVisualAreas": [""]}, '
             '"improvedVersion": "" }\n'
             "Rules:\n"
             f"{initial_attempt_rules}"
@@ -461,17 +479,22 @@ class AIAnalyzer:
             "- Feedback must briefly explain the biggest coverage issue and why the score is limited when a cap applies. Keep it to a short coach note, not a report.\n"
             "- Missing details must prioritize in this order: main subject, main action, setting/background, important objects, foreground, mood.\n"
             "- If the answer only covers background, say something like: 'Your English is clear, but you only described the background and missed the main subject and action.'\n"
-            "- Only generate improvedVersion and inlineImprovements when answerValidation.valid is true.\n"
+            "- Only generate improvedVersion and initialAttemptFeedback.improvements when answerValidation.valid is true.\n"
             "- For valid answers, the score is 1-100. Category scores are integers from 1 to 10.\n"
             "- main_issue must be one short sentence naming the biggest improvement area.\n"
             "- what_did_well must contain 1-2 specific positive points.\n"
             "- fix_this_to_improve must contain 2-3 concrete actions, not vague advice.\n"
             "- missing_details must contain up to 3 major missing parts the learner missed, not tiny details.\n"
-            "- inlineImprovements must contain 1-3 direct upgrades from the learner's exact wording.\n"
-            "- For each inlineImprovements item, old must be an exact word or phrase copied from the current learner explanation, so the UI can show it inline.\n"
-            "- Good inlineImprovements examples: {'old':'busy','new':'heavily congested'} or {'old':'many cars','new':'dense traffic'}.\n"
-            "- Do not use generic old values like 'simple wording', 'general word', or 'basic vocabulary'.\n"
-            "- Every array must contain strings only, except misused and inlineImprovements which must contain objects with the requested keys.\n"
+            "- initialAttemptFeedback.improvements must contain 0-3 inline upgrade opportunities for the learner's exact sentence.\n"
+            "- Only give upgrades if a major upgrade is required. If the sentence is already clear enough, return improvements: [] and message: 'Nice work — your sentence is already clear enough to continue.'\n"
+            "- Return an upgrade only when it meaningfully improves subject clarity, sentence flow, natural phrasing, grammar, visual clarity, or removes confusing wording.\n"
+            "- Do NOT return tiny cosmetic changes, random vocabulary swaps, style preferences, or suggestions that may break grammar.\n"
+            "- Each upgrade must preserve the learner's meaning and must NOT add visual details the learner did not mention.\n"
+            "- currentText must be an exact word or phrase copied from the learner's sentence. suggestedText must be the replacement for only that target phrase, not a full rewritten answer unless the full sentence truly needs replacement.\n"
+            "- initialAttemptFeedback.improvements item shape: {id, category, title, currentText, suggestedText, whyItHelps, example, xpReward}. category must be subject_clarity, sentence_flow, natural_phrasing, grammar_fix, or visual_clarity.\n"
+            "- Good upgrade: currentText 'a children close-up', suggestedText 'a close-up of a young child', whyItHelps 'This sounds more natural when describing a person shown closely in an image.'\n"
+            "- inlineImprovements must be an empty array. Do not use inline replacement suggestions for Step 2.\n"
+            "- Every array must contain strings only, except misused and initialAttemptFeedback.improvements which must contain objects with the requested keys.\n"
             "- Never put JSON text, markdown, or code inside string fields.\n"
             "- Do not penalize the learner for using different wording from the reference description.\n"
             "- Reward accurate, clear, natural, well-structured, and reasonably detailed writing even if it does not match the reference wording, but only within the coverage cap.\n"
@@ -727,6 +750,12 @@ class AIAnalyzer:
         initial_feedback = {
             "acknowledgement": acknowledgement,
             "covered_enhancement": covered_enhancement,
+            "improvements": self._normalize_initial_improvement_cards(
+                initial_payload.get("improvements") or initial_payload.get("improvementCards") or [],
+                learner_text=learner_text,
+            ),
+            "message": self._clean_text_value(initial_payload.get("message"))
+            or "Nice work — your sentence is already clear enough to continue.",
             "reusable_language": reusable_language,
             "missing_visual_areas": missing_areas[:5],
             "prepares_coverage_layers": True,
@@ -744,6 +773,57 @@ class AIAnalyzer:
             if missing_areas
             else ["Move to a polish pass for clearer, more natural wording."]
         )
+
+    def _normalize_initial_improvement_cards(self, raw_items: Any, *, learner_text: str) -> list[dict[str, Any]]:
+        items = raw_items if isinstance(raw_items, list) else []
+        allowed = {"subject_clarity", "sentence_flow", "natural_phrasing", "grammar_fix", "visual_clarity"}
+        cards: list[dict[str, Any]] = []
+        for index, item in enumerate(items[:3]):
+            if not isinstance(item, dict):
+                continue
+            suggested = self._clean_text_value(
+                item.get("suggestedText")
+                or item.get("suggested_text")
+                or item.get("replacementText")
+                or item.get("replacement_text")
+                or item.get("newText")
+                or item.get("new")
+                or item.get("suggested")
+            )
+            current = self._clean_text_value(
+                item.get("currentText")
+                or item.get("current_text")
+                or item.get("targetText")
+                or item.get("target_text")
+                or item.get("oldText")
+                or item.get("old")
+            )
+            if not suggested or not current or not re.search(re.escape(current), learner_text, flags=re.IGNORECASE) or normalize_answer(suggested) == normalize_answer(current):
+                continue
+            category = self._clean_text_value(item.get("category"))
+            if category not in allowed:
+                category = "natural_phrasing"
+            try:
+                xp_reward = int(item.get("xpReward") or item.get("xp_reward") or 10)
+            except (TypeError, ValueError):
+                xp_reward = 10
+            why_it_helps = self._clean_text_value(item.get("whyItHelps") or item.get("why_it_helps") or item.get("why") or item.get("reason"))
+            example = self._clean_text_value(item.get("example"))
+            if not why_it_helps or not example:
+                continue
+            cards.append(
+                {
+                    "id": self._clean_text_value(item.get("id")) or f"{category}-{index + 1}",
+                    "category": category,
+                    "title": self._clean_text_value(item.get("title")) or "Useful improvement",
+                    "currentText": current,
+                    "suggestedText": suggested,
+                    "whyItHelps": why_it_helps,
+                    "example": example,
+                    "xpReward": 5,
+                }
+            )
+        return cards
 
     def _covered_area_labels(self, feedback: dict[str, Any]) -> list[str]:
         coverage = feedback.get("coverage") if isinstance(feedback.get("coverage"), dict) else {}
@@ -1814,19 +1894,32 @@ class AIAnalyzer:
             if not isinstance(item, dict):
                 continue
             use = self._clean_text_value(
-                item.get("use") or item.get("new") or item.get("better")
+                item.get("replacementText")
+                or item.get("replacement_text")
+                or item.get("use")
+                or item.get("new")
+                or item.get("better")
             )
             if not use:
                 continue
             instead_of = self._clean_text_value(
-                item.get("instead_of") or item.get("old") or item.get("weak")
+                item.get("targetText")
+                or item.get("target_text")
+                or item.get("instead_of")
+                or item.get("old")
+                or item.get("weak")
             )
             cleaned.append(
                 {
                     "instead_of": instead_of,
                     "use": use,
                     "why": self._clean_text_value(item.get("why"))
+                    or self._clean_text_value(item.get("reason"))
                     or "This sounds more natural for describing an image.",
+                    "example": self._clean_text_value(item.get("example")),
+                    "final_preview": self._clean_text_value(
+                        item.get("finalPreview") or item.get("final_preview")
+                    ),
                 }
             )
         return cleaned or fallback
@@ -3777,6 +3870,7 @@ class AIAnalyzer:
             objects=objects,
             actions=actions,
         )
+        starter_hints = self._normalize_starter_hints(raw.get("starter_hints") or raw.get("starterHints") or [])
         teaching_notes = self._clean_string_list(
             raw.get("teaching_notes") or raw.get("scene_notes") or [],
             limit=6,
@@ -3793,6 +3887,14 @@ class AIAnalyzer:
             sentence_patterns = self._derive_sentence_patterns(
                 natural_explanation=natural_explanation,
                 phrases=phrases,
+            )
+        if not starter_hints:
+            starter_hints = self._derive_starter_hints_from_ai_analysis(
+                objects=objects,
+                vocabulary=vocabulary,
+                phrases=phrases,
+                natural_explanation=natural_explanation,
+                simple_explanation=simple_explanation,
             )
 
         articulation_targets = self._normalize_articulation_targets(
@@ -3864,6 +3966,7 @@ class AIAnalyzer:
             "vocabulary": vocabulary,
             "phrases": phrases,
             "sentence_starters": sentence_starters,
+            "starter_hints": starter_hints,
             "sentence_patterns": sentence_patterns,
             "quiz_candidates": quiz_candidates,
             "difficulty_recommendation": str(raw.get("difficulty_recommendation") or "").strip()
@@ -4295,6 +4398,9 @@ class AIAnalyzer:
             "vocabulary": self._extract_field_value(stripped, "vocabulary") or [],
             "phrases": self._extract_field_value(stripped, "phrases") or [],
             "sentence_patterns": self._extract_field_value(stripped, "sentence_patterns") or [],
+            "starter_hints": self._extract_field_value(stripped, "starterHints")
+            or self._extract_field_value(stripped, "starter_hints")
+            or [],
             "quiz_candidates": self._extract_field_value(stripped, "quiz_candidates") or [],
             "difficulty_recommendation": self._extract_field_value(
                 stripped, "difficulty_recommendation"
@@ -5173,6 +5279,161 @@ class AIAnalyzer:
             if len(starters) >= 6:
                 break
         return starters
+
+    def _normalize_starter_hints(self, raw_items: Any) -> list[dict[str, str]]:
+        items = raw_items if isinstance(raw_items, list) else []
+        hints: list[dict[str, str]] = []
+        seen: set[str] = set()
+        allowed_types = {"word", "phrase", "sentence_structure"}
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            label = self._clean_text_value(item.get("label") or item.get("word") or item.get("phrase"))
+            meaning = self._clean_text_value(item.get("meaning") or item.get("meaning_simple"))
+            example = self._clean_text_value(item.get("example"))
+            hint_type = self._clean_text_value(item.get("type")).replace(" ", "_") or "phrase"
+            if hint_type not in allowed_types:
+                hint_type = "phrase"
+            key = normalize_answer(label)
+            if not label or not meaning or not example or not key or key in seen:
+                continue
+            meaning_key = normalize_answer(meaning)
+            example_key = normalize_answer(example)
+            generic_meaning_patterns = (
+                "person or group",
+                "thing in the scene",
+                "object in the scene",
+                "something in the scene",
+                "you can describe in the scene",
+                "a detail in the image",
+            )
+            generic_example = (
+                example_key in {
+                    f"the image shows {key}",
+                    f"the image shows a {key}",
+                    f"the image shows an {key}",
+                    f"the picture shows {key}",
+                    f"the picture shows a {key}",
+                    f"the picture shows an {key}",
+                    f"the scene shows {key}",
+                    f"the scene shows a {key}",
+                    f"the scene shows an {key}",
+                    f"the image has {key}",
+                    f"the image has a {key}",
+                    f"the image has an {key}",
+                    f"there is {key}",
+                    f"there is a {key}",
+                    f"there is an {key}",
+                    f"there are {key}",
+                }
+                or (example_key.startswith("the image shows ") and len(example.split()) <= len(label.split()) + 3)
+            )
+            if any(pattern in meaning_key for pattern in generic_meaning_patterns) or generic_example:
+                continue
+            if len(label.split()) > 5 or len(meaning.split()) > 34 or len(example.split()) > 18:
+                continue
+            seen.add(key)
+            hints.append(
+                {
+                    "label": label,
+                    "type": hint_type,
+                    "meaning": meaning,
+                    "example": self._ensure_sentence_punctuation(example),
+                }
+            )
+            if len(hints) >= 3:
+                break
+        return hints
+
+    def _derive_starter_hints_from_ai_analysis(
+        self,
+        *,
+        objects: list[dict[str, Any]],
+        vocabulary: list[dict[str, Any]],
+        phrases: list[dict[str, Any]],
+        natural_explanation: str,
+        simple_explanation: str,
+    ) -> list[dict[str, str]]:
+        hints: list[dict[str, str]] = []
+        seen: set[str] = set()
+
+        def push(label: str, hint_type: str, meaning: str, example: str, score: float = 0.0) -> None:
+            cleaned_label = self._clean_text_value(label)
+            cleaned_meaning = self._clean_text_value(meaning)
+            cleaned_example = self._clean_text_value(example)
+            key = normalize_answer(cleaned_label)
+            if (
+                not cleaned_label
+                or not cleaned_meaning
+                or not cleaned_example
+                or not key
+                or key in seen
+                or len(cleaned_label.split()) > 5
+                or len(cleaned_meaning.split()) > 34
+                or len(cleaned_example.split()) > 18
+            ):
+                return
+            seen.add(key)
+            hints.append(
+                {
+                    "label": cleaned_label,
+                    "type": hint_type if hint_type in {"word", "phrase", "sentence_structure"} else "phrase",
+                    "meaning": cleaned_meaning,
+                    "example": self._ensure_sentence_punctuation(cleaned_example),
+                    "_score": score,
+                }
+            )
+
+        for item in objects:
+            label = self._clean_text_value(item.get("name"))
+            meaning = self._clean_text_value(item.get("description"))
+            example = self._starter_hint_general_example(label)
+            try:
+                score = float(item.get("importance") or 0.0)
+            except (TypeError, ValueError):
+                score = 0.0
+            push(label, "phrase" if len(label.split()) > 1 else "word", meaning, example, 100 + score)
+
+        for item in vocabulary:
+            label = self._clean_text_value(item.get("word"))
+            meaning = self._clean_text_value(item.get("meaning_simple"))
+            example = self._starter_hint_general_example(label)
+            push(label, "word", meaning, example, 80)
+
+        for item in phrases:
+            label = self._clean_text_value(item.get("phrase"))
+            meaning = self._clean_text_value(item.get("meaning_simple"))
+            example = self._starter_hint_general_example(label)
+            push(label, "phrase", meaning, example, 70)
+
+        hints.sort(key=lambda item: float(item.pop("_score", 0.0)), reverse=True)
+        return hints[:3]
+
+    def _starter_hint_general_example(self, label: str) -> str:
+        text = self._clean_text_value(label)
+        key = normalize_answer(text)
+        if not text or not key:
+            return ""
+        if "climbing vine" in key or "climbing vines" in key:
+            return "The wall is covered with climbing vines."
+        if "lined with" in key:
+            return "The street is lined with small trees."
+        if "roof overhang" in key:
+            return "The roof overhang gives some shade."
+        if "patches of shade" in key:
+            return "Patches of shade cover the path."
+        if "hanging" in key:
+            return f"The {text} are hanging near the door."
+        if "behind" in key:
+            return f"The lamp is {text} the chair."
+        if "next to" in key:
+            return f"The bag is {text} the table."
+        if "in front of" in key:
+            return f"The bike is {text} the shop."
+        if len(text.split()) >= 2:
+            return f"The old house has {text} near the entrance."
+        article = "an" if text[0].casefold() in {"a", "e", "i", "o", "u"} else "a"
+        return f"There is {article} {text} near the window."
 
     def _derive_sentence_patterns(
         self,

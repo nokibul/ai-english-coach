@@ -25,11 +25,23 @@ const state = {
   review: null,
   quizQuestionStartedAt: null,
   uploadPreviewUrl: "",
+  starterHintPopover: {
+    activeHintId: null,
+    popoverPosition: null,
+  },
   sessionFlow: {
     step: "learn",
     explanation: "",
     feedback: null,
     attempts: [],
+    initialStarterText: "",
+    initialStarterTouched: false,
+    initialImprovementCards: [],
+    initialImprovementIndex: 0,
+    initialImprovementDraft: "",
+    initialAppliedImprovementIds: [],
+    initialSkippedImprovementIds: [],
+    initialLastAppliedImprovementId: "",
     articulationUpgrade: null,
     layerRewards: [],
     allLayersBonusAwarded: false,
@@ -57,6 +69,7 @@ let sessionListObserver = null;
 
 document.addEventListener("DOMContentLoaded", () => {
   cacheElements();
+  initializeTheme();
   bindEvents();
   bootstrap();
 });
@@ -68,6 +81,7 @@ function cacheElements() {
     "newSessionButton",
     "uploadBackButton",
     "dashboardButton",
+    "themeToggleButton",
     "closeDashboardButton",
     "dashboardModal",
     "dashboardContent",
@@ -142,11 +156,68 @@ function bindEvents() {
   els.uploadBackButton.addEventListener("click", openNewSessionComposer);
   els.newSessionButton.addEventListener("click", openNewSessionComposer);
   els.dashboardButton.addEventListener("click", openDashboardModal);
+  els.themeToggleButton.addEventListener("click", toggleTheme);
   els.closeDashboardButton.addEventListener("click", closeDashboardModal);
   els.quizLauncherButton.addEventListener("click", () => openQuizModal({ mode: "mixed" }));
   els.closeQuizButton.addEventListener("click", closeQuizModal);
   els.closeLanguageModalButton.addEventListener("click", closeLanguageModal);
   els.sessionDetailPanel.addEventListener("click", onLanguageCardClick);
+  document.addEventListener("click", (event) => {
+    if (!event.target.closest?.(".starter-hint-chip, .starter-hint-popover")) {
+      closeStarterHintPopovers();
+    }
+  });
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") {
+      closeStarterHintPopovers();
+    }
+  });
+  window.addEventListener("resize", positionActiveStarterHintPopover, { passive: true });
+  window.addEventListener("scroll", positionActiveStarterHintPopover, { passive: true });
+}
+
+function initializeTheme() {
+  const storedTheme = safeLocalStorageGet("aiEnglishTheme");
+  const prefersDark = window.matchMedia?.("(prefers-color-scheme: dark)")?.matches;
+  applyTheme(storedTheme || (prefersDark ? "dark" : "light"), { persist: false });
+}
+
+function toggleTheme() {
+  const nextTheme = document.body.classList.contains("dark-mode") ? "light" : "dark";
+  applyTheme(nextTheme);
+}
+
+function applyTheme(theme, options = {}) {
+  const dark = theme === "dark";
+  document.documentElement.classList.toggle("dark-mode-preload", dark);
+  document.body.classList.toggle("dark-mode", dark);
+  if (els.themeToggleButton) {
+    els.themeToggleButton.setAttribute("aria-pressed", String(dark));
+    els.themeToggleButton.setAttribute("aria-label", dark ? "Switch to light mode" : "Switch to dark mode");
+    const icon = els.themeToggleButton.querySelector(".theme-toggle-icon");
+    if (icon) {
+      icon.textContent = dark ? "☀" : "☾";
+    }
+  }
+  if (options.persist !== false) {
+    safeLocalStorageSet("aiEnglishTheme", dark ? "dark" : "light");
+  }
+}
+
+function safeLocalStorageGet(key) {
+  try {
+    return localStorage.getItem(key);
+  } catch (error) {
+    return "";
+  }
+}
+
+function safeLocalStorageSet(key, value) {
+  try {
+    localStorage.setItem(key, value);
+  } catch (error) {
+    // Preference persistence is optional.
+  }
 }
 
 async function bootstrap() {
@@ -332,6 +403,14 @@ function createInitialSessionFlow(session = {}) {
     explanation: "",
     feedback: null,
     attempts: [],
+    initialStarterText: "",
+    initialStarterTouched: false,
+    initialImprovementCards: [],
+    initialImprovementIndex: 0,
+    initialImprovementDraft: "",
+    initialAppliedImprovementIds: [],
+    initialSkippedImprovementIds: [],
+    initialLastAppliedImprovementId: "",
     coverageLayers: null,
     coverageComplete: false,
     skippedCoverageLayers: [],
@@ -779,8 +858,10 @@ function onLanguageCardClick(event) {
 }
 
 function renderWriteStep(session) {
-  const nounChips = getVisibleNounChips(session);
-  const draftText = state.sessionFlow.explanation || "";
+  const starterHints = getStarterIdeaHints(session);
+  const draft = prepareInitialAttemptDraft(state.sessionFlow, session);
+  const draftText = draft.text;
+  const starterClass = draft.isStarter ? " starter-prefill" : "";
   els.sessionDetailPanel.innerHTML = `
     <div class="journey-shell focused-step-shell initial-attempt-shell">
       ${renderStepProgress(LEARNING_STAGES.INITIAL_ATTEMPT)}
@@ -792,30 +873,28 @@ function renderWriteStep(session) {
         <div class="focused-image-frame">
           <img class="focused-image-preview" src="${session.image_url}" alt="Image to describe">
         </div>
-        ${
-          nounChips.length
-            ? `
-              <section class="starter-ideas-panel">
-                <h4>Starter ideas <span>(tap to use)</span></h4>
+        <section class="starter-ideas-panel">
+          <div class="starter-ideas-heading">
+            <span class="starter-ideas-icon" aria-hidden="true">✦</span>
+            <div>
+              <h4>Starter ideas</h4>
+              <p>Tap a hint to get started.</p>
+            </div>
+          </div>
+          ${
+            starterHints.length
+              ? `
                 <div class="mini-suggestion-row sentence-starter-row" aria-label="Starter ideas">
-                  ${nounChips
-                    .map(
-                      (noun) => `
-                        <button class="sentence-starter-button noun-chip-button" type="button" data-insert-hint="${escapeHtml(noun)}">
-                          ${escapeHtml(noun)}
-                        </button>
-                      `
-                    )
-                    .join("")}
+                  ${starterHints.map((hint, index) => renderStarterHintChip(hint, index)).join("")}
                 </div>
-              </section>
-            `
-            : ""
-        }
+              `
+              : `<p class="muted starter-ideas-empty">No starter hints available yet.</p>`
+          }
+        </section>
         <div class="writing-box-wrap">
         <textarea
           id="learnerExplanationInput"
-          class="focused-writing-input guided-writing-input"
+          class="focused-writing-input guided-writing-input${starterClass}"
           rows="4"
           maxlength="250"
           placeholder="Write your description here..."
@@ -833,14 +912,17 @@ function renderWriteStep(session) {
     submitExplanationFeedback(session, { mode: "first" });
   });
   els.sessionDetailPanel.querySelectorAll("[data-insert-hint]").forEach((button) => {
-    button.addEventListener("click", () => {
+    button.addEventListener("click", (event) => {
+      event.stopPropagation();
+      closeStarterHintPopovers();
       insertWritingHint(button.dataset.insertHint || "");
       playTapAnimation(button);
-      button.classList.add("selected");
+      button.closest(".starter-hint-chip")?.classList.add("selected");
     });
   });
+  bindStarterHintInfoButtons();
   const writingInput = document.getElementById("learnerExplanationInput");
-  writingInput?.addEventListener("input", limitWritingInput);
+  writingInput?.addEventListener("input", onInitialAttemptInput);
   if (writingInput) {
     const cursorPosition = writingInput.value.length;
     writingInput.setSelectionRange(cursorPosition, cursorPosition);
@@ -850,16 +932,380 @@ function renderWriteStep(session) {
   }, 50);
 }
 
-function getVisibleNounChips(session) {
+function renderStarterHintChip(hint, index = 0) {
+  const displayLabel = cleanUiText(hint?.label);
+  const insertionText = displayLabel;
+  const meaning = cleanUiText(hint?.meaning);
+  const example = cleanUiText(hint?.example);
+  const hasInfo = Boolean(meaning && example);
+  const showInfo = hasInfo && starterHintShouldShowInfo(hint, displayLabel);
+  if (!displayLabel || !insertionText) return "";
+  return `
+    <span class="starter-hint-chip${showInfo ? " has-info" : ""}" data-starter-hint-chip="${index}">
+      <button class="sentence-starter-button noun-chip-button starter-hint-main" type="button" data-insert-hint="${escapeHtml(insertionText)}">
+        ${escapeHtml(displayLabel)}
+      </button>
+      ${showInfo ? `
+        <button
+          class="starter-hint-info-button"
+          type="button"
+          data-starter-hint-info="${index}"
+          aria-label="About ${escapeHtml(displayLabel)}"
+          aria-expanded="false"
+        >i</button>
+        <span class="starter-hint-popover" data-starter-hint-popover="${index}" role="dialog">
+          <strong>${escapeHtml(displayLabel)}</strong>
+          <span class="popover-label">Meaning</span>
+          <em>${escapeHtml(starterHintCompactText(meaning, 22))}</em>
+          <span class="popover-label">Example</span>
+          <em>${escapeHtml(starterHintCompactText(example, 16))}</em>
+        </span>
+      ` : ""}
+    </span>
+  `;
+}
+
+function starterHintShouldShowInfo(hint = {}, label = "") {
+  const text = normalizeClientText(label);
+  if (!text) return false;
+  const words = text.split(/\s+/).filter(Boolean);
+  const commonWords = new Set([
+    "tree", "trees", "road", "street", "car", "cars", "building", "buildings",
+    "child", "children", "boy", "girl", "man", "woman", "person", "people",
+    "shirt", "clothes", "curtain", "curtains", "wall", "window", "door",
+    "bed", "couch", "chair", "table", "floor", "sky", "house", "room",
+  ]);
+  if (words.length === 1 && commonWords.has(text)) return false;
+  if (words.length === 2 && words.every((word) => commonWords.has(word) || /^(young|small|big|brown|green|blue|red|white|black|light|dark|old|new)$/.test(word))) {
+    return false;
+  }
+  const highValuePattern = /\b(climbing|lined|overhang|patches?|shade|shaded|partially|visible|covered|surrounded|hanging|leaning|standing|sitting|next to|in front of|behind|nearby|with|under|over|across|along|between)\b/;
+  if (highValuePattern.test(text)) return true;
+  if (words.length >= 3) return true;
+  return ["phrase", "sentence_structure"].includes(String(hint?.type || hint?.kind || ""));
+}
+
+function starterHintCompactText(value, maxWords) {
+  const text = cleanUiText(value);
+  const words = text.split(/\s+/).filter(Boolean);
+  return words.length > maxWords ? `${words.slice(0, maxWords).join(" ")}.` : text;
+}
+
+function bindStarterHintInfoButtons() {
+  els.sessionDetailPanel.querySelectorAll("[data-starter-hint-info]").forEach((button) => {
+    button.addEventListener("click", (event) => {
+      event.stopPropagation();
+      const chip = button.closest(".starter-hint-chip");
+      if (!chip) return;
+      const willOpen = !chip.classList.contains("active");
+      closeStarterHintPopovers();
+      if (willOpen) {
+        chip.classList.add("active");
+        button.setAttribute("aria-expanded", "true");
+        state.starterHintPopover.activeHintId = button.dataset.starterHintInfo || "";
+        const popover = chip.querySelector(".starter-hint-popover");
+        const wrapper = starterHintPopoverWrapper(chip);
+        if (popover && wrapper) {
+          popover.classList.add("is-open");
+          popover.dataset.activeOwner = state.starterHintPopover.activeHintId;
+          wrapper.appendChild(popover);
+        }
+        window.requestAnimationFrame(() => positionStarterHintPopover(chip, button, popover, wrapper));
+      }
+    });
+  });
+}
+
+function closeStarterHintPopovers() {
+  document.querySelectorAll(".starter-hint-chip.active").forEach((chip) => {
+    chip.classList.remove("active");
+    delete chip.dataset.popoverPlacement;
+    chip.querySelector("[data-starter-hint-info]")?.setAttribute("aria-expanded", "false");
+  });
+  document.querySelectorAll(".starter-hint-popover.is-open").forEach((popover) => {
+    const owner = starterHintChipById(popover.dataset.activeOwner || popover.dataset.starterHintPopover || "");
+    popover.classList.remove("is-open", "popover-below", "popover-above");
+    delete popover.dataset.activeOwner;
+    delete popover.dataset.popoverPlacement;
+    popover.removeAttribute("style");
+    if (owner) {
+      owner.appendChild(popover);
+    }
+  });
+  state.starterHintPopover.activeHintId = null;
+  state.starterHintPopover.popoverPosition = null;
+}
+
+function positionActiveStarterHintPopover() {
+  const active = document.querySelector(".starter-hint-chip.active");
+  const anchor = active?.querySelector("[data-starter-hint-info]");
+  const popover = active
+    ? document.querySelector(`.starter-hint-popover.is-open[data-active-owner="${active.dataset.starterHintChip}"]`) || active.querySelector(".starter-hint-popover")
+    : null;
+  if (active) {
+    positionStarterHintPopover(active, anchor, popover, starterHintPopoverWrapper(active));
+  }
+}
+
+function positionStarterHintPopover(chip, anchorElement = null, popoverElement = null, wrapperElement = null) {
+  const popover = popoverElement || chip?.querySelector(".starter-hint-popover");
+  if (!chip || !popover || !chip.classList.contains("active")) return;
+  const wrapper = wrapperElement || starterHintPopoverWrapper(chip);
+  const anchor = anchorElement || chip.querySelector("[data-starter-hint-info]") || chip;
+  const safe = 16;
+  const gap = 8;
+  const scrollX = window.scrollX || window.pageXOffset || 0;
+  const scrollY = window.scrollY || window.pageYOffset || 0;
+  const viewportWidth = Math.max(document.documentElement.clientWidth || 0, window.innerWidth || 0);
+  const viewportHeight = Math.max(document.documentElement.clientHeight || 0, window.innerHeight || 0);
+  const wrapperRect = wrapper.getBoundingClientRect();
+  const anchorRect = anchor.getBoundingClientRect();
+  const wrapperPageLeft = wrapperRect.left + scrollX;
+  const wrapperPageTop = wrapperRect.top + scrollY;
+  const anchorPageLeft = anchorRect.left + scrollX;
+  const anchorPageTop = anchorRect.top + scrollY;
+  const localX = anchorPageLeft - wrapperPageLeft + anchorRect.width / 2;
+  const localBelowY = anchorPageTop - wrapperPageTop + anchorRect.height;
+  const localAboveY = anchorPageTop - wrapperPageTop;
+  const visibleLeft = clamp(-wrapperRect.left + safe, safe, Math.max(safe, wrapperRect.width - safe));
+  const visibleRight = clamp(viewportWidth - wrapperRect.left - safe, visibleLeft, Math.max(visibleLeft, wrapperRect.width - safe));
+  const visibleTop = clamp(-wrapperRect.top + safe, safe, Math.max(safe, wrapperRect.height - safe));
+  const visibleBottom = clamp(viewportHeight - wrapperRect.top - safe, visibleTop, Math.max(visibleTop, wrapperRect.height - safe));
+  const visibleWidth = Math.max(120, visibleRight - visibleLeft);
+  const visibleHeight = Math.max(80, visibleBottom - visibleTop);
+  const width = Math.min(280, Math.max(120, visibleWidth));
+  const maxPopoverHeight = visibleHeight;
+  popover.style.width = `${width}px`;
+  popover.style.maxHeight = `${maxPopoverHeight}px`;
+
+  const popoverRect = popover.getBoundingClientRect();
+  const height = Math.min(Math.ceil(popoverRect.height || 170), maxPopoverHeight);
+  const spaceBelow = visibleBottom - localBelowY - gap;
+  const spaceAbove = localAboveY - visibleTop - gap;
+  const placement = spaceBelow < height && spaceAbove > spaceBelow ? "above" : "below";
+  const leftInWrapper = clamp(localX - width / 2, visibleLeft, Math.max(visibleLeft, visibleRight - width));
+  const preferredTop = placement === "below"
+    ? localBelowY + gap
+    : localAboveY - height - gap;
+  const topInWrapper = clamp(preferredTop, visibleTop, Math.max(visibleTop, visibleBottom - height));
+  const arrowLeft = clamp(localX - leftInWrapper, 18, width - 18);
+
+  state.starterHintPopover.popoverPosition = { top: topInWrapper, left: leftInWrapper, placement };
+  chip.dataset.popoverPlacement = placement;
+  chip.classList.toggle("popover-below", placement === "below");
+  chip.classList.toggle("popover-above", placement === "above");
+  popover.dataset.popoverPlacement = placement;
+  popover.classList.toggle("popover-below", placement === "below");
+  popover.classList.toggle("popover-above", placement === "above");
+  popover.style.left = `${leftInWrapper}px`;
+  popover.style.top = `${topInWrapper}px`;
+  popover.style.maxHeight = `${maxPopoverHeight}px`;
+  popover.style.setProperty("--arrow-left", `${arrowLeft}px`);
+  popover.style.setProperty("--arrow-top", "50%");
+}
+
+function starterHintPopoverWrapper(chip) {
+  return chip?.closest(".journey-shell, .focused-step-shell, #sessionDetailPanel, .learn-page") || els.sessionDetailPanel || document.body;
+}
+
+function starterHintChipById(id) {
+  return [...document.querySelectorAll(".starter-hint-chip")]
+    .find((chip) => chip.dataset.starterHintChip === String(id));
+}
+
+function clamp(value, min, max) {
+  return Math.max(min, Math.min(value, max));
+}
+
+function prepareInitialAttemptDraft(flow = {}, session = {}) {
+  const existing = flow.explanation || "";
+  if (cleanUiText(existing)) {
+    return { text: existing, isStarter: false };
+  }
+  if (flow.initialStarterTouched) {
+    return { text: "", isStarter: false };
+  }
+  const starter = getWritingStarter(session);
+  flow.initialStarterText = starter;
+  flow.initialStarterTouched = false;
+  return { text: starter, isStarter: true };
+}
+
+function getStarterIdeaHints(session) {
   const analysis = session?.analysis || {};
-  return uniqueWritingHints([
-    ...(analysis.objects || []).map((item) => item?.name || item),
-    ...(analysis.environment_details || []).flatMap((item) => nounChipsFromText(item)),
-    analysis.environment,
-  ])
-    .map((item) => cleanUiText(item).replace(/^(the|a|an)\s+/i, ""))
-    .filter((item) => item && item.split(/\s+/).length <= 3)
-    .slice(0, 8);
+  const candidates = [];
+  const context = starterHintImageContext(analysis);
+  const addHint = (value, score = 50, kind = "phrase", insertValue = "", metadata = {}, category = "") => {
+    const label = kind === "starter" ? sentenceStarterHintLabel(value) : starterIdeaLabel(value);
+    if (!starterIdeaLooksUseful(label)) return;
+    candidates.push({
+      label,
+      insert: label,
+      kind,
+      category: category || (kind === "starter" ? "starter" : starterHintCategory(label, metadata, context)),
+      type: starterHintType(kind),
+      meaning: cleanUiText(metadata.meaning || metadata.meaning_simple || metadata.description),
+      example: cleanUiText(metadata.example),
+      score,
+    });
+  };
+
+  (analysis.starter_hints || analysis.starterHints || []).forEach((item) => {
+    if (!item || typeof item !== "object") return;
+    const kind = item.type === "sentence_structure" ? "starter" : item.type || "phrase";
+    addHint(item.label, 115, kind, item.insert || item.label, item, item.category || "");
+  });
+  const aiStarterHints = uniqueStarterIdeas(candidates)
+    .filter((item) => item.meaning && item.example)
+    .slice(0, 3);
+  if (aiStarterHints.length) {
+    return aiStarterHints;
+  }
+  candidates.length = 0;
+
+  (analysis.objects || []).forEach((item, index) => {
+    const value = item?.name || item?.description || item;
+    const importance = Number(item?.importance || 0);
+    addHint(
+      value,
+      95 - index * 8 + importance * 8,
+      "visual",
+      "",
+      {
+        ...item,
+        meaning: item?.description,
+        example: starterHintGeneralExample(value),
+      },
+      importance >= 0.85 ? "main_subject" : "supporting_subject"
+    );
+  });
+  (analysis.vocabulary || []).forEach((item) => {
+    addHint(item?.word || item, 72, "word", "", item);
+  });
+  (analysis.phrases || []).forEach((item) => {
+    addHint(item?.phrase || item, 68, "phrase", "", item);
+  });
+
+  return uniqueStarterIdeas(candidates)
+    .filter((item) => item.meaning && item.example)
+    .sort((a, b) => b.score - a.score)
+    .slice(0, 3);
+}
+
+function starterHintGeneralExample(label) {
+  const text = cleanUiText(label);
+  const key = normalizeClientText(text);
+  if (!key) return "";
+  if (/\bclimbing vines?\b/.test(key)) return "The wall is covered with climbing vines.";
+  if (/\blined with\b/.test(key)) return "The street is lined with small trees.";
+  if (/\broof overhang\b/.test(key)) return "The roof overhang gives some shade.";
+  if (/\bpatches? of shade\b/.test(key)) return "Patches of shade cover the path.";
+  if (/\bhanging\b/.test(key)) return `The ${text} are hanging near the door.`;
+  if (/\bbehind\b/.test(key)) return `The lamp is ${text} the chair.`;
+  if (/\bnext to\b/.test(key)) return `The bag is ${text} the table.`;
+  if (/\bin front of\b/.test(key)) return `The bike is ${text} the shop.`;
+  if (text.split(/\s+/).length >= 2) return `The old house has ${text} near the entrance.`;
+  const article = /^[aeiou]/i.test(text) ? "an" : "a";
+  return `There is ${article} ${text} near the window.`;
+}
+
+function selectMinimalStarterHints(candidates = []) {
+  const ordered = candidates
+    .filter((item) => item && item.label && item.category !== "starter")
+    .sort((a, b) => b.score - a.score);
+  const selected = [];
+  const pick = (category) => {
+    const item = ordered.find((candidate) =>
+      candidate.category === category &&
+      !selected.some((existing) => starterHintsTooSimilar(existing.label, candidate.label))
+    );
+    if (item) selected.push(item);
+  };
+
+  pick("main_subject");
+  const mainOnly = selected.length === 1 && !ordered.some((item) => item.category === "supporting_subject" || item.category === "setting");
+  if (mainOnly) return selected;
+  pick("supporting_subject");
+
+  if (!selected.length && ordered[0]) {
+    selected.push(ordered[0]);
+  }
+  ordered.forEach((item) => {
+    if (selected.length >= 3) return;
+    if (item.score < 70 && selected.length >= 1) return;
+    if (selected.some((existing) => starterHintsTooSimilar(existing.label, item.label))) return;
+    selected.push(item);
+  });
+  return selected;
+}
+
+function starterHintCategory(label, metadata = {}, context = {}) {
+  const explicit = cleanUiText(metadata.category);
+  if (["main_subject", "supporting_subject", "setting"].includes(explicit)) return explicit;
+  const text = normalizeClientText(label);
+  const primary = normalizeClientText(context.primary);
+  if (primary && text === primary) return "main_subject";
+  if (/\b(room|street|road|surface|background|foreground|curtains|columns|building|bed|couch|floor|sky|wall|window|setting)\b/.test(text)) {
+    return "setting";
+  }
+  return context.primary ? "supporting_subject" : "main_subject";
+}
+
+function starterHintsTooSimilar(a, b) {
+  const first = normalizeClientText(a);
+  const second = normalizeClientText(b);
+  return Boolean(first && second && (first === second || first.includes(second) || second.includes(first)));
+}
+
+function starterHintType(kind = "phrase") {
+  if (kind === "starter") return "sentence_structure";
+  if (kind === "word") return "word";
+  return "phrase";
+}
+
+function starterHintImageContext(analysis = {}) {
+  const objects = (analysis.objects || []).map((item) => cleanUiText(item?.name || item)).filter(Boolean);
+  const details = (analysis.environment_details || []).flatMap(nounChipsFromText).map(cleanUiText).filter(Boolean);
+  const primary = objects.find((item) => !/\b(signboard|logo|text|caption|label)\b/i.test(item)) || objects[0] || "";
+  const surface = [...objects, ...details].find((item) => /\b(bed|couch|sofa|chair|bench|surface|floor|ground|road|path)\b/i.test(item)) || "";
+  const setting = cleanUiText(analysis.environment?.setting || analysis.environment || details[0] || "");
+  return { primary, surface, setting, objects, details };
+}
+
+function starterIdeaLabel(value) {
+  return cleanUiText(value)
+    .replace(/[.!?]+$/g, "")
+    .replace(/^(the|a|an)\s+/i, "")
+    .trim();
+}
+
+function starterIdeaLooksUseful(value) {
+  const text = cleanUiText(value);
+  if (!text || text.length > 34) return false;
+  const words = text.split(/\s+/).filter(Boolean);
+  if (!words.length || words.length > 3) return false;
+  if (/\b(signboard|caption|label|logo|number|text|tiny|small detail|blue sky|cloudy sky)\b/i.test(text)) return false;
+  if (/\b(that|which|because|while|although)\b/i.test(text)) return false;
+  return true;
+}
+
+function uniqueStarterIdeas(candidates = []) {
+  const seen = new Set();
+  const result = [];
+  candidates.forEach((item) => {
+    const key = normalizeClientText(item.label);
+    if (!key || seen.has(key)) return;
+    if ([...seen].some((existing) => key.includes(existing) || existing.includes(key))) return;
+    seen.add(key);
+    result.push(item);
+  });
+  return result;
+}
+
+function sentenceStarterHintLabel(starter) {
+  const text = normalizeSentenceStarter(starter).trim();
+  if (!text) return "";
+  return text.replace(/[,.]?\s*$/g, "...").replace(/\s+\.\.\.$/, "...");
 }
 
 function nounChipsFromText(value) {
@@ -1060,252 +1506,464 @@ function renderFeedbackStep(session, feedback) {
 function renderInitialAttemptFeedbackStep(session, feedback, initialFeedback) {
   const latestAttempt = (state.sessionFlow.attempts || []).at(-1) || {};
   const originalAttempt = latestAttempt.text || state.sessionFlow.explanation || "";
-  const missingAreas = cleanUiList(initialFeedback.missing_visual_areas || feedback.missing_details || [], 5);
-  const reusable = initialFeedback.reusable_language || {};
-  const reusableGroups = buildFirstFeedbackReusableGroups(reusable);
-  const flatLanguageGroups = reusableGroups.map((group) => ({ label: group.label, items: group.items }));
-  const upgradeItems = buildInitialFeedbackUpgradeItems(initialFeedback, feedback, flatLanguageGroups);
-  const enhancedMarkup = renderEnhancedAttemptMarkup(
-    initialFeedback.covered_enhancement || feedback.better_version || "",
-    upgradeItems
-  );
+  const upgrades = state.sessionFlow.initialImprovementCards?.length
+    ? state.sessionFlow.initialImprovementCards
+    : buildInitialImprovementCards(originalAttempt, initialFeedback, feedback);
+  state.sessionFlow.initialImprovementCards = upgrades;
+  state.sessionFlow.initialImprovementDraft = state.sessionFlow.initialImprovementDraft || originalAttempt;
+  state.sessionFlow.initialAppliedImprovementIds = state.sessionFlow.initialAppliedImprovementIds || [];
+  state.sessionFlow.initialSkippedImprovementIds = state.sessionFlow.initialSkippedImprovementIds || [];
+  const draft = state.sessionFlow.initialImprovementDraft || originalAttempt;
+  const completed = initialEnhancementComplete(upgrades);
+  const message = cleanUiText(initialFeedback.message) || "Nice work — your sentence is clear enough to continue.";
+  const handledCount = initialEnhancementHandledIds().size;
+  const totalChoices = upgrades.length;
 
   els.sessionDetailPanel.innerHTML = `
-    <div class="journey-shell focused-step-shell diagnosis-shell first-feedback-shell">
-      <section class="feedback-screen-card fast-feedback-card diagnosis-card first-feedback-card">
-        <section class="encouragement-banner coach-reveal" ${coachRevealStyle(0)}>
-          <span aria-hidden="true">✦</span>
-          <p>${escapeHtml(initialFeedback.acknowledgement || "Nice start - you described part of the image.")}</p>
-        </section>
-
-        <div class="feedback-section-title coach-reveal" ${coachRevealStyle(1)}>
-          <span aria-hidden="true">✧</span>
-          <h3>AI enhancement</h3>
+    <div class="ai-enhancement-backdrop ai-enhancement-screen">
+      <section class="ai-enhancement-modal coach-reveal" ${coachRevealStyle(0)} aria-labelledby="aiEnhancementTitle">
+        <div class="ai-enhancement-status" aria-label="Learning progress">
+          <button class="ai-enhancement-back-button" type="button" aria-label="Back to writing">
+            <span aria-hidden="true">←</span>
+          </button>
+          <div class="ai-enhancement-progress">
+            <strong>Step 2 of 5</strong>
+            ${renderAiEnhancementDots()}
+          </div>
+          <div class="ai-enhancement-stats">
+            <span aria-label="Streak">🔥 ${escapeHtml(String(state.progress?.streak_days || state.user?.streak_days || 4))}</span>
+            <i aria-hidden="true"></i>
+            <span>XP ${escapeHtml(String(state.progress?.xp_points || 860))}</span>
+          </div>
         </div>
 
-        <section class="enhanced-version-card coach-reveal" ${coachRevealStyle(2)}>
-          <div class="enhanced-version-text">${enhancedMarkup}</div>
-          <small>Tap any highlighted part to learn why it is stronger.</small>
-        </section>
+        <div class="ai-enhancement-image-frame">
+          <img src="${escapeHtml(session.image_url || "")}" alt="Image being described">
+        </div>
 
-        <section class="original-attempt-card coach-reveal" ${coachRevealStyle(3)}>
-          <h4>Your original attempt</h4>
-          <p>${escapeHtml(originalAttempt)}</p>
+        <header class="ai-modal-header">
+          <span class="ai-enhancement-kicker"><span aria-hidden="true">✣</span> AI enhancement</span>
+          <h3 id="aiEnhancementTitle">Let’s polish your description</h3>
+          <p>${upgrades.length ? "Tap the highlighted parts to see how we can improve them." : "Your description is already clear enough to continue."}</p>
+        </header>
+
+        <section class="ai-sentence-section initial-sentence-card initial-inline-sentence-card">
+          <p id="initialEnhancementSentence">${renderInitialEnhancementSentence(draft, upgrades)}</p>
         </section>
 
         ${
-          reusableGroups.some((group) => group.items.length)
-            ? `
-              <section class="reusable-language-card coach-reveal" ${coachRevealStyle(4)}>
-                <h4>Reusable language</h4>
-                <div class="first-feedback-language-grid">
-                  ${reusableGroups
-                    .map(
-                      (group) => `
-                        <div class="first-feedback-language-column">
-                          <span>${escapeHtml(group.label)}</span>
-                          ${group.items.length
-                            ? group.items.map((item) => `<span class="phrase-chip suggested">${escapeHtml(item)}</span>`).join("")
-                            : `<small class="muted">More soon</small>`}
-                        </div>
-                      `
-                    )
-                    .join("")}
-                </div>
-              </section>
-            `
-            : ""
+          completed
+            ? renderInitialImprovementCompleteState(message, draft, upgrades.length)
+            : `<p class="ai-enhancement-tip"><span aria-hidden="true">💡</span> ${handledCount ? "Tap other highlights to continue improving." : "Choose Apply or Skip for each useful highlight."}</p>`
         }
 
-        <section class="missing-visual-card coach-reveal" ${coachRevealStyle(5)}>
-          <h4>You could also describe</h4>
-          <div class="missing-visual-grid">
-            ${
-              missingAreas.length
-                ? missingAreas.map((item) => `<span class="missing-visual-chip"><span>${escapeHtml(missingAreaIcon(item))}</span>${escapeHtml(item)}</span>`).join("")
-                : `<span class="missing-visual-chip">No major visual area is missing</span>`
-            }
+        ${completed ? `
+        <section class="ai-preview-card initial-final-preview">
+          <h4><span aria-hidden="true">✣</span> Preview</h4>
+          <p id="initialImprovementPreview">${renderInitialEnhancementSentence(draft, upgrades, { previewOnly: true })}</p>
+          <div class="ai-preview-legend">
+            <span><i></i> Your words</span>
+            <span><i></i> Upgraded words</span>
           </div>
         </section>
+        ` : `<p id="initialImprovementPreview" class="hidden">${escapeHtml(draft)}</p>`}
 
-        <button id="feedbackPrimaryButton" class="primary-button journey-primary-button diagnosis-cta coach-reveal" ${coachRevealStyle(4)} type="button">
-          Continue Exploring
+        <button id="feedbackPrimaryButton" class="primary-button journey-primary-button ai-complete-button" type="button" ${!completed ? "disabled" : ""}>
+          Continue <span aria-hidden="true">›</span>
         </button>
+        ${!completed && totalChoices ? `<small class="ai-complete-lock">${handledCount}/${totalChoices} choices handled</small>` : ""}
       </section>
     </div>
   `;
 
+  els.sessionDetailPanel.querySelector(".ai-enhancement-back-button")?.addEventListener("click", () => {
+    renderWriteStep(session);
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  });
   document.getElementById("feedbackPrimaryButton").addEventListener("click", () => {
+    state.sessionFlow.explanation = cleanUiText(document.getElementById("initialImprovementPreview")?.textContent) || draft || state.sessionFlow.explanation;
     renderSessionStep("improve", { stage: LEARNING_STAGES.COVERAGE_LAYERS });
     window.scrollTo({ top: 0, behavior: "smooth" });
   });
-  bindInitialFeedbackUpgradePopovers();
-}
-
-function buildFirstFeedbackReusableGroups(reusable = {}) {
-  const nouns = uniqueWritingHints([
-    ...cleanUiList(reusable.nouns, 4),
-    ...cleanUiList(reusable.collocations, 4).filter((item) => !/\b(with|in|on|near|behind|beside)\b/i.test(item)),
-  ]).slice(0, 4);
-  const phrases = uniqueWritingHints([
-    ...cleanUiList(reusable.phrases, 4),
-    ...cleanUiList(reusable.positioning_language, 3),
-    ...cleanUiList(reusable.atmosphere_language, 2),
-  ]).slice(0, 4);
-  const structures = uniqueWritingHints([
-    ...cleanUiList(reusable.sentence_structures, 3),
-    "The image shows ___.",
-  ]).slice(0, 3);
-  return [
-    { label: "Nouns", items: nouns },
-    { label: "Phrases", items: phrases },
-    { label: "Sentence structures", items: structures },
-  ];
-}
-
-function missingAreaIcon(value) {
-  const text = normalizeClientText(value);
-  if (/\b(tree|branch|leaf|leaves|plant|greenery)\b/.test(text)) return "🌳";
-  if (/\broad|lane|marking|street\b/.test(text)) return "🛣️";
-  if (/\bshade|shadow|atmosphere|sky|cloud\b/.test(text)) return "☁️";
-  if (/\bvehicle|car|motorcycle|bike\b/.test(text)) return "🏍️";
-  if (/\bbuilding|background|house|architecture\b/.test(text)) return "🏠";
-  return "•";
-}
-
-function buildInitialFeedbackUpgradeItems(initialFeedback = {}, feedback = {}, languageGroups = []) {
-  const enhancement = cleanUiText(initialFeedback.covered_enhancement || feedback.better_version || "");
-  const directTerms = uniqueWritingHints(languageGroups.flatMap((group) => group.items || []))
-    .filter((item) => item && enhancement.toLowerCase().includes(item.toLowerCase()));
-  const fallbackTerms = enhancement
-    .match(/\b[a-z][a-z-]*(?:\s+[a-z][a-z-]*){1,3}\b/gi)
-    ?.filter((phrase) => !/^(the image|image shows|there is|there are)$/i.test(phrase))
-    ?.slice(0, 4) || [];
-  return uniqueWritingHints([...directTerms, ...fallbackTerms])
-    .slice(0, 5)
-    .map((phrase, index) => ({
-      id: `initial-upgrade-${index}`,
-      phrase,
-      why: initialUpgradeWhy(phrase),
-      meaning: initialUpgradeMeaning(phrase),
-      example: initialUpgradeExample(phrase),
-    }));
-}
-
-function renderEnhancedAttemptMarkup(text, upgradeItems = []) {
-  const rawText = String(text || "");
-  if (!rawText || !upgradeItems.length) {
-    return escapeHtml(rawText);
+  bindInitialEnhancementInteractions(session, feedback, initialFeedback);
+  if (state.sessionFlow.initialLastAppliedImprovementId) {
+    const id = state.sessionFlow.initialLastAppliedImprovementId;
+    state.sessionFlow.initialLastAppliedImprovementId = "";
+    window.setTimeout(() => {
+      const target = [...els.sessionDetailPanel.querySelectorAll("[data-initial-enhancement-applied]")]
+        .find((item) => item.dataset.initialEnhancementApplied === id);
+      showInitialModalXpPulse(target || document.getElementById("initialEnhancementSentence"), 5);
+    }, 40);
   }
+}
+
+function renderAiEnhancementDots() {
+  return `
+    <div class="ai-enhancement-dots" aria-hidden="true">
+      ${Array.from({ length: 5 }, (_, index) => `<span class="${index < 2 ? "active" : ""}"></span>`).join("")}
+    </div>
+  `;
+}
+
+function renderInitialImprovementCompleteState(message, draft = "", upgradeCount = 0) {
+  return `
+    <section class="initial-improvement-done coach-reveal" ${coachRevealStyle(1)}>
+      <span aria-hidden="true">✓</span>
+      <div>
+        <h4>${upgradeCount ? "All choices handled" : "No major upgrade needed"}</h4>
+        <p>${escapeHtml(upgradeCount ? "Here is your polished sentence." : message)}</p>
+      </div>
+    </section>
+  `;
+}
+
+function initialEnhancementHandledIds() {
+  return new Set([
+    ...(state.sessionFlow.initialAppliedImprovementIds || []),
+    ...(state.sessionFlow.initialSkippedImprovementIds || []),
+  ]);
+}
+
+function initialEnhancementComplete(upgrades = []) {
+  if (!upgrades.length) return true;
+  const handled = initialEnhancementHandledIds();
+  return upgrades.every((item) => handled.has(item.id));
+}
+
+function renderInitialEnhancementSentence(text, upgrades = [], options = {}) {
+  const raw = String(text || "");
+  if (!raw) return "";
+  const handled = initialEnhancementHandledIds();
+  const applied = new Set(state.sessionFlow.initialAppliedImprovementIds || []);
   const spans = [];
-  const lowered = rawText.toLowerCase();
-  upgradeItems.forEach((item, index) => {
-    const phrase = cleanUiText(item.phrase);
-    if (!phrase) return;
-    const start = lowered.indexOf(phrase.toLowerCase());
+  const lowered = raw.toLowerCase();
+  upgrades.forEach((item) => {
+    const isApplied = applied.has(item.id);
+    const isHandled = handled.has(item.id);
+    if (isHandled && !isApplied) return;
+    const phrase = isApplied ? item.suggestedText : item.currentText;
+    const start = lowered.indexOf(String(phrase || "").toLowerCase());
     if (start < 0) return;
     const end = start + phrase.length;
     if (spans.some((span) => start < span.end && end > span.start)) return;
-    spans.push({ start, end, item, index });
+    spans.push({ start, end, item, isApplied, isHandled });
   });
-  if (!spans.length) {
-    return escapeHtml(rawText);
-  }
   spans.sort((a, b) => a.start - b.start);
   let cursor = 0;
   let markup = "";
   spans.forEach((span) => {
-    markup += escapeHtml(rawText.slice(cursor, span.start));
-    const phrase = rawText.slice(span.start, span.end);
-    markup += `
-      <span class="initial-upgrade-highlight" role="button" tabindex="0" data-initial-upgrade="${span.index}" aria-expanded="false">
-        ${escapeHtml(phrase)}
-        <span class="initial-upgrade-popover" role="dialog">
-          <button class="initial-upgrade-close" type="button" data-close-initial-upgrade aria-label="Close">×</button>
-          <strong>${escapeHtml(phrase)}</strong>
-          <span class="popover-label">Meaning</span>
-          <small>${escapeHtml(span.item.meaning)}</small>
-          <span class="popover-label">Why it’s stronger</span>
-          <small>${escapeHtml(span.item.why)}</small>
-          <span class="popover-label">Example</span>
-          <em>${escapeHtml(span.item.example)}</em>
-          <button type="button" data-apply-initial-upgrade="${span.index}">Apply</button>
+    markup += escapeHtml(raw.slice(cursor, span.start));
+    const phrase = raw.slice(span.start, span.end);
+    if (span.isApplied || options.previewOnly) {
+      markup += span.isApplied
+        ? `<mark class="initial-modal-upgraded initial-modal-just-applied" data-initial-enhancement-applied="${escapeHtml(span.item.id)}">${escapeHtml(phrase)}</mark>`
+        : escapeHtml(phrase);
+    } else {
+      markup += `
+        <span class="initial-modal-weak" role="button" tabindex="0" data-initial-modal-upgrade="${escapeHtml(span.item.id)}" aria-expanded="false">
+          ${escapeHtml(phrase)}
+          ${renderInitialEnhancementPopover(span.item)}
         </span>
-      </span>
-    `;
+      `;
+    }
     cursor = span.end;
   });
-  markup += escapeHtml(rawText.slice(cursor));
+  markup += escapeHtml(raw.slice(cursor));
   return markup;
 }
 
-function bindInitialFeedbackUpgradePopovers() {
-  els.sessionDetailPanel.querySelectorAll("[data-initial-upgrade]").forEach((target) => {
+function renderInitialEnhancementPopover(item) {
+  return `
+    <span class="initial-modal-popover" role="dialog">
+      <small>Suggested upgrade</small>
+      <strong>${escapeHtml(item.suggestedText)}</strong>
+      <span class="popover-label">Why</span>
+      <em>${escapeHtml(item.whyItHelps)}</em>
+      <span class="popover-label">Example</span>
+      <em>${escapeHtml(item.example)}</em>
+      <span class="initial-modal-actions">
+        <button class="initial-modal-skip" type="button" data-skip-initial-improvement="${escapeHtml(item.id)}">Skip</button>
+        <button class="initial-modal-apply" type="button" data-apply-initial-improvement="${escapeHtml(item.id)}">Apply (+5 XP)</button>
+      </span>
+    </span>
+  `;
+}
+
+function bindInitialEnhancementInteractions(session, feedback, initialFeedback) {
+  els.sessionDetailPanel.querySelectorAll("[data-initial-modal-upgrade]").forEach((target) => {
     target.addEventListener("click", (event) => {
-      if (event.target.closest("[data-apply-initial-upgrade]")) {
-        return;
-      }
-      toggleInitialUpgradePopover(target);
+      if (event.target.closest("[data-apply-initial-improvement], [data-skip-initial-improvement], [data-dismiss-initial-modal]")) return;
+      toggleInitialModalPopover(target);
     });
     target.addEventListener("keydown", (event) => {
       if (event.key !== "Enter" && event.key !== " ") return;
       event.preventDefault();
-      toggleInitialUpgradePopover(target);
+      toggleInitialModalPopover(target);
     });
   });
-  els.sessionDetailPanel.querySelectorAll("[data-apply-initial-upgrade]").forEach((button) => {
+  els.sessionDetailPanel.querySelectorAll(".initial-modal-popover").forEach((popover) => {
+    popover.addEventListener("click", (event) => {
+      event.stopPropagation();
+    });
+  });
+  els.sessionDetailPanel.querySelectorAll("[data-apply-initial-improvement]").forEach((button) => {
     button.addEventListener("click", (event) => {
       event.stopPropagation();
-      const target = button.closest("[data-initial-upgrade]");
-      target?.classList.add("applied");
-      target?.classList.remove("active");
-      target?.setAttribute("aria-expanded", "false");
-      button.textContent = "Applied";
-      button.disabled = true;
+      applyInitialImprovement(button.dataset.applyInitialImprovement || "", session, feedback, initialFeedback);
     });
   });
-  els.sessionDetailPanel.querySelectorAll("[data-close-initial-upgrade]").forEach((button) => {
+  els.sessionDetailPanel.querySelectorAll("[data-skip-initial-improvement]").forEach((button) => {
     button.addEventListener("click", (event) => {
       event.stopPropagation();
-      const target = button.closest("[data-initial-upgrade]");
+      skipInitialImprovement(button.dataset.skipInitialImprovement || "", session, feedback, initialFeedback);
+    });
+  });
+  els.sessionDetailPanel.querySelectorAll("[data-dismiss-initial-modal]").forEach((button) => {
+    button.addEventListener("click", (event) => {
+      event.stopPropagation();
+      const target = button.closest("[data-initial-modal-upgrade]");
       target?.classList.remove("active");
       target?.setAttribute("aria-expanded", "false");
     });
   });
+  window.addEventListener("resize", positionActiveInitialModalPopover, { passive: true });
 }
 
-function toggleInitialUpgradePopover(target) {
+function applyInitialImprovement(id, session, feedback, initialFeedback) {
+  const cards = state.sessionFlow.initialImprovementCards || [];
+  const card = cards.find((item) => item.id === id);
+  if (!card) return;
+  state.sessionFlow.initialImprovementDraft = applyInitialImprovementToText(state.sessionFlow.initialImprovementDraft || "", card);
+  state.sessionFlow.initialAppliedImprovementIds = uniqueWritingHints([...(state.sessionFlow.initialAppliedImprovementIds || []), id]);
+  state.sessionFlow.initialLastAppliedImprovementId = id;
+  awardLocalXp(5);
+  renderInitialAttemptFeedbackStep(session, feedback, initialFeedback);
+}
+
+function skipInitialImprovement(id, session, feedback, initialFeedback) {
+  state.sessionFlow.initialSkippedImprovementIds = uniqueWritingHints([...(state.sessionFlow.initialSkippedImprovementIds || []), id]);
+  renderInitialAttemptFeedbackStep(session, feedback, initialFeedback);
+}
+
+function buildInitialImprovementCards(originalAttempt = "", initialFeedback = {}, feedback = {}) {
+  const original = cleanUiText(originalAttempt);
+  if (!original) return [];
+  const rawCards = Array.isArray(initialFeedback.improvements)
+    ? initialFeedback.improvements
+    : Array.isArray(initialFeedback.improvement_cards)
+      ? initialFeedback.improvement_cards
+      : [];
+  const cards = rawCards
+    .map((item, index) => normalizeInitialImprovementCard(item, original, index))
+    .filter(Boolean);
+  const occupied = [];
+  return cards.filter((card) => {
+    const range = initialImprovementCardRange(original, card);
+    if (!range) return false;
+    if (occupied.some((item) => range.start < item.end && range.end > item.start)) return false;
+    occupied.push(range);
+    return true;
+  }).slice(0, 3);
+}
+
+function normalizeInitialImprovementCard(item, original, index = 0) {
+  if (!item || typeof item !== "object") return null;
+  const category = normalizeInitialImprovementCategory(item.category);
+  const title = cleanUiText(item.title) || initialImprovementCategoryTitle(category);
+  const rawCurrent = cleanUiText(item.currentText || item.targetText || item.oldText || item.old);
+  const currentText = findTextOccurrence(original, rawCurrent) || rawCurrent;
+  const suggestedText = cleanUiText(item.suggestedText || item.replacementText || item.newText || item.suggested || item.rewrite || item.new);
+  const whyItHelps = cleanUiText(item.whyItHelps || item.why || item.reason);
+  const example = cleanUiText(item.example);
+  const xpReward = [10, 5].includes(Number(item.xpReward)) ? Number(item.xpReward) : 5;
+  if (!suggestedText || normalizeClientText(suggestedText) === normalizeClientText(currentText)) return null;
+  if (!currentText || !whyItHelps || !example) return null;
+  const card = {
+    id: cleanUiText(item.id) || `${category}-${index + 1}`,
+    category,
+    title,
+    currentText,
+    suggestedText,
+    whyItHelps,
+    example,
+    xpReward,
+  };
+  const preview = applyInitialImprovementToText(original, card);
+  if (!initialImprovementPreviewLooksSafe(preview, original, card)) return null;
+  return card;
+}
+
+function applyInitialImprovementToText(text, card) {
+  const source = cleanUiText(text);
+  if (!source || !card?.suggestedText) return source;
+  const current = findTextOccurrence(source, card.currentText);
+  if (current) {
+    return replaceFirstTextOccurrence(source, current, card.suggestedText);
+  }
+  return card.suggestedText;
+}
+
+function initialImprovementCardRange(text, card) {
+  const source = String(text || "").toLowerCase();
+  const target = String(card?.currentText || "").toLowerCase();
+  if (!source || !target) return null;
+  const start = source.indexOf(target);
+  return start >= 0 ? { start, end: start + target.length } : null;
+}
+
+function initialImprovementPreviewLooksSafe(preview, original, card) {
+  const text = cleanUiText(preview);
+  if (!text || normalizeClientText(text) === normalizeClientText(original)) return false;
+  if (hasAdjacentRepeatedWords(text)) return false;
+  if (text.split(/\s+/).length > Math.max(28, original.split(/\s+/).length + 12)) return false;
+  const currentWords = normalizeClientText(card.currentText).split(/\s+/).filter((word) => word.length > 2);
+  const suggestedWords = normalizeClientText(card.suggestedText);
+  const preservesSomeMeaning = currentWords.length === 0 || currentWords.some((word) => suggestedWords.includes(word));
+  if (!preservesSomeMeaning && card.currentText !== original) return false;
+  return true;
+}
+
+function normalizeInitialImprovementCategory(category) {
+  const value = String(category || "").trim();
+  return [
+    "subject_clarity",
+    "sentence_flow",
+    "natural_phrasing",
+    "grammar_fix",
+    "visual_clarity",
+  ].includes(value) ? value : "natural_phrasing";
+}
+
+function initialImprovementCategoryTitle(category) {
+  return {
+    subject_clarity: "Clearer subject",
+    sentence_flow: "Better sentence flow",
+    natural_phrasing: "More natural phrasing",
+    grammar_fix: "Cleaner grammar",
+    visual_clarity: "Clearer image meaning",
+  }[category] || "Useful improvement";
+}
+
+function buildContextAwareUpgrade(original, oldText, newText, options = {}) {
+  const source = cleanUiText(original);
+  const replacement = cleanUiText(newText);
+  if (!source || !replacement) return null;
+  const structuralTarget = options.allowStructuralRetarget === false ? "" : structuralStarterTarget(source, replacement);
+  const target = findTextOccurrence(source, structuralTarget || oldText);
+  if (!target || normalizeClientText(target) === normalizeClientText(replacement)) return null;
+  const finalPreview = replaceFirstTextOccurrence(source, target, replacement);
+  if (!upgradeFinalPreviewLooksSafe(source, target, replacement, finalPreview)) return null;
+  return { oldText: target, newText: replacement, finalPreview };
+}
+
+function structuralStarterTarget(source, replacement) {
+  if (!/^(?:the|this)\s+(?:image|scene|picture)\s+(?:shows|includes|has)\b/i.test(replacement)) {
+    return "";
+  }
+  const patterns = [
+    /\bIn (?:the|this) (?:image|scene|picture),? there (?:is|are)\b/i,
+    /\bThere (?:is|are)\b/i,
+    /\b(?:The|This) (?:image|scene|picture) (?:has|includes)\b/i,
+  ];
+  for (const pattern of patterns) {
+    const match = String(source || "").match(pattern);
+    if (match) return match[0];
+  }
+  return "";
+}
+
+function upgradeFinalPreviewLooksSafe(original, target, replacement, finalPreview) {
+  const source = String(original || "");
+  const preview = String(finalPreview || "");
+  if (!source || !target || !replacement || !preview || preview === source) return false;
+  if (!source.toLowerCase().includes(String(target).toLowerCase())) return false;
+  if (/\bIn\s+(?:The|This)\s+(?:image|scene|picture)\s+(?:shows|includes|has)\b/.test(preview)) return false;
+  if (/\b(?:image|scene|picture)\s+(?:shows|includes|has)\s+(?:image|scene|picture)\b/i.test(preview)) return false;
+  if (hasAdjacentRepeatedWords(preview)) return false;
+
+  const start = source.toLowerCase().indexOf(String(target).toLowerCase());
+  const before = source.slice(0, start);
+  const previousWord = (before.match(/\b([a-z]+)\s*$/i) || [])[1] || "";
+  const replacementAddsClause = /\b(?:shows?|includes?|has|have|is|are|was|were|can see)\b/i.test(replacement);
+  const targetHasClause = /\b(?:there\s+(?:is|are)|shows?|includes?|has|have|is|are|was|were|can see)\b/i.test(target);
+  if (replacementAddsClause && !targetHasClause && /\b(?:in|on|at|of|with|behind|beside|near)\b/i.test(previousWord)) {
+    return false;
+  }
+  if (replacementAddsClause && !targetHasClause && target.split(/\s+/).filter(Boolean).length <= 2 && start > 0) {
+    return false;
+  }
+  return true;
+}
+
+function hasAdjacentRepeatedWords(text) {
+  const words = String(text || "").toLowerCase().match(/\b[a-z]+\b/g) || [];
+  return words.some((word, index) => index > 0 && word === words[index - 1]);
+}
+
+function toggleInitialModalPopover(target) {
   const active = target.classList.contains("active");
-  els.sessionDetailPanel.querySelectorAll(".initial-upgrade-highlight.active").forEach((item) => {
+  els.sessionDetailPanel.querySelectorAll(".initial-modal-weak.active").forEach((item) => {
     item.classList.remove("active");
     item.setAttribute("aria-expanded", "false");
   });
   if (!active) {
     target.classList.add("active");
     target.setAttribute("aria-expanded", "true");
+    window.requestAnimationFrame(() => positionInitialModalPopover(target));
   }
 }
 
-function initialUpgradeWhy(phrase) {
-  const text = normalizeClientText(phrase);
-  if (text.includes("lined with")) return "It connects the road and buildings naturally.";
-  if (text.includes("quiet") || text.includes("urban")) return "It adds a clearer quality without adding new image facts.";
-  if (text.includes("residential")) return "It makes the building type more specific.";
-  return "This phrase sounds more natural and expressive.";
+function positionActiveInitialModalPopover() {
+  const active = els.sessionDetailPanel?.querySelector(".initial-modal-weak.active");
+  if (active) {
+    positionInitialModalPopover(active);
+  }
 }
 
-function initialUpgradeMeaning(phrase) {
-  const text = normalizeClientText(phrase);
-  if (text.includes("lined with")) return "Use it when things continue along both sides of a place.";
-  if (text.includes("urban")) return "Use it for scenes connected to a city or town.";
-  if (text.includes("residential")) return "Use it for places where people live.";
-  return "Reusable meaning: a stronger way to describe the same idea.";
+function positionInitialModalPopover(target) {
+  const popover = target?.querySelector(".initial-modal-popover");
+  if (!target || !popover || !target.classList.contains("active")) return;
+  const safe = 12;
+  const gap = 12;
+  const viewportWidth = Math.max(document.documentElement.clientWidth || 0, window.innerWidth || 0);
+  const viewportHeight = Math.max(document.documentElement.clientHeight || 0, window.innerHeight || 0);
+  const modalRect = target.closest(".ai-enhancement-modal")?.getBoundingClientRect();
+  const availableWidth = modalRect
+    ? Math.min(viewportWidth - safe * 2, modalRect.width - safe * 2)
+    : viewportWidth - safe * 2;
+  const width = Math.min(512, Math.max(248, availableWidth));
+  popover.style.width = `${width}px`;
+
+  const targetRect = target.getBoundingClientRect();
+  let popoverRect = popover.getBoundingClientRect();
+  const height = Math.min(popoverRect.height, Math.max(180, viewportHeight - safe * 2));
+  const spaceAbove = targetRect.top - safe;
+  const spaceBelow = viewportHeight - targetRect.bottom - safe;
+  const openBelow = spaceAbove < height + gap && spaceBelow > spaceAbove;
+  let top = openBelow ? targetRect.bottom + gap : targetRect.top - height - gap;
+  top = Math.max(safe, Math.min(top, viewportHeight - height - safe));
+
+  const center = targetRect.left + targetRect.width / 2;
+  let left = center - width / 2;
+  if (modalRect) {
+    left = Math.max(modalRect.left + safe, Math.min(left, modalRect.right - width - safe));
+  }
+  left = Math.max(safe, Math.min(left, viewportWidth - width - safe));
+  const arrowLeft = Math.max(18, Math.min(width - 18, center - left));
+
+  target.classList.toggle("popover-below", openBelow);
+  popover.style.left = `${left}px`;
+  popover.style.top = `${top}px`;
+  popover.style.maxHeight = `${Math.max(160, viewportHeight - safe * 2)}px`;
+  popover.style.setProperty("--arrow-left", `${arrowLeft}px`);
 }
 
-function initialUpgradeExample(phrase) {
-  const text = cleanUiText(phrase);
-  if (normalizeClientText(text).includes("lined with")) return "Example: The street is lined with shops.";
-  return `Example: The scene shows ${text}.`;
+function showInitialModalXpPulse(anchor, xp = 5) {
+  const pulse = document.createElement("span");
+  pulse.className = "initial-modal-xp-pulse";
+  pulse.textContent = `+${xp} XP`;
+  (anchor || document.getElementById("initialEnhancementSentence"))?.appendChild(pulse);
+  window.setTimeout(() => pulse.remove(), 900);
 }
 
 function joinReadableList(items = []) {
@@ -1861,7 +2519,9 @@ function renderImproveStep(session) {
   const attempts = state.sessionFlow.attempts || [];
   const latestAttempt = attempts[attempts.length - 1] || null;
   const latestFeedback = latestAttempt?.feedback || state.sessionFlow.feedback || {};
-  const latestText = latestAttempt?.text || state.sessionFlow.explanation || "";
+  const latestText = attempts.length <= 1 && state.sessionFlow.initialImprovementDraft
+    ? state.sessionFlow.initialImprovementDraft
+    : latestAttempt?.text || state.sessionFlow.explanation || "";
   const rewriteDraft = evolvingParagraphText(latestText, latestFeedback);
   const attemptNumber = attempts.length;
   const coverageLayers = buildCoverageLayerState(latestFeedback, session, latestText);
@@ -4221,21 +4881,27 @@ function polishUpgradeTypeAllowed(type) {
 }
 
 function normalizeUpgradeSuggestion(item, text) {
-  const oldText = cleanUiText(item?.oldText || item?.old || item?.instead_of);
-  const newText = cleanUiText(item?.newText || item?.new || item?.use || item?.strong);
+  const oldText = cleanUiText(item?.targetText || item?.oldText || item?.old || item?.instead_of);
+  const newText = cleanUiText(item?.replacementText || item?.newText || item?.new || item?.use || item?.strong);
   if (!newText || oldText === newText || normalizeClientText(oldText) === normalizeClientText(newText)) {
     return null;
   }
   if (oldText.split(/\s+/).filter(Boolean).length > 6 || newText.split(/\s+/).filter(Boolean).length > 7) {
     return null;
   }
-  if (!oldText || !findTextOccurrence(text, oldText)) {
+  const safeUpgrade = buildContextAwareUpgrade(text, oldText, newText, { allowStructuralRetarget: false });
+  if (!oldText || !safeUpgrade) {
     return null;
   }
   const type = item?.type || inferUpgradeType(oldText, newText);
   return {
-    oldText: oldText ? findTextOccurrence(text, oldText) || oldText : "",
-    newText,
+    oldText: safeUpgrade.oldText,
+    newText: safeUpgrade.newText,
+    targetText: safeUpgrade.oldText,
+    replacementText: safeUpgrade.newText,
+    reason: cleanUiText(item?.reason || item?.why),
+    example: cleanUiText(item?.example),
+    finalPreview: safeUpgrade.finalPreview,
     type,
     xp: xpForUpgradeType(type),
   };
@@ -5318,7 +5984,7 @@ function insertWritingHint(hint) {
   const value = input.value.trimEnd();
   const needsSpace = value && !/[\s-]$/.test(input.value);
   input.value = `${value}${needsSpace ? " " : ""}${text}`;
-  limitWritingInput({ target: input });
+  onInitialAttemptInput({ target: input });
   input.focus();
 }
 
@@ -5342,7 +6008,20 @@ function replaceWritingStarter(starter) {
     (item) => normalizeClientText(item) === currentStarter
   );
   input.value = `${text}${currentValue.slice((rawStarter || "").length).trimStart()}`;
+  onInitialAttemptInput({ target: input });
   input.focus();
+}
+
+function onInitialAttemptInput(event) {
+  const input = event.target;
+  const starter = state.sessionFlow?.initialStarterText || "";
+  if (state.sessionFlow) {
+    state.sessionFlow.initialStarterTouched = true;
+  }
+  limitWritingInput(event);
+  const value = input.value || "";
+  const stillOnlyStarter = starter && normalizeClientText(value) === normalizeClientText(starter);
+  input.classList.toggle("starter-prefill", Boolean(stillOnlyStarter));
 }
 
 function limitWritingInput(event) {
@@ -6145,10 +6824,10 @@ async function submitExplanationFeedback(session) {
   }
 
   setButtonBusy(button, true, "Checking...");
-  showSessionThinkingState("Checking covered layers...", [
-    "Checking the main image parts",
-    "Finding the next focus",
-    "Preparing light hints",
+  showSessionThinkingState("Finding ways to improve your wording...", [
+    "Reading your sentence",
+    "Looking for major wording upgrades",
+    "Preparing your choices",
   ]);
   try {
     const data = await api(`/api/sessions/${session.id}/feedback`, {

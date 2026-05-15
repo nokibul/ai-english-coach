@@ -1069,6 +1069,500 @@ assert(!hints.includes("walking"), "appearance hints should not include unrelate
         )
         self.assertEqual(result.returncode, 0, result.stderr)
 
+    @unittest.skipIf(shutil.which("node") is None, "node is required for first feedback modal tests")
+    def test_initial_feedback_modal_uses_original_sentence_and_manual_upgrades(self) -> None:
+        script = r"""
+const fs = require("fs");
+const vm = require("vm");
+const code = fs.readFileSync("english_learner_app/static/app.js", "utf8");
+const context = {
+  document: { addEventListener() {}, getElementById() { return null; }, querySelectorAll() { return []; } },
+  window: { setTimeout() {}, clearTimeout() {} },
+  console,
+};
+vm.createContext(context);
+vm.runInContext(code, context);
+
+function assert(condition, message) {
+  if (!condition) throw new Error(message);
+}
+
+const original = "There is a road and buildings.";
+const feedback = {
+  better_version: "The image shows a quiet urban road lined with tall residential buildings.",
+  initial_attempt_feedback: {
+    covered_enhancement: "The image shows a quiet urban road lined with tall residential buildings.",
+    reusable_language: {
+      phrases: ["lined with"],
+      nouns: ["urban road", "residential buildings"],
+    },
+  },
+};
+const items = context.buildInitialFeedbackModalUpgradeItems(original, feedback.initial_attempt_feedback, feedback);
+const sentenceHtml = context.renderInitialModalSentenceMarkup(original, items);
+const previewHtml = context.renderInitialPreviewMarkup(original, items);
+
+assert(items.some((item) => item.oldText === "and" && item.newText === "lined with"), "modal should suggest manual positioning upgrade");
+assert(sentenceHtml.includes("initial-modal-weak"), "original sentence should show weak phrase targets");
+assert(sentenceHtml.includes("Upgrade suggestion"), "weak phrase should contain compact upgrade card");
+assert(sentenceHtml.includes("Apply"), "upgrade card should include Apply");
+assert(!sentenceHtml.includes("The image shows a quiet urban road lined with tall residential buildings."), "modal should not show the full AI rewrite immediately");
+assert(previewHtml.includes("There is") && previewHtml.includes("and") && previewHtml.includes("buildings"), "preview should start from the learner's own sentence");
+"""
+        result = subprocess.run(
+            ["node", "-e", script],
+            cwd=Path(__file__).resolve().parents[1],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    @unittest.skipIf(shutil.which("node") is None, "node is required for first feedback improvement card tests")
+    def test_initial_feedback_uses_meaningful_improvement_cards(self) -> None:
+        script = r"""
+const fs = require("fs");
+const vm = require("vm");
+const code = fs.readFileSync("english_learner_app/static/app.js", "utf8");
+const context = {
+  document: { addEventListener() {}, getElementById() { return null; }, querySelectorAll() { return []; } },
+  window: { setTimeout() {}, clearTimeout() {} },
+  console,
+};
+vm.createContext(context);
+vm.runInContext(code, context);
+
+function assert(condition, message) {
+  if (!condition) throw new Error(message);
+}
+
+const original = "The image shows a children close-up who has chipped his belly and behind him is blanket.";
+const initialFeedback = {
+  improvements: [
+    {
+      id: "subject-clarity-1",
+      category: "subject_clarity",
+      title: "Clearer subject",
+      currentText: "a children close-up",
+      suggestedText: "a close-up of a young child",
+      whyItHelps: "This sounds more natural when describing someone shown closely.",
+      example: "The image shows a close-up of a young child.",
+      xpReward: 10,
+    },
+    {
+      id: "flow-1",
+      category: "sentence_flow",
+      title: "Smoother sentence",
+      currentText: "behind him is blanket",
+      suggestedText: "with a blanket behind him",
+      whyItHelps: "This connects the background detail more smoothly.",
+      example: "The child is sitting with a blanket behind him.",
+      xpReward: 10,
+    },
+  ],
+};
+const cards = context.buildInitialImprovementCards(original, initialFeedback, {});
+assert(cards.length === 2, "should keep meaningful card improvements");
+assert(cards[0].category === "subject_clarity", "card category should be preserved");
+assert(cards[0].suggestedText === "a close-up of a young child", "suggestedText should be complete and safe");
+const preview = context.applyInitialImprovementToText(original, cards[0]);
+assert(preview.includes("a close-up of a young child"), "applying should update the preview");
+assert(!preview.includes("children close-up"), "applying should remove the confusing segment");
+const html = context.renderInitialImprovementCard(cards[0], 0, cards.length, original);
+assert(html.includes("Clearer subject"), "card should render title");
+assert(html.includes("Apply +10 XP"), "card should render apply reward");
+assert(html.includes("Skip"), "card should render skip action");
+"""
+        result = subprocess.run(
+            ["node", "-e", script],
+            cwd=Path(__file__).resolve().parents[1],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    @unittest.skipIf(shutil.which("node") is None, "node is required for first feedback improvement card tests")
+    def test_initial_feedback_card_fallback_allows_no_major_upgrade(self) -> None:
+        script = r"""
+const fs = require("fs");
+const vm = require("vm");
+const code = fs.readFileSync("english_learner_app/static/app.js", "utf8");
+const context = {
+  document: { addEventListener() {}, getElementById() { return null; }, querySelectorAll() { return []; } },
+  window: { setTimeout() {}, clearTimeout() {} },
+  console,
+};
+vm.createContext(context);
+vm.runInContext(code, context);
+
+function assert(condition, message) {
+  if (!condition) throw new Error(message);
+}
+
+const original = "The image shows a child sitting on a bed.";
+const cards = context.buildInitialImprovementCards(original, {
+  improvements: [],
+  covered_enhancement: original,
+}, { better_version: original });
+assert(cards.length === 0, "clear sentence should be allowed to continue without forced improvements");
+const done = context.renderInitialImprovementCompleteState("Nice work — your sentence is already clear enough to continue.");
+assert(done.includes("No major upgrade needed"), "empty state should explain no major upgrade is needed");
+"""
+        result = subprocess.run(
+            ["node", "-e", script],
+            cwd=Path(__file__).resolve().parents[1],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    @unittest.skipIf(shutil.which("node") is None, "node is required for initial starter hint tests")
+    def test_initial_attempt_starter_ideas_are_minimal_and_high_signal(self) -> None:
+        script = r"""
+const fs = require("fs");
+const vm = require("vm");
+const code = fs.readFileSync("english_learner_app/static/app.js", "utf8");
+const context = {
+  document: { addEventListener() {}, getElementById() { return null; }, querySelectorAll() { return []; } },
+  window: { setTimeout() {}, clearTimeout() {} },
+  console,
+};
+vm.createContext(context);
+vm.runInContext(code, context);
+
+function assert(condition, message) {
+  if (!condition) throw new Error(message);
+}
+
+const session = {
+  analysis: {
+    objects: [
+      { name: "signboard" },
+      { name: "palm trees" },
+      { name: "tall columns" },
+      { name: "climbing plants" },
+      { name: "people near the entrance" },
+    ],
+    environment_details: ["tiny background window", "blue sky", "modern building"],
+    sentence_starters: ["The image shows"],
+  },
+};
+const hints = context.getStarterIdeaHints(session);
+const labels = hints.map((item) => item.label);
+assert(hints.length <= 3, "starter ideas should never show more than three hints");
+assert(hints.every((item) => item.meaning && item.example), "each starter hint should include info popover content");
+assert(labels.includes("palm trees"), "starter ideas should include visually dominant easy nouns");
+assert(labels.includes("tall columns"), "starter ideas should include high-signal descriptive phrases");
+assert(labels.includes("climbing plants"), "starter ideas should include beginner-friendly visual phrases");
+assert(labels.indexOf("palm trees") < labels.indexOf("tall columns"), "main subject should be prioritized before setting/context hints");
+assert(!labels.includes("signboard"), "starter ideas should avoid low-signal details");
+assert(!labels.includes("people near the entrance"), "starter ideas should avoid longer answer-like phrases");
+const climbing = hints.find((item) => item.label === "climbing plants");
+assert(/grow upward|greenery attached/i.test(climbing.meaning), "phrase meaning should explain how the hint describes the image");
+assert(climbing.example === "The building is covered with climbing plants.", "example should be visually meaningful and reusable");
+const markup = context.renderStarterHintChip(climbing, 1);
+assert(markup.includes("data-insert-hint"), "chip body should keep a separate insert action");
+assert(markup.includes("data-starter-hint-info"), "chip should include a separate info action");
+assert(markup.includes("starter-hint-popover"), "chip should render compact info popover markup");
+assert(markup.includes("Meaning") && markup.includes("Example"), "popover should show meaning and example labels");
+
+const childSession = {
+  analysis: {
+    starter_hints: [
+      {
+        label: "young child",
+        type: "phrase",
+        meaning: "A very small child, usually younger than a teenager. Use this when the person in the image looks very young.",
+        example: "A young child is sitting on a soft bed surface.",
+      },
+    ],
+    objects: [{ name: "young child" }, { name: "couch/bed surface" }],
+  },
+};
+const childHint = context.getStarterIdeaHints(childSession)[0];
+assert(childHint.type === "phrase", "AI starter hint type should be preserved");
+assert(childHint.meaning.includes("looks very young"), "AI starter hint meaning should be specific, not generic");
+assert(childHint.example === "A young child is sitting on a soft bed surface.", "AI starter hint example should be preserved");
+
+const singleSubjectSession = {
+  analysis: {
+    objects: [{ name: "young child", importance: 0.95 }],
+    environment_details: ["tiny background corner"],
+  },
+};
+const singleSubjectHints = context.getStarterIdeaHints(singleSubjectSession).map((item) => item.label);
+assert(singleSubjectHints.length === 1, "one strong main subject should not force extra hints");
+assert(singleSubjectHints[0] === "young child", "single strong subject should be the only starter hint");
+
+const streetSession = {
+  analysis: {
+    objects: [
+      { name: "motorbike", importance: 0.95 },
+      { name: "streetlight pole", importance: 0.7 },
+    ],
+    environment_details: ["power lines", "distant signboard"],
+  },
+};
+const streetLabels = context.getStarterIdeaHints(streetSession).map((item) => item.label);
+assert(streetLabels.length <= 3, "street hints should stay minimal");
+assert(streetLabels[0] === "motorbike", "street main subject should come first");
+assert(streetLabels.includes("streetlight pole"), "supporting subject should be included when useful");
+assert(streetLabels.includes("power lines"), "setting/context hint should be included when useful");
+"""
+        result = subprocess.run(
+            ["node", "-e", script],
+            cwd=Path(__file__).resolve().parents[1],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    @unittest.skipIf(shutil.which("node") is None, "node is required for starter popover tests")
+    def test_starter_hint_popover_position_avoids_writing_controls(self) -> None:
+        script = r"""
+const fs = require("fs");
+const vm = require("vm");
+const code = fs.readFileSync("english_learner_app/static/app.js", "utf8");
+const protectedRects = {
+  ".writing-box-wrap": { left: 40, top: 140, right: 360, bottom: 430, width: 320, height: 290 },
+  submitWritingButton: { left: 40, top: 450, right: 360, bottom: 510, width: 320, height: 60 },
+};
+const context = {
+  document: {
+    addEventListener() {},
+    getElementById(id) {
+      return protectedRects[id] ? { getBoundingClientRect() { return protectedRects[id]; } } : null;
+    },
+    querySelector(selector) {
+      return protectedRects[selector] ? { getBoundingClientRect() { return protectedRects[selector]; } } : null;
+    },
+    querySelectorAll() { return []; },
+    documentElement: { clientWidth: 400, clientHeight: 560 },
+  },
+  window: { innerWidth: 400, innerHeight: 560, setTimeout() {}, clearTimeout() {} },
+  console,
+};
+vm.createContext(context);
+vm.runInContext(code, context);
+
+function assert(condition, message) {
+  if (!condition) throw new Error(message);
+}
+
+const placement = context.chooseStarterHintPopoverPlacement({
+  anchorRect: { left: 300, top: 110, right: 324, bottom: 134, width: 24, height: 24 },
+  width: 260,
+  height: 180,
+  viewportWidth: 400,
+  viewportHeight: 560,
+  safe: 12,
+  gap: 10,
+});
+assert(placement.side !== "below", "popover should avoid opening down into the writing box when another side is safer");
+assert(placement.left >= 12 && placement.left + 260 <= 388, "popover should stay inside horizontal viewport bounds");
+assert(placement.top >= 12 && placement.top + 180 <= 548, "popover should stay inside vertical viewport bounds");
+"""
+        result = subprocess.run(
+            ["node", "-e", script],
+            cwd=Path(__file__).resolve().parents[1],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    @unittest.skipIf(shutil.which("node") is None, "node is required for initial starter tests")
+    def test_initial_attempt_prefills_soft_sentence_starter_once(self) -> None:
+        script = r"""
+const fs = require("fs");
+const vm = require("vm");
+const code = fs.readFileSync("english_learner_app/static/app.js", "utf8");
+const context = {
+  document: { addEventListener() {}, getElementById() { return null; }, querySelectorAll() { return []; } },
+  window: { setTimeout() {}, clearTimeout() {} },
+  console,
+};
+vm.createContext(context);
+vm.runInContext(code, context);
+
+function assert(condition, message) {
+  if (!condition) throw new Error(message);
+}
+
+const session = { analysis: { sentence_starters: ["In this image..."] } };
+const flow = { explanation: "", initialStarterText: "", initialStarterTouched: false };
+const first = context.prepareInitialAttemptDraft(flow, session);
+assert(first.isStarter, "first empty initial attempt should use a starter draft");
+assert(first.text === "In this image ", "starter draft should be normalized for natural continuation");
+assert(flow.initialStarterText === "In this image ", "flow should remember the starter text");
+
+flow.initialStarterTouched = true;
+const second = context.prepareInitialAttemptDraft(flow, session);
+assert(!second.isStarter && second.text === "", "starter should not reappear after the learner interacts");
+
+const written = context.prepareInitialAttemptDraft({ explanation: "A child is smiling.", initialStarterTouched: false }, session);
+assert(!written.isStarter && written.text === "A child is smiling.", "existing learner text should remain owned by the learner");
+"""
+        result = subprocess.run(
+            ["node", "-e", script],
+            cwd=Path(__file__).resolve().parents[1],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    @unittest.skipIf(shutil.which("node") is None, "node is required for theme toggle tests")
+    def test_theme_toggle_updates_body_and_button_state(self) -> None:
+        script = r"""
+const fs = require("fs");
+const vm = require("vm");
+const code = fs.readFileSync("english_learner_app/static/app.js", "utf8");
+
+function makeClassList() {
+  const values = new Set();
+  return {
+    add(value) { values.add(value); },
+    remove(value) { values.delete(value); },
+    contains(value) { return values.has(value); },
+    toggle(value, force) {
+      const shouldAdd = force === undefined ? !values.has(value) : Boolean(force);
+      if (shouldAdd) values.add(value);
+      else values.delete(value);
+      return shouldAdd;
+    },
+  };
+}
+
+const bodyClassList = makeClassList();
+const rootClassList = makeClassList();
+const icon = { textContent: "" };
+const button = {
+  attrs: {},
+  setAttribute(name, value) { this.attrs[name] = value; },
+  querySelector(selector) { return selector === ".theme-toggle-icon" ? icon : null; },
+};
+const storage = {};
+const context = {
+  document: {
+    body: { classList: bodyClassList },
+    documentElement: { classList: rootClassList },
+    addEventListener() {},
+    getElementById(id) { return id === "themeToggleButton" ? button : null; },
+    querySelectorAll() { return []; },
+  },
+  window: { matchMedia() { return { matches: false }; } },
+  localStorage: {
+    getItem(key) { return storage[key] || null; },
+    setItem(key, value) { storage[key] = value; },
+  },
+  console,
+};
+vm.createContext(context);
+vm.runInContext(code, context);
+context.cacheElements();
+
+context.applyTheme("dark");
+if (!bodyClassList.contains("dark-mode")) throw new Error("dark mode class should be applied");
+if (button.attrs["aria-pressed"] !== "true") throw new Error("toggle should expose pressed dark state");
+if (button.attrs["aria-label"] !== "Switch to light mode") throw new Error("toggle should describe the next mode");
+if (storage.aiEnglishTheme !== "dark") throw new Error("dark preference should persist");
+
+context.toggleTheme();
+if (bodyClassList.contains("dark-mode")) throw new Error("toggle should remove dark mode");
+if (button.attrs["aria-pressed"] !== "false") throw new Error("toggle should expose light state");
+if (storage.aiEnglishTheme !== "light") throw new Error("light preference should persist");
+"""
+        result = subprocess.run(
+            ["node", "-e", script],
+            cwd=Path(__file__).resolve().parents[1],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    @unittest.skipIf(shutil.which("node") is None, "node is required for first feedback modal tests")
+    def test_initial_feedback_modal_targets_full_starter_for_structural_upgrade(self) -> None:
+        script = r"""
+const fs = require("fs");
+const vm = require("vm");
+const code = fs.readFileSync("english_learner_app/static/app.js", "utf8");
+const context = {
+  document: { addEventListener() {}, getElementById() { return null; }, querySelectorAll() { return []; } },
+  window: { setTimeout() {}, clearTimeout() {} },
+  console,
+};
+vm.createContext(context);
+vm.runInContext(code, context);
+
+function assert(condition, message) {
+  if (!condition) throw new Error(message);
+}
+
+const original = "In the image there is a baby sitting and looking at the camera with striped curtains behind her back.";
+const feedback = {
+  better_version: "The image shows a baby sitting and looking at the camera with striped curtains behind her back.",
+  initial_attempt_feedback: {
+    covered_enhancement: "The image shows a baby sitting and looking at the camera with striped curtains behind her back.",
+    reusable_language: {
+      sentence_structures: ["The image shows"],
+    },
+  },
+};
+const items = context.buildInitialFeedbackModalUpgradeItems(original, feedback.initial_attempt_feedback, feedback);
+const starterUpgrade = items.find((item) => item.replacementText === "The image shows");
+assert(starterUpgrade, "modal should keep a safe structural starter upgrade");
+assert(starterUpgrade.targetText === "In the image there is", "structural starter should target the full existing starter");
+assert(starterUpgrade.finalPreview === "The image shows a baby sitting and looking at the camera with striped curtains behind her back.", "finalPreview should be the full safe sentence");
+assert(!items.some((item) => /^the$/i.test(item.targetText) && item.replacementText === "The image shows"), "modal must not replace only 'the' with a sentence starter");
+assert(!starterUpgrade.finalPreview.includes("In The image shows image"), "final preview must not contain the broken duplicate-subject phrase");
+"""
+        result = subprocess.run(
+            ["node", "-e", script],
+            cwd=Path(__file__).resolve().parents[1],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    @unittest.skipIf(shutil.which("node") is None, "node is required for static polish stage tests")
+    def test_upgrade_normalization_rejects_structurally_broken_replacement(self) -> None:
+        script = r"""
+const fs = require("fs");
+const vm = require("vm");
+const code = fs.readFileSync("english_learner_app/static/app.js", "utf8");
+const context = {
+  document: { addEventListener() {}, getElementById() { return null; }, querySelectorAll() { return []; } },
+  window: { setTimeout() {}, clearTimeout() {} },
+  console,
+};
+vm.createContext(context);
+vm.runInContext(code, context);
+
+function assert(condition, message) {
+  if (!condition) throw new Error(message);
+}
+
+const answer = "In the image there is a baby.";
+const bad = context.normalizeUpgradeSuggestion({ targetText: "the image", replacementText: "The image shows" }, answer);
+const good = context.normalizeUpgradeSuggestion({ targetText: "In the image there is", replacementText: "The image shows" }, answer);
+assert(bad === null, "partial structural replacements should be rejected");
+assert(good && good.finalPreview === "The image shows a baby.", "full starter replacement should pass with a finalPreview");
+"""
+        result = subprocess.run(
+            ["node", "-e", script],
+            cwd=Path(__file__).resolve().parents[1],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
 
 class DatabaseAuthTests(unittest.TestCase):
     def test_create_multiple_users_without_phone(self) -> None:
@@ -1344,6 +1838,47 @@ class AIAnalyzerTests(unittest.TestCase):
         self.assertIn("do not teach them as key vocabulary", prompt)
         self.assertIn("Sentence patterns should help learners write better sentences", prompt)
         self.assertIn("Do not include basic function words", prompt)
+        self.assertIn('"starter_hints"', prompt)
+        self.assertIn("meaning must explain what the word/phrase means", prompt)
+        self.assertIn("examples must be one short natural sentence", prompt)
+
+    def test_analysis_normalizes_starter_hints_with_specific_content(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with patch.dict(os.environ, {}, clear=True):
+                config = AppConfig.from_env(base_dir=Path(temp_dir))
+
+        analyzer = AIAnalyzer(config)
+        normalized = analyzer._normalize_analysis(
+            {
+                "scene_summary_natural": "A young child is sitting on a soft bed surface.",
+                "scene_summary_simple": "A child is sitting.",
+                "objects": [{"name": "young child", "description": "A young child is visible.", "importance": 0.9}],
+                "environment": {"setting": "room", "details": ["soft bed surface"]},
+                "starter_hints": [
+                    {
+                        "label": "young child",
+                        "type": "phrase",
+                        "meaning": "A very small child, usually younger than a teenager. Use this when the person in the image looks very young.",
+                        "example": "A young child is sitting on a soft bed surface.",
+                    }
+                ],
+                "quiz_candidates": [
+                    {
+                        "quiz_type": "recognition",
+                        "prompt": "Who is visible?",
+                        "answer": "young child",
+                        "distractors": ["car", "tree", "road"],
+                        "explanation": "The image shows a child.",
+                    }
+                ],
+            },
+            difficulty_band="beginner",
+        )
+
+        self.assertEqual("young child", normalized["starter_hints"][0]["label"])
+        self.assertEqual("phrase", normalized["starter_hints"][0]["type"])
+        self.assertIn("looks very young", normalized["starter_hints"][0]["meaning"])
+        self.assertEqual("A young child is sitting on a soft bed surface.", normalized["starter_hints"][0]["example"])
 
     def test_feedback_prompt_caps_scores_by_image_coverage(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -1387,6 +1922,9 @@ class AIAnalyzerTests(unittest.TestCase):
         self.assertIn("enhance ONLY what the learner covered", prompt)
         self.assertIn("Do not add major missing details yet", prompt)
         self.assertIn("initialAttemptFeedback", prompt)
+        self.assertIn("meaningful improvement cards", prompt)
+        self.assertIn("inlineImprovements must be an empty array", prompt)
+        self.assertIn("suggestedText must be a complete safe sentence segment", prompt)
 
     def test_initial_attempt_feedback_replaces_full_answer_with_covered_enhancement(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -1413,6 +1951,18 @@ class AIAnalyzerTests(unittest.TestCase):
                 "initialAttemptFeedback": {
                     "acknowledgement": "Nice start — you described the road and buildings.",
                     "coveredEnhancement": "The image shows a quiet urban road lined with tall buildings.",
+                    "improvements": [
+                        {
+                            "id": "natural-1",
+                            "category": "natural_phrasing",
+                            "title": "More natural opening",
+                            "currentText": "There is a road and buildings.",
+                            "suggestedText": "The image shows a road with buildings nearby.",
+                            "whyItHelps": "This sounds more natural for describing an image.",
+                            "example": "The image shows a road with buildings nearby.",
+                            "xpReward": 10,
+                        }
+                    ],
                     "reusableLanguageFromEnhancement": {
                         "nouns": ["road", "buildings"],
                         "phrases": ["lined with tall buildings"],
@@ -1430,6 +1980,8 @@ class AIAnalyzerTests(unittest.TestCase):
             initial["covered_enhancement"],
         )
         self.assertEqual(initial["covered_enhancement"], feedback["better_version"])
+        self.assertEqual("natural_phrasing", initial["improvements"][0]["category"])
+        self.assertEqual("The image shows a road with buildings nearby.", initial["improvements"][0]["suggestedText"])
         self.assertIn("road", initial["reusable_language"]["nouns"])
         self.assertEqual(["trees", "motorcycle"], initial["missing_visual_areas"])
 
