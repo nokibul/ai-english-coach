@@ -13,7 +13,7 @@ XP_VALUES = {
     "weak_item_correct": 25,
     "phrase_used": 10,
     "multiple_phrases_used": 15,
-    "combo_bonus": 5,
+    "combo_bonus": 10,
     "combo_bonus_big": 12,
     "daily_challenge_completed": 40,
 }
@@ -31,7 +31,7 @@ def xp_for_event(event_name: str) -> int:
 def combo_bonus_for_streak(streak_count: int) -> int:
     streak_count = max(0, int(streak_count))
     if streak_count >= 5 and streak_count % 5 == 0:
-        return xp_for_event("combo_bonus_big")
+        return 20
     if streak_count >= 3 and streak_count % 3 == 0:
         return xp_for_event("combo_bonus")
     return 0

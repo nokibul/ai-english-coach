@@ -55,13 +55,6 @@ class AppConfig:
     quiz_retake_minutes: int
     max_upload_bytes: int
     ai_backend: str
-    vllm_base_url: str
-    vllm_api_key: str
-    vllm_model: str
-    vllm_timeout_seconds: float
-    vllm_max_concurrency: int
-    vllm_batch_interval_ms: int
-    vllm_batch_max_size: int
     openai_api_key: str | None
     openai_model: str
     openai_base_url: str
@@ -78,6 +71,9 @@ class AppConfig:
     smtp_use_starttls: bool
     smtp_use_ssl: bool
     cookie_secure: bool
+    disable_login_flow: bool
+    dev_user_email: str
+    dev_user_name: str
 
     @classmethod
     def from_env(cls, base_dir: Path | None = None) -> "AppConfig":
@@ -93,13 +89,6 @@ class AppConfig:
             root=root,
         )
         openai_api_key = os.getenv("OPENAI_API_KEY")
-        vllm_model = os.getenv("VLLM_MODEL", "Qwen/Qwen2.5-VL-7B-Instruct-AWQ")
-        vllm_max_concurrency = max(1, int(os.getenv("VLLM_MAX_CONCURRENCY", "8")))
-        vllm_batch_interval_ms = max(0, int(os.getenv("VLLM_BATCH_INTERVAL_MS", "30")))
-        vllm_batch_max_size = max(
-            vllm_max_concurrency,
-            int(os.getenv("VLLM_BATCH_MAX_SIZE", str(vllm_max_concurrency))),
-        )
         explicit_backend = os.getenv("AI_BACKEND")
         if explicit_backend:
             ai_backend = explicit_backend.strip().lower()
@@ -126,15 +115,8 @@ class AppConfig:
                 os.getenv("REVIEW_PROMPT_INTERVAL_SECONDS", "90")
             ),
             quiz_retake_minutes=int(os.getenv("QUIZ_RETAKE_MINUTES", "20")),
-            max_upload_bytes=int(os.getenv("MAX_UPLOAD_BYTES", str(8 * 1024 * 1024))),
+            max_upload_bytes=int(os.getenv("MAX_UPLOAD_BYTES", str(25 * 1024 * 1024))),
             ai_backend=ai_backend,
-            vllm_base_url=os.getenv("VLLM_BASE_URL", "http://127.0.0.1:8000/v1").rstrip("/"),
-            vllm_api_key=os.getenv("VLLM_API_KEY", "local-dev"),
-            vllm_model=vllm_model,
-            vllm_timeout_seconds=float(os.getenv("VLLM_TIMEOUT_SECONDS", "120")),
-            vllm_max_concurrency=vllm_max_concurrency,
-            vllm_batch_interval_ms=vllm_batch_interval_ms,
-            vllm_batch_max_size=vllm_batch_max_size,
             openai_api_key=openai_api_key,
             openai_model=os.getenv("OPENAI_MODEL", "gpt-4.1-mini"),
             openai_base_url=os.getenv(
@@ -153,4 +135,7 @@ class AppConfig:
             smtp_use_starttls=_env_bool("SMTP_USE_STARTTLS", True),
             smtp_use_ssl=_env_bool("SMTP_USE_SSL", False),
             cookie_secure=_env_bool("COOKIE_SECURE", False),
+            disable_login_flow=_env_bool("DISABLE_LOGIN_FLOW", False),
+            dev_user_email=os.getenv("DEV_USER_EMAIL", "dev@local.test"),
+            dev_user_name=os.getenv("DEV_USER_NAME", "Dev Learner"),
         )

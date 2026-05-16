@@ -13,8 +13,10 @@ from .utils import normalize_answer
 
 
 QUIZ_TYPE_PRIORITY = [
-    "sentence_upgrade_battle",
     "phrase_snap",
+    "choose_better",
+    "fix_the_sentence",
+    "sentence_upgrade_battle",
     "phrase_duel",
     "fix_the_mistake",
     "use_it_or_lose_it",
@@ -756,233 +758,153 @@ def build_post_improve_quiz_rows(
     ).strip()
     phrases = _post_improve_phrases(analysis, feedback)
     primary_phrase = phrases[0]["phrase"] if phrases else ""
-    phrase_texts = [item["phrase"] for item in phrases]
     missing_details = _feedback_text_list(feedback.get("missing_details"), limit=3)
-    fixes = _feedback_text_list(feedback.get("fix_this_to_improve"), limit=3)
-    phrase_usage = feedback.get("phrase_usage") if isinstance(feedback.get("phrase_usage"), dict) else {}
-    phrase_message = str((phrase_usage or {}).get("message") or "").strip()
-    better_version = str(feedback.get("better_version") or improved_text or explanation).strip()
-    learner_text = learner_text.strip()
-    improved_text = improved_text.strip() or better_version
-    weak_sentence = learner_text or _generic_weak_sentence(analysis)
+    better_version = _shorten_to_sentence(
+        str(feedback.get("better_version") or improved_text or explanation).strip()
+    )
+    improved_text = _shorten_to_sentence(improved_text.strip() or better_version)
     visual_terms = _object_action_terms(analysis)
     vocabulary_terms = _post_improve_vocabulary(analysis)
+    action_phrase = _micro_action_phrase(analysis, phrases, better_version, improved_text)
+    fill_target = _post_improve_fill_target(analysis, phrases, action_phrase)
+    snap = _micro_phrase_snap(fill_target, improved_text or better_version or explanation)
+    fixed_sentence = improved_text or better_version or _shorten_to_sentence(explanation)
+    option_pool = unique_texts([*visual_terms, *vocabulary_terms, *[item["phrase"] for item in phrases]], limit=10)
+    comprehension = _post_improve_comprehension_question(analysis, feedback, option_pool)
 
-    rows.append(
-        _quiz_row(
-            user_id=user_id,
-            session_id=session_id,
-            quiz_type="sentence_upgrade_battle",
-            prompt=f"Sentence Upgrade Battle: Rewrite this sentence stronger: {weak_sentence}",
-            answer_mode="typing",
-            correct_answer=better_version,
-            acceptable_answers=[better_version, improved_text],
-            distractors=[],
-            explanation="Upgrade the weak sentence with clearer image detail and more natural English.",
-            difficulty=min(0.92, _difficulty_for_type("sentence_upgrade_battle", learner_level) + 0.18),
-            skill_tag="post-improve quiz",
-            metadata={
-                **_post_improve_metadata(
-                    quiz_label="Sentence Upgrade Battle",
-                    related_phrase=primary_phrase,
-                    xp_value=18,
-                    source="user mistakes + improved answer",
-                ),
-                "weak_sentence": weak_sentence,
-                "keywords": unique_texts([primary_phrase, *visual_terms, *vocabulary_terms], limit=5),
-                "reference_answer": better_version,
-            },
-            seen_prompts=seen_prompts,
-            created_at=created_at,
-        )
-    )
-    rows.append(
-        _quiz_row(
-            user_id=user_id,
-            session_id=session_id,
-            quiz_type="sentence_upgrade_battle",
-            prompt="Sentence Upgrade Battle: Pick the stronger version.",
-            answer_mode="multiple_choice",
-            correct_answer=better_version,
-            acceptable_answers=[better_version],
-            distractors=_deterministic_options(
-                correct=better_version,
-                candidates=[learner_text, _shorten_to_sentence(explanation), _generic_weak_sentence(analysis)],
-            ),
-            explanation="The best upgrade adds image detail and uses more natural reusable language.",
-            difficulty=max(0.2, _difficulty_for_type("sentence_upgrade_battle", learner_level) - 0.14),
-            skill_tag="post-improve quiz",
-            metadata=_post_improve_metadata(
-                quiz_label="Sentence Upgrade Battle",
-                related_phrase=primary_phrase,
-                xp_value=14,
-                source="image explanation + improved answer",
-            ),
-            seen_prompts=seen_prompts,
-            created_at=created_at,
-        )
-    )
-
-    for index, phrase_item in enumerate(phrases[:3]):
-        phrase = phrase_item["phrase"]
-        example = (
-            phrase_item.get("example")
-            or _sentence_with_phrase(explanation, phrase)
-            or _sentence_with_phrase(better_version, phrase)
-            or f"The image shows {phrase}."
-        )
-        masked = _masked_sentence(example, phrase) or f"Complete the phrase from this lesson: _____"
+    if comprehension:
         rows.append(
             _quiz_row(
                 user_id=user_id,
                 session_id=session_id,
-                quiz_type="phrase_snap",
-                prompt=f"Phrase Snap: {masked}",
-                answer_mode="multiple_choice" if index == 0 else "typing",
-                correct_answer=phrase,
-                acceptable_answers=[phrase],
-                distractors=_deterministic_options(
-                    correct=phrase,
-                    candidates=phrase_texts + vocabulary_terms,
-                ),
-                explanation=phrase_item.get("meaning") or f'Use "{phrase}" when that idea appears in the image.',
-                difficulty=_difficulty_for_type("phrase_snap", learner_level) + (0.18 if index else 0.0),
-                skill_tag="post-improve quiz",
-                metadata=_post_improve_metadata(
-                    quiz_label="Phrase Snap",
-                    related_phrase=phrase,
-                    xp_value=10 + (4 if index else 0),
-                    source="reusable phrases",
-                ),
-                seen_prompts=seen_prompts,
-                created_at=created_at,
-            )
-        )
-
-    for phrase_item in phrases[:2]:
-        phrase = phrase_item["phrase"]
-        correct_phrase_sentence = (
-            phrase_item.get("example")
-            or _sentence_with_phrase(explanation, phrase)
-            or _sentence_with_phrase(better_version, phrase)
-            or f"The image shows {phrase}."
-        )
-        rows.append(
-            _quiz_row(
-                user_id=user_id,
-                session_id=session_id,
-                quiz_type="phrase_duel",
-                prompt=f'Phrase Duel: Choose the stronger phrase use for "{phrase}".',
+                quiz_type="multiple_choice_comprehension",
+                prompt=comprehension["prompt"],
                 answer_mode="multiple_choice",
-                correct_answer=correct_phrase_sentence,
-                acceptable_answers=[correct_phrase_sentence],
+                correct_answer=comprehension["answer"],
+                acceptable_answers=[comprehension["answer"]],
                 distractors=_deterministic_options(
-                    correct=correct_phrase_sentence,
-                    candidates=[
-                        f"The picture is very {phrase}.",
-                        f"I can see something and {phrase}.",
-                        learner_text,
-                    ],
-                    limit=1,
+                    correct=comprehension["answer"],
+                    candidates=comprehension["distractors"],
                 ),
-                explanation=phrase_message
-                or f'The full phrase "{phrase}" should sit inside a clear sentence.',
-                difficulty=_difficulty_for_type("phrase_duel", learner_level),
+                explanation=comprehension["explanation"],
+                difficulty=_difficulty_for_type("multiple_choice_comprehension", learner_level),
                 skill_tag="post-improve quiz",
                 metadata=_post_improve_metadata(
-                    quiz_label="Phrase Duel",
-                    related_phrase=phrase,
-                    xp_value=12,
-                    source="phrase usage feedback",
+                    quiz_label="Multiple Choice",
+                    related_phrase=primary_phrase,
+                    xp_value=5,
+                    source="current image/session",
                 ),
                 seen_prompts=seen_prompts,
                 created_at=created_at,
             )
         )
 
-    mistake_focus = fixes[0] if fixes else missing_details[0] if missing_details else "Add the main detail clearly."
-    fixed_sentence = better_version or improved_text or explanation
-    mistake_prompts = unique_texts(
-        [
-            learner_text,
-            _generic_weak_sentence(analysis),
-            f"The picture has {visual_terms[0]}." if visual_terms else "",
-        ],
-        limit=2,
-    )
-    for index, mistake in enumerate(mistake_prompts):
+    pairs = _post_improve_matching_pairs(analysis, phrases, feedback)
+    if len(pairs) >= 3:
+        matching_pairs = pairs[:5]
+        correct_answer = _matching_answer_string(matching_pairs)
         rows.append(
             _quiz_row(
                 user_id=user_id,
                 session_id=session_id,
-                quiz_type="fix_the_mistake",
-                prompt=f"Fix the Mistake: {mistake}",
-                answer_mode="multiple_choice" if index == 0 else "typing",
+                quiz_type="matching_pairs",
+                prompt="Match each word or phrase with its meaning.",
+                answer_mode="matching",
+                correct_answer=correct_answer,
+                acceptable_answers=[correct_answer],
+                distractors=[],
+                explanation="These pairs reinforce useful language from this image.",
+                difficulty=_difficulty_for_type("matching_pairs", learner_level),
+                skill_tag="post-improve quiz",
+                metadata={
+                    **_post_improve_metadata(
+                        quiz_label="Matching",
+                        related_phrase=primary_phrase,
+                        xp_value=6,
+                        source="current image/session",
+                    ),
+                    "pairs": matching_pairs,
+                },
+                seen_prompts=seen_prompts,
+                created_at=created_at,
+            )
+        )
+
+    if snap:
+        prompt, answer, acceptable = snap
+        rows.append(
+            _quiz_row(
+                user_id=user_id,
+                session_id=session_id,
+                quiz_type="fill_blank",
+                prompt=f"Fill in the Blank: {prompt}",
+                answer_mode="typing",
+                correct_answer=answer,
+                acceptable_answers=acceptable,
+                distractors=_deterministic_options(
+                    correct=answer,
+                    candidates=[*visual_terms, *vocabulary_terms],
+                ),
+                explanation="Complete the image phrase with the missing action word.",
+                difficulty=_difficulty_for_type("fill_blank", learner_level),
+                skill_tag="post-improve quiz",
+                metadata=_post_improve_metadata(
+                    quiz_label="Fill in the Blank",
+                    related_phrase=action_phrase or primary_phrase,
+                    xp_value=8,
+                    source="current image/session",
+                ),
+                seen_prompts=seen_prompts,
+                created_at=created_at,
+            )
+        )
+
+    if fixed_sentence:
+        rows.append(
+            _quiz_row(
+                user_id=user_id,
+                session_id=session_id,
+                quiz_type="sentence_reconstruction",
+                prompt="Put the words in the correct order.",
+                answer_mode="reorder",
                 correct_answer=fixed_sentence,
                 acceptable_answers=[fixed_sentence, improved_text],
-                distractors=_deterministic_options(
-                    correct=fixed_sentence,
-                    candidates=[mistake, _shorten_to_sentence(explanation)],
-                ),
-                explanation=f"This correction targets: {mistake_focus}",
-                difficulty=_difficulty_for_type("fix_the_mistake", learner_level) + (0.18 if index else 0.0),
-                skill_tag="post-improve quiz",
-                metadata={
-                    **_post_improve_metadata(
-                        quiz_label="Fix the Mistake",
-                        related_phrase=primary_phrase,
-                        xp_value=14 + (4 if index else 0),
-                        source="user mistakes + missing details",
-                    ),
-                    "keywords": unique_texts([primary_phrase, *visual_terms, *vocabulary_terms], limit=5),
-                    "reference_answer": fixed_sentence,
-                },
-                seen_prompts=seen_prompts,
-                created_at=created_at,
-            )
-        )
-
-    detail_target = missing_details[0] if missing_details else _first_visual_detail(analysis)
-    expected = better_version or explanation
-    for index, phrase in enumerate(phrase_texts[:2] or [primary_phrase]):
-        if not phrase:
-            continue
-        rows.append(
-            _quiz_row(
-                user_id=user_id,
-                session_id=session_id,
-                quiz_type="use_it_or_lose_it",
-                prompt=(
-                    f'Use It or Lose It: Write one image sentence using "{phrase}"'
-                    f"{f' and include {detail_target}' if detail_target else ''}."
-                ),
-                answer_mode="typing",
-                correct_answer=expected,
-                acceptable_answers=[expected, phrase, detail_target],
                 distractors=[],
-                explanation="Practice the same phrase and missing detail immediately so it sticks.",
-                difficulty=_difficulty_for_type("use_it_or_lose_it", learner_level) + (0.08 * index),
+                explanation="Build a natural sentence about the same image.",
+                difficulty=_difficulty_for_type("sentence_reconstruction", learner_level),
                 skill_tag="post-improve quiz",
                 metadata={
                     **_post_improve_metadata(
-                        quiz_label="Use It or Lose It",
-                        related_phrase=phrase,
-                        xp_value=16 + (2 * index),
-                        source="reusable phrase + missing details",
+                        quiz_label="Sentence Reconstruction",
+                        related_phrase=primary_phrase or action_phrase,
+                        xp_value=10,
+                        source="current image/session",
                     ),
-                    "keywords": unique_texts([phrase, detail_target, *_typing_keywords(analysis=analysis)], limit=5),
-                    "reference_answer": expected,
+                    "reference_answer": fixed_sentence,
+                    **_build_sentence_reconstruction_metadata(fixed_sentence),
                 },
                 seen_prompts=seen_prompts,
                 created_at=created_at,
             )
         )
 
-    return [item for item in rows if item]
+    order = {
+        "multiple_choice_comprehension": 0,
+        "matching_pairs": 1,
+        "fill_blank": 2,
+        "sentence_reconstruction": 3,
+    }
+    return sorted([item for item in rows if item], key=lambda item: order.get(str(item["quiz_type"]), 99))[:8]
 
 
 def _difficulty_for_type(quiz_type: str, learner_level: str) -> float:
     base = {
+        "multiple_choice_comprehension": 0.18,
+        "matching_pairs": 0.28,
+        "sentence_reconstruction": 0.5,
+        "choose_better": 0.28,
+        "fix_the_sentence": 0.48,
         "sentence_upgrade_battle": 0.5,
         "phrase_snap": 0.3,
         "phrase_duel": 0.42,
@@ -1049,11 +971,328 @@ def _post_improve_phrases(analysis: dict[str, Any], feedback: dict[str, Any]) ->
     return ordered[:5]
 
 
+def _post_improve_comprehension_question(
+    analysis: dict[str, Any],
+    feedback: dict[str, Any],
+    option_pool: list[str],
+) -> dict[str, Any] | None:
+    missing_text = normalize_answer(" ".join(_feedback_text_list(feedback.get("missing_details"), limit=3)))
+    objects = [str(item.get("name") or "").strip() for item in analysis.get("objects", []) if str(item.get("name") or "").strip()]
+    actions = [
+        str(item.get("phrase") or item.get("verb") or "").strip()
+        for item in analysis.get("actions", [])
+        if str(item.get("phrase") or item.get("verb") or "").strip()
+    ]
+    background = unique_texts(
+        [
+            str(analysis.get("environment") or "").strip(),
+            *[str(item or "").strip() for item in analysis.get("environment_details", [])],
+        ],
+        limit=3,
+    )
+    vocabulary = _post_improve_vocabulary(analysis)
+    candidates = [
+        (
+            "What is the main action in this image?",
+            actions[0] if actions else "",
+            [*objects, *background, *vocabulary],
+            "This checks the main action from the uploaded image.",
+            "main action",
+        ),
+        (
+            "Who or what is the main subject?",
+            objects[0] if objects else "",
+            [*actions, *background, *vocabulary],
+            "This checks the main subject from the uploaded image.",
+            "main subject",
+        ),
+        (
+            "Which background detail fits the image?",
+            background[0] if background else "",
+            [*objects, *actions, *vocabulary],
+            "This checks the setting or background from the uploaded image.",
+            "background",
+        ),
+        (
+            "Which important object appears in the image?",
+            objects[1] if len(objects) > 1 else objects[0] if objects else "",
+            [*actions, *background, *vocabulary],
+            "This checks an important object from the uploaded image.",
+            "object",
+        ),
+        (
+            "Which word best fits the atmosphere or description?",
+            vocabulary[0] if vocabulary else "",
+            [*objects, *actions, *background],
+            "This checks a useful descriptive word from the session.",
+            "atmosphere",
+        ),
+    ]
+    if "action" in missing_text:
+        candidates.insert(0, candidates.pop(0))
+    elif "subject" in missing_text or "person" in missing_text:
+        candidates.insert(0, candidates.pop(1))
+    elif "background" in missing_text or "setting" in missing_text:
+        candidates.insert(0, candidates.pop(2))
+
+    for prompt, answer, distractors, explanation, focus in candidates:
+        answer = _short_pair_text(answer)
+        options = _deterministic_options(
+            correct=answer,
+            candidates=[_short_pair_text(item) for item in [*distractors, *option_pool]],
+            limit=3,
+        )
+        if answer and len(options) >= 2:
+            return {
+                "prompt": prompt,
+                "answer": answer,
+                "distractors": options,
+                "explanation": explanation,
+                "focus": focus,
+            }
+    return None
+
+
+def _post_improve_matching_pairs(
+    analysis: dict[str, Any],
+    phrases: list[dict[str, str]],
+    feedback: dict[str, Any],
+) -> list[dict[str, str]]:
+    pairs: list[dict[str, str]] = []
+    for item in phrases[:3]:
+        phrase = str(item.get("phrase") or "").strip()
+        meaning = str(item.get("meaning") or "").strip()
+        if phrase and meaning:
+            pairs.append({"left": phrase, "right": meaning})
+
+    for action in analysis.get("actions", [])[:3]:
+        verb = str(action.get("verb") or "").strip()
+        phrase = str(action.get("phrase") or "").strip()
+        if verb and phrase and normalize_answer(verb) != normalize_answer(phrase):
+            pairs.append({"left": verb, "right": phrase})
+
+    for index, obj in enumerate(analysis.get("objects", [])[:2]):
+        name = str(obj.get("name") or "").strip()
+        if name:
+            pairs.append({"left": name, "right": "main subject" if index == 0 else "important object"})
+
+    missing = _feedback_text_list(feedback.get("missing_details"), limit=2)
+    for detail in missing:
+        if detail:
+            pairs.append({"left": detail, "right": "important image detail"})
+
+    for vocab in analysis.get("vocabulary", [])[:4]:
+        word = str(vocab.get("word") or "").strip()
+        meaning = str(vocab.get("meaning_simple") or "").strip()
+        if word and meaning:
+            pairs.append({"left": word, "right": meaning})
+
+    for phrase in _positioning_phrases_from_analysis(analysis)[:3]:
+        pairs.append({"left": phrase, "right": "position phrase"})
+
+    cleaned: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for pair in pairs:
+        left = _short_pair_text(pair.get("left", ""))
+        right = _short_pair_text(pair.get("right", ""))
+        key = normalize_answer(f"{left}:{right}")
+        if left and right and key not in seen:
+            cleaned.append({"left": left, "right": right})
+            seen.add(key)
+    return cleaned[:5]
+
+
+def _short_pair_text(value: str) -> str:
+    text = re.sub(r"\s+", " ", str(value or "")).strip(" .!?")
+    words = text.split()
+    if len(words) > 8:
+        text = " ".join(words[:8])
+    return text
+
+
+def _matching_answer_string(pairs: list[dict[str, str]]) -> str:
+    return "||".join(f"{pair['left']}=>{pair['right']}" for pair in pairs if pair.get("left") and pair.get("right"))
+
+
 def _post_improve_vocabulary(analysis: dict[str, Any]) -> list[str]:
     words: list[str] = []
     for item in analysis.get("vocabulary", [])[:5]:
         words.append(str(item.get("word") or "").strip())
     return unique_texts(words, limit=5)
+
+
+def _micro_action_phrase(
+    analysis: dict[str, Any], phrases: list[dict[str, str]], *sentences: str
+) -> str:
+    for action in analysis.get("actions", [])[:4]:
+        phrase = str(action.get("phrase") or "").strip()
+        if phrase and len(phrase.split()) >= 2:
+            return phrase
+    for phrase_item in phrases[:4]:
+        phrase = str(phrase_item.get("phrase") or "").strip()
+        if phrase and len(phrase.split()) >= 2:
+            return phrase
+    for sentence in sentences:
+        words = re.findall(r"[A-Za-z][A-Za-z'-]*", sentence or "")
+        for index, word in enumerate(words[:-1]):
+            if _is_action_word(word):
+                return " ".join(words[index : min(index + 3, len(words))])
+    return ""
+
+
+def _post_improve_fill_target(
+    analysis: dict[str, Any],
+    phrases: list[dict[str, str]],
+    action_phrase: str,
+) -> str:
+    for phrase_item in phrases:
+        phrase = str(phrase_item.get("phrase") or "").strip()
+        if 1 <= len(phrase.split()) <= 4:
+            return phrase
+    if action_phrase:
+        return action_phrase
+    for phrase in _positioning_phrases_from_analysis(analysis):
+        if phrase:
+            return phrase
+    for action in analysis.get("actions", [])[:3]:
+        verb = str(action.get("verb") or "").strip()
+        if verb:
+            return verb
+    return _first_visual_detail(analysis)
+
+
+def _micro_phrase_snap(action_phrase: str, source_sentence: str) -> tuple[str, str, list[str]] | None:
+    phrase_words = re.findall(r"[A-Za-z][A-Za-z'-]*", action_phrase or "")
+    if not phrase_words:
+        return None
+    answer = action_phrase.strip()
+    if len(phrase_words) > 4:
+        answer = next((word for word in phrase_words if _is_action_word(word)), phrase_words[0])
+    sentence = _shorten_to_sentence(source_sentence)
+    if not sentence or normalize_answer(answer) not in normalize_answer(sentence):
+        sentence = f"The image shows {action_phrase}."
+    masked = _masked_sentence(sentence, answer) or f"The image shows _____."
+    acceptable = unique_texts([answer, _base_action_word(answer)] if len(answer.split()) == 1 else [answer], limit=4)
+    return masked, answer, acceptable
+
+
+def _positioning_phrases_from_analysis(analysis: dict[str, Any]) -> list[str]:
+    values = [
+        str(analysis.get("environment") or ""),
+        *[str(item or "") for item in analysis.get("environment_details", [])],
+    ]
+    phrases: list[str] = []
+    for value in values:
+        text = value.lower()
+        phrases.extend(re.findall(r"\b(?:in|on|near|along|behind|beside|around|across)\s+(?:the\s+)?[a-z]+(?:\s+[a-z]+){0,2}", text))
+    return unique_texts([phrase.strip() for phrase in phrases], limit=5)
+
+
+def _build_sentence_reconstruction_metadata(sentence: str) -> dict[str, Any]:
+    chunks = _sentence_to_chunks(sentence)
+    shuffled = chunks[:]
+    if len(shuffled) > 1:
+        random.shuffle(shuffled)
+        if shuffled == chunks:
+            shuffled = list(reversed(chunks))
+    return {
+        "tokens": shuffled,
+        "correct_tokens": chunks,
+    }
+
+
+def _sentence_to_chunks(sentence: str) -> list[str]:
+    words = _sentence_to_words(sentence)
+    if len(words) <= 8:
+        return words
+    target_chunks = 6 if len(words) <= 14 else 8
+    chunk_size = max(1, round(len(words) / target_chunks))
+    chunks = [" ".join(words[index : index + chunk_size]) for index in range(0, len(words), chunk_size)]
+    if len(chunks) > 8:
+        chunks = chunks[:7] + [" ".join(" ".join(chunks[7:]).split())]
+    return chunks
+
+
+def _micro_use_phrase(primary_phrase: str, action_phrase: str, fill_answer: str) -> str:
+    for value in [fill_answer, action_phrase, primary_phrase]:
+        text = str(value or "").strip()
+        if text:
+            return text
+    return ""
+
+
+def _sentence_for_use_phrase(
+    *,
+    phrase: str,
+    source_sentence: str,
+    analysis: dict[str, Any],
+) -> str:
+    phrase = str(phrase or "").strip()
+    if not phrase:
+        return ""
+    sentence = _shorten_to_sentence(source_sentence)
+    if normalize_answer(phrase) in normalize_answer(sentence):
+        return sentence
+
+    subject = _first_visual_detail(analysis) or "The image"
+    if _is_action_word(phrase.split()[0]):
+        return f"{subject.capitalize()} is {phrase}."
+    return f"The image shows {phrase}."
+
+
+def _is_action_word(word: str) -> bool:
+    text = normalize_answer(word)
+    common_actions = {
+        "ride",
+        "riding",
+        "sit",
+        "sitting",
+        "stand",
+        "standing",
+        "walk",
+        "walking",
+        "hold",
+        "holding",
+        "look",
+        "looking",
+        "cut",
+        "cutting",
+        "mow",
+        "mowing",
+        "use",
+        "using",
+        "play",
+        "playing",
+        "wear",
+        "wearing",
+        "carry",
+        "carrying",
+        "drive",
+        "driving",
+    }
+    return text in common_actions or text.endswith("ing")
+
+
+def _base_action_word(word: str) -> str:
+    text = str(word or "").strip()
+    lowered = text.lower()
+    irregular = {
+        "riding": "ride",
+        "using": "use",
+        "driving": "drive",
+        "mowing": "mow",
+        "sitting": "sit",
+        "cutting": "cut",
+        "standing": "stand",
+    }
+    if lowered in irregular:
+        return irregular[lowered]
+    if lowered.endswith("ing") and len(lowered) > 5:
+        stem = text[:-3]
+        if stem and stem[-1:] == stem[-2:-1]:
+            stem = stem[:-1]
+        return stem
+    return text
 
 
 def _feedback_text_list(values: Any, *, limit: int) -> list[str]:
@@ -1287,6 +1526,14 @@ def evaluate_quiz_response(
     )
     metadata = item.get("metadata") or {}
 
+    if quiz_type == "matching_pairs" and answer_mode == "matching":
+        return _evaluate_matching_pairs(
+            item=item,
+            selected_answer=selected_answer,
+            acceptable_answers=acceptable_answers,
+            response_ms=response_ms,
+            confidence=confidence,
+        )
     if quiz_type == "sentence_upgrade_battle" and answer_mode == "typing":
         return _evaluate_sentence_upgrade(
             item=item,
@@ -1298,6 +1545,15 @@ def evaluate_quiz_response(
         )
     if quiz_type == "fix_the_mistake" and answer_mode == "typing":
         return _evaluate_fix_the_mistake(
+            item=item,
+            selected_answer=selected_answer,
+            acceptable_answers=acceptable_answers,
+            metadata=metadata,
+            response_ms=response_ms,
+            confidence=confidence,
+        )
+    if quiz_type == "fix_the_sentence" and answer_mode == "typing":
+        return _evaluate_fix_the_sentence(
             item=item,
             selected_answer=selected_answer,
             acceptable_answers=acceptable_answers,
@@ -1375,6 +1631,53 @@ def _evaluate_choice(
     }
 
 
+def _evaluate_matching_pairs(
+    *,
+    item: dict[str, Any],
+    selected_answer: str,
+    acceptable_answers: list[str],
+    response_ms: int | None,
+    confidence: int | None,
+) -> dict[str, Any]:
+    expected = _parse_matching_answer(acceptable_answers[0] if acceptable_answers else item.get("correct_answer", ""))
+    selected = _parse_matching_answer(selected_answer)
+    total = max(1, len(expected))
+    correct_count = sum(
+        1
+        for left, right in expected.items()
+        if normalize_answer(selected.get(left, "")) == normalize_answer(right)
+    )
+    score = correct_count / total
+    is_correct = score >= 0.999
+    almost = not is_correct and score >= 0.5
+    return {
+        "correct": is_correct,
+        "result_type": "Correct" if is_correct else "Almost Correct" if almost else "Incorrect",
+        "score": score,
+        "quality": 5 if is_correct else 3 if almost else 2,
+        "feedback": {
+            "good": "You matched the image language well." if is_correct else "",
+            "improve": "" if is_correct else "Match each phrase to the meaning from this image.",
+            "corrected_example": str(item.get("correct_answer") or ""),
+        },
+        "response_ms": response_ms or 0,
+        "confidence": confidence or 2,
+    }
+
+
+def _parse_matching_answer(value: Any) -> dict[str, str]:
+    pairs: dict[str, str] = {}
+    for chunk in str(value or "").split("||"):
+        if "=>" not in chunk:
+            continue
+        left, right = chunk.split("=>", 1)
+        left = left.strip()
+        right = right.strip()
+        if left:
+            pairs[left] = right
+    return pairs
+
+
 def _evaluate_reorder(
     *,
     item: dict[str, Any],
@@ -1384,22 +1687,50 @@ def _evaluate_reorder(
     confidence: int | None,
 ) -> dict[str, Any]:
     normalized_selected = normalize_answer(selected_answer)
-    is_correct = any(normalized_selected == normalize_answer(answer) for answer in acceptable_answers)
-    score = 1.0 if is_correct else 0.35 if normalized_selected else 0.0
-    quality = 4 if is_correct else 2
+    normalized_answers = [normalize_answer(answer) for answer in acceptable_answers if normalize_answer(answer)]
+    is_correct = any(normalized_selected == answer for answer in normalized_answers)
+    reference = normalized_answers[0] if normalized_answers else normalize_answer(item.get("correct_answer"))
+    similarity = SequenceMatcher(None, normalized_selected, reference).ratio() if normalized_selected and reference else 0.0
+    chunk_score = _chunk_order_score(
+        selected_answer=selected_answer,
+        correct_tokens=(item.get("metadata") or {}).get("correct_tokens") or [],
+    )
+    score = 1.0 if is_correct else max(similarity, chunk_score)
+    almost = not is_correct and score >= 0.55
+    quality = 4 if is_correct else 3 if almost else 2
     return {
         "correct": is_correct,
-        "result_type": "Correct" if is_correct else "Almost Correct" if score >= 0.35 else "Incorrect",
-        "score": score,
+        "result_type": "Correct" if is_correct else "Almost Correct" if almost else "Incorrect",
+        "score": round(score, 3),
         "quality": quality,
         "feedback": {
             "good": "Your word order sounds natural." if is_correct else "",
-            "improve": "" if is_correct else "Keep the key phrase together and watch the sentence order.",
+            "improve": "" if is_correct else "You are close. Keep the chunks in the image sentence order." if almost else "Put the chunks in the sentence order from the image.",
             "corrected_example": str(item.get("correct_answer") or ""),
         },
         "response_ms": response_ms or 0,
         "confidence": confidence or 2,
     }
+
+
+def _chunk_order_score(*, selected_answer: str, correct_tokens: list[Any]) -> float:
+    expected = [normalize_answer(token) for token in correct_tokens if normalize_answer(token)]
+    selected = normalize_answer(selected_answer)
+    if not expected or not selected:
+        return 0.0
+    positions = [selected.find(token) for token in expected]
+    present = [index for index in positions if index >= 0]
+    if not present:
+        return 0.0
+    in_order = 1
+    last = present[0]
+    for position in present[1:]:
+        if position >= last:
+            in_order += 1
+            last = position
+    coverage = len(present) / len(expected)
+    order = in_order / len(expected)
+    return round((coverage + order) / 2, 3)
 
 
 def _evaluate_typing(
@@ -1474,9 +1805,14 @@ def _evaluate_fill_in(
     response_ms: int | None,
     confidence: int | None,
 ) -> dict[str, Any]:
-    normalized_selected = normalize_answer(selected_answer)
+    selected = selected_answer.strip()
+    normalized_selected = normalize_answer(selected)
     exact = any(normalized_selected == normalize_answer(answer) for answer in acceptable_answers)
-    close = _close_to_any_answer(normalized_selected, acceptable_answers, threshold=0.82)
+    close = bool(normalized_selected) and _close_to_any_answer(
+        normalized_selected,
+        acceptable_answers,
+        threshold=0.82,
+    )
     result_type = "Correct" if exact else "Almost Correct" if close else "Incorrect"
     score = 1.0 if exact else 0.65 if close else 0.0
     correct_answer = str(item.get("correct_answer") or "")
@@ -1486,8 +1822,8 @@ def _evaluate_fill_in(
         "score": score,
         "quality": 5 if exact else 3 if close else 2,
         "feedback": {
-            "good": "That phrase fits." if exact else "You are very close to the target phrase." if close else "",
-            "improve": "" if exact else f'Use the full phrase: "{correct_answer}".',
+            "good": "That word fits the image sentence." if exact else "That is close to the target word." if close else "",
+            "improve": "" if exact else f'Use "{correct_answer}" for this blank.',
             "corrected_example": correct_answer,
         },
         "response_ms": response_ms or 0,
@@ -1580,6 +1916,76 @@ def _evaluate_fix_the_mistake(
     }
 
 
+def _evaluate_fix_the_sentence(
+    *,
+    item: dict[str, Any],
+    selected_answer: str,
+    acceptable_answers: list[str],
+    metadata: dict[str, Any],
+    response_ms: int | None,
+    confidence: int | None,
+) -> dict[str, Any]:
+    selected = selected_answer.strip()
+    normalized_selected = normalize_answer(selected)
+    reference = str(metadata.get("reference_answer") or item.get("correct_answer") or "").strip()
+    weak_sentence = str(metadata.get("weak_sentence") or "").strip()
+    keywords = unique_texts(metadata.get("keywords", []), limit=6)
+    similarity = _best_similarity(normalized_selected, acceptable_answers + [reference])
+    keyword_ratio = _keyword_ratio(normalized_selected, keywords)
+    natural = _looks_like_natural_sentence(selected)
+    changed_from_weak = (
+        SequenceMatcher(None, normalized_selected, normalize_answer(weak_sentence)).ratio() < 0.94
+        if weak_sentence
+        else True
+    )
+    action_preserved = _required_action_preserved(normalized_selected, reference, keywords)
+    meaning_preserved = action_preserved and (similarity >= 0.58 or keyword_ratio >= 0.45)
+    partial_meaning = action_preserved and (similarity >= 0.42 or keyword_ratio >= 0.3)
+    grammar_improved = natural and changed_from_weak and _has_basic_sentence_structure(selected)
+    close_natural_alternative = natural and meaning_preserved and (similarity >= 0.62 or keyword_ratio >= 0.5)
+    is_correct = grammar_improved and close_natural_alternative
+    is_almost = not is_correct and (meaning_preserved or partial_meaning or grammar_improved)
+    score = 1.0 if is_correct else max(similarity, keyword_ratio, 0.6 if is_almost else 0.0)
+    if not selected:
+        score = 0.0
+        is_almost = False
+    return {
+        "correct": is_correct,
+        "result_type": "Correct" if is_correct else "Almost Correct" if is_almost else "Incorrect",
+        "score": round(score, 3),
+        "quality": 5 if is_correct else 3 if is_almost else 2,
+        "feedback": {
+            "good": "Meaning is preserved and the structure is better." if is_correct else (
+                "You kept part of the image meaning." if is_almost else ""
+            ),
+            "improve": "" if is_correct else (
+                "Good start. Make the sentence more complete and natural."
+                if is_almost
+                else "Keep the main meaning and write one complete sentence."
+            ),
+            "corrected_example": reference,
+        },
+        "response_ms": response_ms or 0,
+        "confidence": confidence or 2,
+    }
+
+
+def _required_action_preserved(normalized_selected: str, reference: str, keywords: list[str]) -> bool:
+    action_words: list[str] = []
+    for text in [reference, *keywords]:
+        for word in re.findall(r"[A-Za-z][A-Za-z'-]*", text or ""):
+            if _is_action_word(word):
+                action_words.append(word)
+    actions = unique_texts(action_words, limit=3)
+    if not actions:
+        return True
+    for action in actions:
+        variants = unique_texts([action, _base_action_word(action), f"{_base_action_word(action)}s"], limit=4)
+        if any(normalize_answer(variant) in normalized_selected for variant in variants):
+            return True
+    return False
+
+
 def _evaluate_use_it_or_lose_it(
     *,
     item: dict[str, Any],
@@ -1593,7 +1999,7 @@ def _evaluate_use_it_or_lose_it(
     normalized_selected = normalize_answer(selected)
     phrase = str(metadata.get("related_reusable_phrase") or "").strip()
     normalized_phrase = normalize_answer(phrase)
-    phrase_present = bool(normalized_phrase) and normalized_phrase in normalized_selected
+    phrase_present = _required_phrase_present(normalized_selected, normalized_phrase)
     natural = _looks_like_natural_sentence(selected)
     keywords = unique_texts(metadata.get("keywords", []), limit=6)
     keyword_ratio = _keyword_ratio(normalized_selected, [item for item in keywords if normalize_answer(item) != normalized_phrase])
@@ -1609,15 +2015,28 @@ def _evaluate_use_it_or_lose_it(
         "feedback": {
             "good": f'You used "{phrase}".' if phrase_present else "",
             "improve": "" if is_correct else (
-                "The phrase is present. Now put it in a more natural complete sentence."
+                "The word or phrase is present. Now make the grammar smoother."
                 if is_almost
-                else f'Use the reusable phrase "{phrase}" in your sentence.'
+                else f'Use "{phrase}" in one complete sentence about the image.'
             ),
             "corrected_example": reference,
         },
         "response_ms": response_ms or 0,
         "confidence": confidence or 2,
     }
+
+
+def _required_phrase_present(normalized_selected: str, normalized_phrase: str) -> bool:
+    if not normalized_phrase:
+        return False
+    if normalized_phrase in normalized_selected:
+        return True
+    phrase_words = normalized_phrase.split()
+    if len(phrase_words) == 1:
+        base = _base_action_word(phrase_words[0])
+        variants = unique_texts([phrase_words[0], base, f"{base}s", f"{base}ing"], limit=5)
+        return any(variant and variant in normalized_selected.split() for variant in variants)
+    return False
 
 
 def _close_to_any_answer(normalized_selected: str, acceptable_answers: list[str], *, threshold: float) -> bool:
@@ -1667,6 +2086,16 @@ def _looks_like_natural_sentence(text: str) -> bool:
             "were",
             "has",
             "have",
+            "rides",
+            "ride",
+            "uses",
+            "use",
+            "drives",
+            "drive",
+            "carries",
+            "carry",
+            "holds",
+            "hold",
             "shows",
             "looks",
             "seems",
@@ -1675,5 +2104,37 @@ def _looks_like_natural_sentence(text: str) -> bool:
             "standing",
             "sitting",
             "using",
+        }
+    )
+
+
+def _has_basic_sentence_structure(text: str) -> bool:
+    words = normalize_answer(text).split()
+    if len(words) < 5:
+        return False
+    linking_or_aux = {
+        "is",
+        "are",
+        "was",
+        "were",
+        "has",
+        "have",
+        "shows",
+        "looks",
+        "seems",
+    }
+    if any(word in words for word in linking_or_aux):
+        return True
+    return any(
+        word in words
+        for word in {
+            "rides",
+            "drives",
+            "uses",
+            "carries",
+            "holds",
+            "walks",
+            "stands",
+            "sits",
         }
     )
