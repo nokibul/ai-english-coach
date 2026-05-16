@@ -7,7 +7,6 @@ const state = {
   learnView: "compose",
   currentSessionId: null,
   currentSession: null,
-  questions: [],
   settings: {
     review_prompt_interval_seconds: 90,
     quiz_retake_minutes: 20,
@@ -117,7 +116,6 @@ function cacheElements() {
     "verifyForm",
     "signupButton",
     "loginButton",
-    "assessmentQuestions",
     "verificationEmailLabel",
     "verificationEmailInput",
     "resendOtpButton",
@@ -126,11 +124,6 @@ function cacheElements() {
     "quizModalTitle",
     "quizContent",
     "closeQuizButton",
-    "languageModal",
-    "languageModalLabel",
-    "languageModalTitle",
-    "languageModalContent",
-    "closeLanguageModalButton",
     "toast",
   ];
 
@@ -164,8 +157,6 @@ function bindEvents() {
   els.closeDashboardButton.addEventListener("click", closeDashboardModal);
   els.quizLauncherButton.addEventListener("click", () => openQuizModal({ mode: "mixed" }));
   els.closeQuizButton.addEventListener("click", closeQuizModal);
-  els.closeLanguageModalButton.addEventListener("click", closeLanguageModal);
-  els.sessionDetailPanel.addEventListener("click", onLanguageCardClick);
   document.addEventListener("click", (event) => {
     if (!event.target.closest?.(".starter-hint-chip, .starter-hint-popover")) {
       closeStarterHintPopovers();
@@ -314,12 +305,10 @@ function restoreStoredSessionFlow(sessionId, fallbackFlow) {
 async function bootstrap() {
   try {
     const data = await api("/api/bootstrap");
-    state.questions = data.questions || [];
     state.settings = {
       ...state.settings,
       ...(data.settings || {}),
     };
-    renderAssessmentQuestions();
 
     if (data.user) {
       applyUserState(data.user, data.stats, data.progress);
@@ -340,40 +329,6 @@ async function bootstrap() {
   } catch (error) {
     showToast(error.message || "Unable to load the app.", true);
   }
-}
-
-function renderAssessmentQuestions() {
-  els.assessmentQuestions.innerHTML = "";
-  state.questions.forEach((question) => {
-    const card = document.createElement("section");
-    card.className = "assessment-card";
-    card.innerHTML = `
-      <p class="field-label">${escapeHtml(question.prompt)}</p>
-      <div class="scale-options">
-        ${[1, 2, 3, 4, 5]
-          .map(
-            (value) => `
-            <label>
-              <input
-                type="radio"
-                name="${question.id}"
-                value="${value}"
-                ${value === 3 ? "checked" : ""}
-                required
-              >
-              <span>${value}</span>
-            </label>
-          `
-          )
-          .join("")}
-      </div>
-      <div class="field-row">
-        <span class="muted">${escapeHtml(question.min_label)}</span>
-        <span class="muted">${escapeHtml(question.max_label)}</span>
-      </div>
-    `;
-    els.assessmentQuestions.appendChild(card);
-  });
 }
 
 function switchAuthTab(mode) {
@@ -436,7 +391,6 @@ function clearUserState() {
   renderProgressHeader();
   renderQuizButton();
   renderDashboardContent();
-  closeLanguageModal();
   els.userBadge.textContent = "Guest mode";
   els.dashboardButton.disabled = false;
   els.analyzeButton.disabled = true;
@@ -482,7 +436,6 @@ function renderSession(session, options = {}) {
   state.currentSession = session;
   state.currentSessionId = session.id;
   state.learnView = "session";
-  closeLanguageModal();
   renderLearnMode();
   els.sessionDetailPanel.classList.remove("hidden");
   state.sessionFlow = options.restoreFlow === false
@@ -561,7 +514,6 @@ function renderSessionStep(step, updates = {}) {
     state.currentSession.learning_stage = state.sessionFlow.stage;
   }
 
-  closeLanguageModal();
   els.sessionDetailPanel.classList.remove("hidden");
 
   if (step === "write") {
@@ -769,197 +721,6 @@ function playTapAnimation(element) {
   window.setTimeout(() => {
     element.classList.remove("tap-pop");
   }, 220);
-}
-
-function renderLearnStep(session) {
-  const vocabulary = session.analysis.vocabulary || [];
-  const phrases = session.analysis.phrases || [];
-  const sentencePatterns = session.analysis.sentence_patterns || [];
-
-  const vocabularyMarkup = vocabulary.length
-    ? vocabulary
-        .slice(0, 4)
-        .map(
-          (item, index) => `
-            <button class="language-card language-card-button" type="button" data-language-kind="vocabulary" data-language-index="${index}">
-              <div class="language-card-head">
-                <span class="mini-pill">${escapeHtml(item.part_of_speech || "word")}</span>
-                <strong>${escapeHtml(item.word)}</strong>
-              </div>
-              <p>${escapeHtml(item.meaning_simple || "")}</p>
-              ${
-                item.example
-                  ? `<p class="muted language-example">${escapeHtml(item.example)}</p>`
-                  : ""
-              }
-            </button>
-          `
-        )
-        .join("")
-    : `<div class="empty-copy">Vocabulary will appear here after explanation generation.</div>`;
-
-  const phraseMarkup = phrases.length
-    ? phrases
-        .slice(0, 4)
-        .map(
-          (item, index) => `
-            <button class="language-card language-card-button" type="button" data-language-kind="phrase" data-language-index="${index}">
-              <div class="language-card-head">
-                <span class="mini-pill">${escapeHtml(item.collocation_type || "phrase")}</span>
-                <strong>${escapeHtml(item.phrase)}</strong>
-                ${item.mastery_state ? `<span class="mini-pill">${escapeHtml(item.mastery_state)}</span>` : ""}
-              </div>
-              <p>${escapeHtml(item.meaning_simple || "")}</p>
-              ${
-                item.example
-                  ? `<p class="muted language-example">${escapeHtml(item.example)}</p>`
-                  : ""
-              }
-            </button>
-          `
-        )
-        .join("")
-    : `<div class="empty-copy">Reusable phrases will appear here after explanation generation.</div>`;
-
-  const patternMarkup = sentencePatterns.length
-    ? sentencePatterns
-        .slice(0, 3)
-        .map(
-          (item, index) => `
-            <button class="language-card language-card-button sentence-pattern-card" type="button" data-language-kind="pattern" data-language-index="${index}">
-              <div class="language-card-head">
-                <span class="mini-pill">structure</span>
-                <strong>${escapeHtml(item.pattern)}</strong>
-              </div>
-              <p>${escapeHtml(item.usage_note || "Use this to build a natural image description.")}</p>
-              ${
-                item.example
-                  ? `<p class="muted language-example">${escapeHtml(item.example)}</p>`
-                  : ""
-              }
-            </button>
-          `
-        )
-        .join("")
-    : `<div class="empty-copy">Sentence structures will appear here after explanation generation.</div>`;
-
-  els.sessionDetailPanel.innerHTML = `
-    <div class="journey-shell learn-step-shell">
-      ${renderStepProgress("learn")}
-      ${
-        session.source_mode === "demo"
-          ? `<div class="source-banner">The app is in demo mode, so this lesson uses demo teaching content instead of real image understanding.</div>`
-          : ""
-      }
-
-      <section class="result-section hero-result-card">
-        <div class="hero-image-shell">
-          <img src="${session.image_url}" alt="Learning session image">
-        </div>
-        <div class="hero-result-copy">
-          <p class="eyebrow">Step 1: Learn</p>
-          <h3>${escapeHtml(session.title)}</h3>
-          <p class="muted">
-            Read the image explanation and skim a few useful language pieces. Then it is your turn.
-          </p>
-          <div class="lesson-guidance-row">
-            <span class="guidance-pill">${escapeHtml(session.difficulty_label || formatBand(session.difficulty_band))}</span>
-            <span class="guidance-pill">Saved ${escapeHtml(formatDate(session.created_at))}</span>
-            <span class="guidance-pill">Mastery ${Math.round(session.mastery_percent || 0)}%</span>
-          </div>
-        </div>
-      </section>
-
-      <section class="result-section explanation-result-card">
-        <div class="section-head">
-          <div>
-            <p class="eyebrow">Read First</p>
-            <h4>AI explanation</h4>
-          </div>
-        </div>
-        <div class="highlighted-text explanation-text">${session.analysis.highlighted_html || ""}</div>
-      </section>
-
-      <section class="result-section language-result-card">
-        <div class="section-head">
-          <div>
-            <p class="eyebrow">Skim Next</p>
-            <h4>Reusable language</h4>
-          </div>
-          <span class="section-badge">${Math.min(vocabulary.length, 4) + Math.min(phrases.length, 4) + Math.min(sentencePatterns.length, 3)}</span>
-        </div>
-
-        <div class="language-groups">
-          <div class="language-group">
-            <div class="language-group-head">
-              <h5>Key words</h5>
-            </div>
-            <div class="language-grid">${vocabularyMarkup}</div>
-          </div>
-
-          <div class="language-group">
-            <div class="language-group-head">
-              <h5>Phrases</h5>
-            </div>
-            <div class="language-grid">${phraseMarkup}</div>
-          </div>
-
-          <div class="language-group">
-            <div class="language-group-head">
-              <h5>Sentence structures</h5>
-            </div>
-            <div class="language-grid">${patternMarkup}</div>
-          </div>
-        </div>
-        <p class="muted language-help-copy">Tap a word, phrase, or sentence structure for examples. Only the most useful items are shown here.</p>
-      </section>
-
-      <div class="sticky-journey-cta">
-        <button id="yourTurnButton" class="primary-button journey-primary-button" type="button">
-          Your Turn →
-        </button>
-      </div>
-    </div>
-  `;
-
-  const quickChallengeButton = document.getElementById("startSessionQuickChallenge");
-  if (quickChallengeButton) {
-    quickChallengeButton.addEventListener("click", () => {
-      openQuizModal({ mode: "session", session_id: session.id });
-    });
-  }
-
-  const yourTurnButton = document.getElementById("yourTurnButton");
-  if (yourTurnButton) {
-    yourTurnButton.addEventListener("click", () => {
-      renderSessionStep("write");
-      window.scrollTo({ top: 0, behavior: "smooth" });
-    });
-  }
-}
-
-function onLanguageCardClick(event) {
-  const card = event.target.closest("[data-language-kind]");
-  if (!card || !els.sessionDetailPanel.contains(card) || !state.currentSession) {
-    return;
-  }
-
-  const kind = card.dataset.languageKind;
-  const index = Number(card.dataset.languageIndex);
-  const analysis = state.currentSession.analysis || {};
-  const vocabulary = analysis.vocabulary || [];
-  const phrases = analysis.phrases || [];
-  const sentencePatterns = analysis.sentence_patterns || [];
-  const item =
-    kind === "vocabulary"
-      ? vocabulary[index]
-      : kind === "pattern"
-        ? sentencePatterns[index]
-        : phrases[index];
-  if (!item) {
-    return;
-  }
-  openLanguageModal({ item, kind, session: state.currentSession });
 }
 
 function renderWriteStep(session) {
@@ -7153,7 +6914,6 @@ function openNewSessionComposer(options = {}) {
   state.learnView = "compose";
   state.currentSession = null;
   state.currentSessionId = null;
-  closeLanguageModal();
   resetUploadPreview();
   els.analyzeForm.reset();
   els.analyzeButton.disabled = !state.user;
@@ -7172,9 +6932,6 @@ async function onSignup(event) {
     phone: form.get("phone"),
     email: form.get("email"),
     password: form.get("password"),
-    assessment: Object.fromEntries(
-      state.questions.map((question) => [question.id, form.get(question.id)])
-    ),
   };
 
   setButtonBusy(els.signupButton, true, "Creating...");
@@ -7959,7 +7716,6 @@ async function onLogout() {
   } finally {
     closeDashboardModal();
     closeQuizModal();
-    closeLanguageModal();
     clearUserState();
     switchAuthTab("signup");
   }
@@ -8021,82 +7777,6 @@ function closeQuizModal() {
   state.currentReviewSession = null;
   state.quizQuestionStartedAt = null;
   els.quizModal.classList.add("hidden");
-}
-
-function openLanguageModal({ item, kind, session }) {
-  const term =
-    kind === "vocabulary" ? item.word : kind === "pattern" ? item.pattern : item.phrase;
-  const label =
-    kind === "vocabulary"
-      ? item.part_of_speech || "word"
-      : kind === "pattern"
-        ? "sentence structure"
-      : item.collocation_type || "phrase";
-  const examples = buildLanguageExamples(item);
-
-  els.languageModalLabel.textContent =
-    kind === "vocabulary"
-      ? "Word Practice"
-      : kind === "pattern"
-        ? "Structure Practice"
-        : "Phrase Practice";
-  els.languageModalTitle.textContent = term;
-  els.languageModalContent.innerHTML = `
-    <div class="language-modal-stack">
-      <div class="language-modal-summary">
-        <span class="mini-pill">${escapeHtml(label)}</span>
-        <p>${escapeHtml(item.meaning_simple || item.usage_note || "Useful reusable language from this lesson.")}</p>
-      </div>
-      <div class="language-example-panel">
-        <h4>More examples</h4>
-        <div class="language-example-list">
-          ${
-            examples.length
-              ? examples
-                  .map(
-                    (example, index) => `
-                <article class="language-example-card">
-                  <span class="language-example-index">${index + 1}</span>
-                  <p>${escapeHtml(example)}</p>
-                </article>
-              `
-                  )
-                  .join("")
-              : `<article class="language-example-card"><p>No saved examples are available for this item yet.</p></article>`
-          }
-        </div>
-      </div>
-    </div>
-  `;
-  els.languageModal.classList.remove("hidden");
-}
-
-function closeLanguageModal() {
-  els.languageModal.classList.add("hidden");
-}
-
-function buildLanguageExamples(item) {
-  const examples = [];
-  const seen = new Set();
-
-  const push = (value) => {
-    const text = String(value || "").trim();
-    if (!text) {
-      return;
-    }
-    const key = text.toLowerCase().replace(/\s+/g, " ");
-    if (!key || seen.has(key)) {
-      return;
-    }
-    seen.add(key);
-    examples.push(text);
-  };
-
-  const aiExamples = Array.isArray(item.examples) ? item.examples : [];
-  aiExamples.forEach(push);
-  push(item.example);
-
-  return examples;
 }
 
 async function startOrResumeQuiz() {

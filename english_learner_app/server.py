@@ -1008,28 +1008,6 @@ def quiz_difficulty_label(item: dict[str, Any]) -> str:
     return "hard"
 
 
-def quiz_base_xp(item: dict[str, Any]) -> int:
-    return {
-        "easy": 5,
-        "medium": 10,
-        "hard": 15,
-    }[quiz_difficulty_label(item)]
-
-
-def quiz_has_perfect_phrase_usage(
-    *, item: dict[str, Any], selected_answer: str, correct: bool
-) -> bool:
-    if not correct:
-        return False
-    metadata = item.get("metadata") or {}
-    phrase = str(metadata.get("related_reusable_phrase") or "").strip()
-    if not phrase:
-        return False
-    if str(item.get("quiz_type") or "") == "use_it_or_lose_it":
-        return True
-    return normalize_answer(phrase) in normalize_answer(selected_answer)
-
-
 def quiz_run_completion_bonuses(
     *,
     db: Database,
@@ -1265,7 +1243,6 @@ async def bootstrap(request: web.Request) -> web.Response:
     return web.json_response(
         {
             "app_name": request.app["config"].app_name,
-            "questions": ONBOARDING_QUESTIONS,
             "settings": {
                 "review_prompt_interval_seconds": request.app[
                     "config"
@@ -1290,7 +1267,12 @@ async def signup(request: web.Request) -> web.Response:
     email = str(payload.get("email") or "").strip().lower()
     phone = normalize_phone(str(payload.get("phone") or ""))
     password = str(payload.get("password") or "")
-    assessment_payload = payload.get("assessment") or {}
+    raw_assessment = payload.get("assessment")
+    assessment_payload = raw_assessment if isinstance(raw_assessment, dict) else {}
+    assessment_payload = {
+        question["id"]: assessment_payload.get(question["id"]) or 3
+        for question in ONBOARDING_QUESTIONS
+    }
 
     if len(full_name) < 2:
         raise web.HTTPBadRequest(reason="Please enter your full name.")
