@@ -74,6 +74,7 @@ def build_app(config: AppConfig | None = None) -> web.Application:
     app.on_cleanup.append(close_background_clients)
 
     app.router.add_get("/", index)
+    app.router.add_get(r"/sessions/{session_id:\d+}", index)
     app.router.add_get("/healthz", healthz)
     app.router.add_static("/static/", str(config.static_dir))
 
@@ -379,10 +380,21 @@ def learning_stage_from_feedback(feedback: dict[str, Any], *, attempt_index: int
     ]
     ready = bool(readiness.get("ready"))
     criteria = readiness.get("criteria") if isinstance(readiness.get("criteria"), dict) else {}
-    has_main_focus = bool(criteria.get("mainSubject", coverage.get("mainSubjectMentioned") is not False))
-    has_action = bool(criteria.get("mainAction", coverage.get("mainActionMentioned") is not False))
-    has_setting = bool(criteria.get("settingBackground")) or _covered_part_matches(
+    action_required = any(_part_matches(part, ("main_action", "main action")) for part in required_parts)
+    category_state = _coverage_category_state(required_parts)
+    high_priority_ratio = _high_priority_coverage_ratio(category_state)
+    supporting_count = _covered_supporting_category_count(category_state)
+    supporting_needed = min(3 if len(_supporting_category_keys(category_state)) >= 4 else 2, len(_supporting_category_keys(category_state)))
+    has_main_focus = bool(criteria.get("mainSubject", coverage.get("mainSubjectMentioned") is not False)) and category_state["main_subject"] != "missing"
+    has_action = (not action_required) or (
+        bool(criteria.get("mainAction", coverage.get("mainActionMentioned") is not False))
+        and category_state["people_action"] != "missing"
+    )
+    has_setting = (bool(criteria.get("settingBackground")) or _covered_part_matches(
         covered_parts, ("setting", "background", "environment", "context")
+    )) and (
+        category_state["setting_environment"] != "missing"
+        or category_state["background"] != "missing"
     )
     detail_count = sum(
         1
@@ -409,17 +421,21 @@ def learning_stage_from_feedback(feedback: dict[str, Any], *, attempt_index: int
             ),
         )
     )
+    detail_count = max(detail_count, supporting_count)
     natural_english = bool(criteria.get("naturalEnglish", coverage_percent >= 70))
     not_word_list = bool(criteria.get("notAWordList", True))
+    critical_missing = _critical_missing_categories(category_state, action_required=action_required)
     enough_coverage = (
         has_main_focus
         and has_action
         and has_setting
-        and detail_count >= 1
+        and detail_count >= supporting_needed
         and (ready or natural_english)
         and not_word_list
-        and coverage_percent >= 68
-        and not _high_priority_missing_parts(missing_parts)
+        and coverage_percent >= 70
+        and high_priority_ratio >= 0.7
+        and not critical_missing
+        and not _high_priority_missing_parts(missing_parts, allow_supporting_misses=True)
     )
     return "coverage_complete" if enough_coverage else "coverage_layers"
 
@@ -476,6 +492,126 @@ def _coverage_part_is_covered(part: dict[str, Any]) -> bool:
     return bool(part.get("covered")) or status in {"covered", "partially_covered"}
 
 
+def _coverage_part_credit(part: dict[str, Any]) -> float:
+    status = str(part.get("coverageStatus") or "").casefold()
+    if bool(part.get("covered")) or status == "covered":
+        return 1.0
+    if status == "partially_covered":
+        return 0.5
+    return 0.0
+
+
+def _coverage_category_for_part(part: dict[str, Any]) -> str:
+    text = " ".join(
+        str(part.get(key) or "")
+        for key in ("type", "name", "description")
+    ).casefold()
+    if "main_subject" in text or "main subject" in text or "primary subject" in text:
+        return "main_subject"
+    if "main_action" in text or "main action" in text or "action" in text or "movement" in text or "interaction" in text:
+        return "people_action"
+    if any(term in text for term in ("setting", "environment", "context", "place")):
+        return "setting_environment"
+    if any(term in text for term in ("background", "sky", "behind")):
+        return "background"
+    if any(term in text for term in ("foreground", "front", "nearest", "nearby", "ground", "entrance", "bottom")):
+        return "foreground"
+    if any(term in text for term in ("mood", "atmosphere", "lighting", "light", "bright", "shadow", "weather", "condition", "feeling")):
+        return "atmosphere_lighting"
+    if any(term in text for term in ("important", "object", "detail", "tree", "bush", "shrub", "greenery", "column", "roof", "architecture", "vehicle", "building")):
+        return "important_objects"
+    return "notable_visual_details"
+
+
+def _coverage_category_state(parts: list[dict[str, Any]]) -> dict[str, str]:
+    state = {
+        "main_subject": "missing",
+        "people_action": "not_applicable",
+        "setting_environment": "missing",
+        "background": "not_applicable",
+        "foreground": "not_applicable",
+        "important_objects": "not_applicable",
+        "atmosphere_lighting": "not_applicable",
+        "notable_visual_details": "not_applicable",
+    }
+    rank = {"not_applicable": -1, "missing": 0, "partially_covered": 1, "covered": 2}
+    seen_categories: set[str] = set()
+    for part in parts:
+        category = _coverage_category_for_part(part)
+        seen_categories.add(category)
+        credit = _coverage_part_credit(part)
+        status = "covered" if credit >= 1 else "partially_covered" if credit > 0 else "missing"
+        if rank[status] > rank[state.get(category, "missing")]:
+            state[category] = status
+    for category in seen_categories:
+        state.setdefault(category, "missing")
+        if state[category] == "not_applicable":
+            state[category] = "missing"
+    if state["setting_environment"] == "missing" and state["background"] != "not_applicable":
+        state["setting_environment"] = state["background"]
+        state["background"] = "not_applicable"
+    if "important_objects" not in seen_categories and "notable_visual_details" in seen_categories:
+        state["important_objects"] = state["notable_visual_details"]
+    return state
+
+
+def _supporting_category_keys(category_state: dict[str, str]) -> list[str]:
+    return [
+        key
+        for key in (
+            "people_action",
+            "setting_environment",
+            "background",
+            "foreground",
+            "important_objects",
+            "atmosphere_lighting",
+            "notable_visual_details",
+        )
+        if category_state.get(key) != "not_applicable"
+    ]
+
+
+def _covered_supporting_category_count(category_state: dict[str, str]) -> int:
+    return sum(
+        1
+        for key in _supporting_category_keys(category_state)
+        if category_state.get(key) in {"covered", "partially_covered"}
+    )
+
+
+def _high_priority_coverage_ratio(category_state: dict[str, str]) -> float:
+    categories = [
+        key
+        for key in (
+            "main_subject",
+            "people_action",
+            "setting_environment",
+            "background",
+            "foreground",
+            "important_objects",
+            "atmosphere_lighting",
+            "notable_visual_details",
+        )
+        if category_state.get(key) != "not_applicable"
+    ]
+    if not categories:
+        return 0.0
+    credit = sum(
+        1.0 if category_state.get(key) == "covered" else 0.5 if category_state.get(key) == "partially_covered" else 0.0
+        for key in categories
+    )
+    return credit / len(categories)
+
+
+def _critical_missing_categories(category_state: dict[str, str], *, action_required: bool) -> list[str]:
+    critical = ["main_subject"]
+    if category_state.get("setting_environment") == "missing" and category_state.get("background") == "missing":
+        critical.append("setting_environment")
+    if action_required:
+        critical.append("people_action")
+    return [key for key in critical if category_state.get(key) == "missing"]
+
+
 def _part_matches(part: dict[str, Any], terms: tuple[str, ...]) -> bool:
     text = " ".join(
         str(part.get(key) or "")
@@ -488,26 +624,36 @@ def _covered_part_matches(parts: list[dict[str, Any]], terms: tuple[str, ...]) -
     return any(_part_matches(part, terms) for part in parts)
 
 
-def _high_priority_missing_parts(parts: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _high_priority_missing_parts(parts: list[dict[str, Any]], *, allow_supporting_misses: bool = False) -> list[dict[str, Any]]:
+    terms = (
+        (
+            "main_subject",
+            "main subject",
+            "main_action",
+            "main action",
+            "setting",
+            "background",
+            "environment",
+        )
+        if allow_supporting_misses
+        else (
+            "main_subject",
+            "main subject",
+            "main_action",
+            "main action",
+            "setting",
+            "background",
+            "environment",
+            "important",
+            "object",
+            "foreground",
+            "detail",
+        )
+    )
     return [
         part
         for part in parts
-        if _part_matches(
-            part,
-            (
-                "main_subject",
-                "main subject",
-                "main_action",
-                "main action",
-                "setting",
-                "background",
-                "environment",
-                "important",
-                "object",
-                "foreground",
-                "detail",
-            ),
-        )
+        if _part_matches(part, terms)
     ]
 
 

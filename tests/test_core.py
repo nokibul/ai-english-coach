@@ -136,6 +136,35 @@ class LearningStageTests(unittest.TestCase):
             "coverage_layers",
         )
 
+    def test_ready_flag_does_not_complete_basic_subject_plus_one_detail(self) -> None:
+        feedback = {
+            "readiness": {
+                "ready": True,
+                "criteria": {
+                    "mainSubject": True,
+                    "mainAction": True,
+                    "settingBackground": False,
+                    "naturalEnglish": True,
+                    "notAWordList": True,
+                },
+            },
+            "coverage": {
+                "coveragePercent": 82,
+                "mainSubjectMentioned": True,
+                "mainActionMentioned": True,
+                "imageParts": [
+                    {"type": "main_subject", "name": "large building", "coverageStatus": "covered", "required": True},
+                    {"type": "important_object", "name": "people", "coverageStatus": "covered", "required": True},
+                    {"type": "setting", "name": "surrounding greenery", "coverageStatus": "missing", "required": True},
+                    {"type": "foreground", "name": "entrance area", "coverageStatus": "missing", "required": True},
+                ],
+            },
+        }
+        self.assertEqual(
+            learning_stage_from_feedback(feedback, attempt_index=2),
+            "coverage_layers",
+        )
+
 
 class ConfigTests(unittest.TestCase):
     def test_config_defaults_to_demo_without_api_key(self) -> None:
@@ -409,6 +438,169 @@ state = context.buildCoverageLayerState(
 );
 assert(state.complete, "coverage should be complete before articulation polish");
 assert(state.layers.length === 0, "completed coverage should not show more visual layers");
+"""
+        result = subprocess.run(
+            ["node", "-e", script],
+            cwd=Path(__file__).resolve().parents[1],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    @unittest.skipIf(shutil.which("node") is None, "node is required for static coverage tests")
+    def test_initial_enhancement_enters_guided_coverage_for_basic_building_description(self) -> None:
+        script = r"""
+const fs = require("fs");
+const vm = require("vm");
+const code = fs.readFileSync("english_learner_app/static/app.js", "utf8");
+const context = {
+  document: { addEventListener() {}, getElementById() { return null; }, querySelectorAll() { return []; } },
+  window: { setTimeout() {}, clearTimeout() {} },
+  console,
+};
+vm.createContext(context);
+vm.runInContext(code, context);
+
+function assert(condition, message) {
+  if (!condition) throw new Error(message);
+}
+
+vm.runInContext(`
+state.sessionFlow.attempts = [{
+  text: "The image shows a tall building covered with climbing vines and a group of people standing together.",
+  feedback: {},
+}];
+`, context);
+
+const session = {
+  analysis: {
+    objects: [
+      { name: "large modern building", description: "covered with dense climbing vines", importance: 0.95 },
+      { name: "group of people", description: "gathered near the building", position: "near the entrance", importance: 0.8 },
+      { name: "tall trees", description: "trees around the building", importance: 0.78 },
+      { name: "bushes and shrubs", description: "greenery around the building", importance: 0.74 },
+    ],
+    environment: "institutional outdoor area",
+    environment_details: ["tall trees around the building", "bushes and shrubs", "bright sky"],
+    vocabulary: [{ word: "calm" }],
+    phrases: [{ phrase: "near the entrance" }],
+  },
+};
+const feedback = {
+  initial_attempt_feedback: {
+    prepares_coverage_layers: true,
+    covered_enhancement: "The image shows a large modern building covered with dense climbing vines, with a group of people gathered near it.",
+    missing_visual_areas: [],
+  },
+  coverage: {
+    coveragePercent: 82,
+    mainSubjectMentioned: true,
+    mainActionMentioned: true,
+    imageParts: [
+      { type: "main_subject", name: "large modern building", description: "covered with dense climbing vines", coverageStatus: "covered", covered: true, required: true },
+      { type: "important_object", name: "group of people", description: "people gathered near it", coverageStatus: "covered", covered: true, required: true },
+    ],
+  },
+  readiness: { ready: true, criteria: { mainSubject: true, mainAction: true, settingBackground: true, naturalEnglish: true, notAWordList: true } },
+};
+const text = feedback.initial_attempt_feedback.covered_enhancement;
+const state = context.buildCoverageLayerState(feedback, session, text);
+assert(!state.complete, "initial enhancement should not mark a basic description as covered");
+assert(state.currentLayer, "guided coverage should show one next focus");
+assert(state.layers.filter((layer) => layer.current).length === 1, "only one missing focus should be current");
+const prompt = `${state.currentLayer.prompt} ${state.currentLayer.visualFocus}`.toLowerCase();
+assert(/tree|bush|shrub|greenery|environment|setting/.test(prompt), "next focus should come from uncovered image areas");
+"""
+        result = subprocess.run(
+            ["node", "-e", script],
+            cwd=Path(__file__).resolve().parents[1],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    @unittest.skipIf(shutil.which("node") is None, "node is required for static coverage tests")
+    def test_atmosphere_focus_hints_stay_relevant_to_feeling_question(self) -> None:
+        script = r"""
+const fs = require("fs");
+const vm = require("vm");
+const code = fs.readFileSync("english_learner_app/static/app.js", "utf8");
+const context = {
+  document: { addEventListener() {}, getElementById() { return null; }, querySelectorAll() { return []; } },
+  window: { setTimeout() {}, clearTimeout() {}, addEventListener() {} },
+  console,
+};
+vm.createContext(context);
+vm.runInContext(code, context);
+
+function assert(condition, message) {
+  if (!condition) throw new Error(message);
+}
+
+const analysis = {
+  objects: [{ name: "building" }, { name: "apartment buildings" }],
+  environment: "outdoor institutional area",
+  environment_details: ["bright sky", "greenery around the building", "palm trees"],
+  vocabulary: [{ word: "calm" }],
+};
+const target = {
+  dynamic: true,
+  category: "atmosphere",
+  visualFocus: "what feeling the scene creates",
+  label: "Describe the feeling of the scene",
+  prompt: "What feeling does the scene create?",
+  hints: ["buildings", "apartment buildings", "balconies", "concrete walls", "rise", "stand"],
+  evidence: ["bright sky", "greenery around the building"],
+};
+const groups = context.buildDynamicTargetHintGroups(target, analysis, 1);
+const hints = context.focusedMiniHints(groups);
+const text = hints.join(" | ").toLowerCase();
+assert(!/\\b(apartment buildings|balconies|concrete walls|rise|stand)\\b/.test(text), "object/architecture hints should not leak into atmosphere chips: " + text);
+assert(/\\b(calm|bright|open|peaceful|fresh|sky|greenery|scene feels)\\b/.test(text), "atmosphere chips should help answer the feeling question: " + text);
+"""
+        result = subprocess.run(
+            ["node", "-e", script],
+            cwd=Path(__file__).resolve().parents[1],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    @unittest.skipIf(shutil.which("node") is None, "node is required for static coverage tests")
+    def test_dynamic_focus_questions_get_easier_incrementally(self) -> None:
+        script = r"""
+const fs = require("fs");
+const vm = require("vm");
+const code = fs.readFileSync("english_learner_app/static/app.js", "utf8");
+const context = {
+  document: { addEventListener() {}, getElementById() { return null; }, querySelectorAll() { return []; } },
+  window: { setTimeout() {}, clearTimeout() {}, addEventListener() {} },
+  console,
+};
+vm.createContext(context);
+vm.runInContext(code, context);
+
+function assert(condition, message) {
+  if (!condition) throw new Error(message);
+}
+
+const greenery = {
+  dynamic: true,
+  category: "environment",
+  prompt: "What other greenery do you notice around the building?",
+  visualFocus: "tall trees around the building",
+  hints: ["tall trees", "bushes", "shrubs"],
+  evidence: ["tall trees, bushes, and shrubs around the building"],
+};
+const prompts = [1, 2, 3, 4, 5].map((level) => context.dynamicTargetPrompt(greenery, {}, level));
+assert(prompts[0] === "What other greenery do you notice around the building?", "level 1 should keep the original question");
+assert(prompts[1].includes("bottom and sides"), "level 2 should point where to look");
+assert(prompts[2].includes("tall trees, bushes, or shrubs"), "level 3 should name answer options");
+assert(prompts[3] === "There are ___ around the building.", "level 4 should be a fill-in frame");
+assert(prompts[4] === "Try writing: There are tall trees, bushes, and shrubs around the building.", "level 5 should give a direct sentence");
 """
         result = subprocess.run(
             ["node", "-e", script],
@@ -1205,9 +1397,75 @@ const cards = context.buildInitialImprovementCards(original, {
   improvements: [],
   covered_enhancement: original,
 }, { better_version: original });
-assert(cards.length === 0, "clear sentence should be allowed to continue without forced improvements");
-const done = context.renderInitialImprovementCompleteState("Nice work — your sentence is already clear enough to continue.");
-assert(done.includes("No major upgrade needed"), "empty state should explain no major upgrade is needed");
+assert(cards.length === 0, "frontend should not invent improvements when AI returns none");
+const done = context.renderInitialImprovementCompleteState("Let’s make this more expressive.");
+assert(done.includes("Let’s make this more expressive."), "empty state should avoid the old no-upgrade message");
+"""
+        result = subprocess.run(
+            ["node", "-e", script],
+            cwd=Path(__file__).resolve().parents[1],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    @unittest.skipIf(shutil.which("node") is None, "node is required for new enhancement payload tests")
+    def test_initial_feedback_cards_accept_new_enhancement_payload_shape(self) -> None:
+        script = r"""
+const fs = require("fs");
+const vm = require("vm");
+const code = fs.readFileSync("english_learner_app/static/app.js", "utf8");
+const context = {
+  document: { addEventListener() {}, getElementById() { return null; }, querySelectorAll() { return []; } },
+  window: { setTimeout() {}, clearTimeout() {} },
+  console,
+};
+vm.createContext(context);
+vm.runInContext(code, context);
+
+function assert(condition, message) {
+  if (!condition) throw new Error(message);
+}
+
+const original = "The image shows a building with vines attached with the wall.";
+const initialFeedback = {
+  enhancement: {
+    hasImprovements: true,
+    improvedPreview: "The image shows a building covered with climbing vines attached to the wall.",
+    upgrades: [
+      {
+        id: "u1",
+        category: "better descriptive wording",
+        targetText: "building with vines",
+        replacementText: "building covered with climbing vines",
+        reason: "This describes the same building and vines more clearly.",
+        example: "The building is covered with climbing vines.",
+        finalPreview: "The image shows a building covered with climbing vines attached with the wall.",
+      },
+      {
+        id: "u2",
+        category: "preposition correction",
+        targetText: "attached with",
+        replacementText: "attached to",
+        reason: "This uses the natural preposition.",
+        example: "The vines are attached to the wall.",
+        finalPreview: "The image shows a building with vines attached to the wall.",
+      },
+    ],
+  },
+};
+const cards = context.buildInitialImprovementCards(original, initialFeedback, {});
+assert(cards.length === 2, "new enhancement.upgrades cards should survive normalization");
+assert(cards[0].currentText === "building with vines", "targetText should become the highlighted text");
+assert(cards[0].suggestedText === "building covered with climbing vines", "replacementText should become the upgrade");
+assert(cards[0].targetText === cards[0].currentText, "card should keep targetText alias");
+assert(cards[0].replacementText === cards[0].suggestedText, "card should keep replacementText alias");
+assert(cards[0].category === "visual_clarity", "new category labels should map to UI categories");
+const preview = context.applyInitialImprovementToText(original, cards[0]);
+assert(preview === "The image shows a building covered with climbing vines attached with the wall.", "applying should use the atomic inline replacement");
+assert(!preview.includes("trees") && !preview.includes("sky") && !preview.includes("people"), "enhancement should not add unrelated visual areas");
+assert(cards[1].category === "grammar_fix", "preposition correction should map to grammar_fix");
 """
         result = subprocess.run(
             ["node", "-e", script],
@@ -1984,6 +2242,68 @@ class AIAnalyzerTests(unittest.TestCase):
         self.assertEqual("The image shows a road with buildings nearby.", initial["improvements"][0]["suggestedText"])
         self.assertIn("road", initial["reusable_language"]["nouns"])
         self.assertEqual(["trees", "motorcycle"], initial["missing_visual_areas"])
+
+    def test_initial_attempt_feedback_accepts_new_articulation_enhancement_contract(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with patch.dict(os.environ, {}, clear=True):
+                config = AppConfig.from_env(base_dir=Path(temp_dir))
+
+        analyzer = AIAnalyzer(config)
+        feedback = {
+            "coverage": {
+                "imageParts": [
+                    {"name": "building", "covered": True, "coverageStatus": "covered"},
+                    {"name": "vines", "covered": True, "coverageStatus": "covered"},
+                    {"name": "surrounding greenery", "covered": False, "coverageStatus": "missing"},
+                ],
+                "missingMajorParts": ["surrounding greenery"],
+            },
+        }
+        analyzer._attach_initial_attempt_feedback(
+            feedback,
+            payload={
+                "initialAttemptFeedback": {
+                    "enhancement": {
+                        "hasImprovements": True,
+                        "improvedPreview": "The image shows a building covered with climbing vines attached to the wall.",
+                        "upgrades": [
+                            {
+                                "id": "u1",
+                                "category": "better descriptive wording",
+                                "targetText": "building with vines",
+                                "replacementText": "building covered with climbing vines",
+                                "reason": "This describes the same building and vines more clearly.",
+                                "example": "The building is covered with climbing vines.",
+                                "finalPreview": "The image shows a building covered with climbing vines attached with the wall.",
+                            },
+                            {
+                                "id": "u2",
+                                "category": "preposition correction",
+                                "targetText": "attached with",
+                                "replacementText": "attached to",
+                                "reason": "This uses the natural preposition.",
+                                "example": "The vines are attached to the wall.",
+                                "finalPreview": "The image shows a building with vines attached to the wall.",
+                            },
+                        ],
+                    }
+                }
+            },
+            learner_text="The image shows a building with vines attached with the wall.",
+            analysis={},
+        )
+
+        initial = feedback["initial_attempt_feedback"]
+        self.assertTrue(initial["has_improvements"])
+        self.assertEqual(
+            "The image shows a building covered with climbing vines attached to the wall.",
+            initial["enhancement"]["improvedPreview"],
+        )
+        self.assertEqual("building with vines", initial["upgrades"][0]["targetText"])
+        self.assertEqual("building covered with climbing vines", initial["improvements"][0]["suggestedText"])
+        self.assertEqual("visual_clarity", initial["improvements"][0]["category"])
+        self.assertEqual("attached to", initial["enhancement"]["upgrades"][1]["replacementText"])
+        self.assertNotIn("surrounding greenery", initial["improved_preview"])
 
     def test_extract_required_image_parts_from_reference_analysis(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

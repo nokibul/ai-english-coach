@@ -294,13 +294,6 @@ class AIAnalyzer:
             analysis=analysis,
         )
         if validation_feedback is not None:
-            if attempt_index <= 1:
-                self._attach_initial_attempt_feedback(
-                    validation_feedback,
-                    payload={},
-                    learner_text=learner_text,
-                    analysis=analysis,
-                )
             return self._apply_progressive_coaching(
                 validation_feedback,
                 analysis=analysis,
@@ -324,7 +317,7 @@ class AIAnalyzer:
         try:
             output_text = await self._request_text_generation(
                 prompt=prompt,
-                max_output_tokens=520,
+                max_output_tokens=1600,
                 temperature=0.2,
             )
             try:
@@ -332,13 +325,13 @@ class AIAnalyzer:
             except Exception:
                 raise
             normalized = self._normalize_explanation_feedback(payload, fallback=fallback)
-            if attempt_index <= 1:
-                self._attach_initial_attempt_feedback(
-                    normalized,
-                    payload=payload,
-                    learner_text=learner_text,
-                    analysis=analysis,
-                )
+            self._attach_initial_attempt_feedback(
+                normalized,
+                payload=payload,
+                learner_text=learner_text,
+                analysis=analysis,
+                attempt_index=attempt_index,
+            )
             return self._apply_progressive_coaching(
                 normalized,
                 analysis=analysis,
@@ -348,13 +341,13 @@ class AIAnalyzer:
             )
         except Exception as exc:
             print(f"[feedback-fallback] {type(exc).__name__}: {exc}")
-            if attempt_index <= 1:
-                self._attach_initial_attempt_feedback(
-                    fallback,
-                    payload={},
-                    learner_text=learner_text,
-                    analysis=analysis,
-                )
+            self._attach_initial_attempt_feedback(
+                fallback,
+                payload={},
+                learner_text=learner_text,
+                analysis=analysis,
+                attempt_index=attempt_index,
+            )
             return self._apply_progressive_coaching(
                 fallback,
                 analysis=analysis,
@@ -391,16 +384,34 @@ class AIAnalyzer:
             ],
             "sentence_patterns": analysis.get("sentence_patterns", [])[:2],
         }
-        initial_attempt_rules = ""
+        initial_attempt_rules = (
+            "AI ENHANCEMENT STEP:\n"
+            "- The goal is articulation improvement, not grammar correction only and not an advanced rewrite.\n"
+            "- Help the learner express THEIR OWN idea more naturally, clearly, specifically, descriptively, fluently, visually, and reusably.\n"
+            "- The learner should feel: 'I improved my own sentence', not 'AI replaced my writing.'\n"
+            "- Before returning no improvements, check grammar, spelling, articles, prepositions, repeated wording, sentence flow, natural phrasing, noun specificity, descriptive adjectives, verb naturalness, positioning language, visual clarity, reusable language, atmosphere phrasing, readability, and choppy sentence flow.\n"
+            "- Almost always return at least one meaningful improvement unless the sentence is already grammatically natural, visually descriptive, specific, fluent, expressive, reusable, beginner-appropriate, and polished.\n"
+            "- Improve only what the learner already attempted to describe. Do not introduce major new objects, scene areas, actions, atmosphere, or subjects the learner did not mention yet.\n"
+            "- Good improvements are small but meaningful, beginner-friendly, visually clearer, more natural in English, and reusable in future image descriptions.\n"
+            "- Allowed categories include grammar correction, spelling correction, article correction, preposition correction, natural phrasing, sentence restructuring, better descriptive wording, stronger visual detail, more reusable phrase, cleaner sentence flow, better atmosphere wording, and better positioning language.\n"
+            "- Prefer common reusable language such as covered with, lined with, surrounded by, in the background, bright daylight, peaceful atmosphere, and urban atmosphere only when it fits ideas already mentioned by the learner.\n"
+            "- Avoid literary, academic, rare, or overly advanced vocabulary. Do not use fancy verbs such as 'captures', 'showcases', 'depicts', and 'portrays'.\n"
+            "- Fill initialAttemptFeedback.enhancement with hasImprovements, improvedPreview, and upgrades. Also fill initialAttemptFeedback.improvements with compatibility cards using the same upgrades.\n"
+            "- Each upgrade must be atomic and tappable: targetText exactly from the learner sentence, replacementText that fits grammatically, short reason, short example, and finalPreview.\n"
+            "- Validate every upgrade before returning it: targetText must exactly exist, finalPreview must equal the full sentence after replacement, finalPreview must be grammatical, preserve meaning, avoid duplicate words, repeated subjects, broken structure, and awkward transitions.\n"
+            "- Return 3-5 upgrades at most, prioritizing highest-impact improvements. Quality over quantity.\n"
+            "- Return hasImprovements false only when the sentence is already natural, specific, visually descriptive, fluent, expressive, reusable, beginner-friendly, and polished.\n"
+        )
         if attempt_index <= 1:
             initial_attempt_rules = (
+                initial_attempt_rules +
                 "FIRST ATTEMPT FEEDBACK MODE:\n"
                 "- This is the learner's first image description. Do not generate a full perfect image explanation.\n"
                 "- Acknowledge only the visual areas the learner already covered.\n"
                 "- improvedVersion must enhance ONLY what the learner covered. Do not add major missing details yet.\n"
-                "- Example: if the learner says 'There is a road and buildings', improve only that idea, such as 'The image shows a quiet urban road lined with tall buildings.'\n"
+                "- Example: if the learner says 'There is a road and buildings', improve only that idea, such as 'The image shows a road with buildings beside it.'\n"
                 "- Bad: adding trees, vehicles, sky, atmosphere, people, or other major details when the learner did not mention them.\n"
-                "- Fill initialAttemptFeedback with acknowledgement, coveredEnhancement, improvements, message, reusableLanguageFromEnhancement, and missingVisualAreas.\n"
+                "- For the AI Enhancement step, initialAttemptFeedback.improvements may make mentioned ideas more articulate, but must not add unmentioned visual details.\n"
                 "- missingVisualAreas should name meaningful areas to cover next, but coveredEnhancement must not include them.\n"
                 "- This feedback prepares guided coverage layers; full polish/articulation is locked until coverage is reasonably complete.\n"
             )
@@ -433,7 +444,7 @@ class AIAnalyzer:
             '"reusableLanguage": {"usedWell": [""], "tryNext": [""], "misused": [{"phrase": "", "note": ""}], "message": ""}, '
             '"missingDetails": ["", "", ""], '
             '"inlineImprovements": [], '
-            '"initialAttemptFeedback": {"acknowledgement": "", "coveredEnhancement": "", "improvements": [{"id": "", "category": "subject_clarity", "title": "", "currentText": "", "suggestedText": "", "whyItHelps": "", "example": "", "xpReward": 5}], "message": "", "reusableLanguageFromEnhancement": {"nouns": [""], "verbs": [""], "phrases": [""], "collocations": [""], "sentenceStructures": [""], "positioningLanguage": [""], "atmosphereLanguage": [""]}, "missingVisualAreas": [""]}, '
+            '"initialAttemptFeedback": {"acknowledgement": "", "coveredEnhancement": "", "enhancement": {"hasImprovements": true, "improvedPreview": "", "upgrades": [{"id": "u1", "targetText": "", "replacementText": "", "reason": "", "example": "", "finalPreview": "", "category": "natural_phrasing"}]}, "improvements": [{"id": "", "category": "natural_phrasing", "title": "", "currentText": "", "suggestedText": "", "whyItHelps": "", "example": "", "finalPreview": "", "xpReward": 5}], "message": "", "reusableLanguageFromEnhancement": {"nouns": [""], "verbs": [""], "phrases": [""], "collocations": [""], "sentenceStructures": [""], "positioningLanguage": [""], "atmosphereLanguage": [""]}, "missingVisualAreas": [""]}, '
             '"improvedVersion": "" }\n'
             "Rules:\n"
             f"{initial_attempt_rules}"
@@ -445,6 +456,11 @@ class AIAnalyzer:
             "- For valid answers, first divide the image into major required parts before scoring: foreground, main subject, main action, setting/background, important objects, and mood/overall meaning.\n"
             "- Judge coverage of the whole image before language quality, but only after meaningfulness, coherence, and grammar pass the validity gate.\n"
             "- Readiness is separate from score. Mark readiness.ready true only when the learner includes the main subject, main action when present, setting/background, at least two important details, understandable natural English, not just a list of words, and an overall sense of the image.\n"
+            "- Coverage complete is stricter than the first AI enhancement. The first enhancement only improves the learner's current sentence; it must not decide that the whole scene is covered unless the learner already described the main subject plus several important supporting visual areas.\n"
+            "- Track these coverage categories when applicable: main subject, foreground, background, important objects, people/action, setting/environment, atmosphere/lighting, and notable visual details.\n"
+            "- Each coverage category must be classified as covered, partially_covered, missing, or not_applicable. Do not mark a category covered just because the learner used a related keyword; the sentence must actually describe that visual area.\n"
+            "- Mark readiness.ready true only when the main subject is covered, at least 70% of applicable high-priority coverage categories have credit, at least 2-4 important supporting areas are covered depending on the image, and no critical high-priority visual focus remains missing.\n"
+            "- Do not require every tiny detail, but do require important visible aspects such as prominent people, large objects, nearby greenery, foreground placement, setting, or lighting when they strongly shape the scene.\n"
             "- Use progressive guided expansion for nextStepInstructions. Do not give all feedback at once.\n"
             "- If main subject or main action is missing, nextStepInstructions must focus only on adding the subject/action.\n"
             "- Once subject/action exist, focus only on setting/context.\n"
@@ -485,14 +501,31 @@ class AIAnalyzer:
             "- what_did_well must contain 1-2 specific positive points.\n"
             "- fix_this_to_improve must contain 2-3 concrete actions, not vague advice.\n"
             "- missing_details must contain up to 3 major missing parts the learner missed, not tiny details.\n"
-            "- initialAttemptFeedback.improvements must contain 0-3 inline upgrade opportunities for the learner's exact sentence.\n"
-            "- Only give upgrades if a major upgrade is required. If the sentence is already clear enough, return improvements: [] and message: 'Nice work — your sentence is already clear enough to continue.'\n"
-            "- Return an upgrade only when it meaningfully improves subject clarity, sentence flow, natural phrasing, grammar, visual clarity, or removes confusing wording.\n"
-            "- Do NOT return tiny cosmetic changes, random vocabulary swaps, style preferences, or suggestions that may break grammar.\n"
-            "- Each upgrade must preserve the learner's meaning and must NOT add visual details the learner did not mention.\n"
-            "- currentText must be an exact word or phrase copied from the learner's sentence. suggestedText must be the replacement for only that target phrase, not a full rewritten answer unless the full sentence truly needs replacement.\n"
-            "- initialAttemptFeedback.improvements item shape: {id, category, title, currentText, suggestedText, whyItHelps, example, xpReward}. category must be subject_clarity, sentence_flow, natural_phrasing, grammar_fix, or visual_clarity.\n"
-            "- Good upgrade: currentText 'a children close-up', suggestedText 'a close-up of a young child', whyItHelps 'This sounds more natural when describing a person shown closely in an image.'\n"
+            "- Judge two separate things for initialAttemptFeedback.improvements: coverage and articulation richness. Coverage asks whether the learner mentioned the visible subject or scene. Articulation richness asks whether the answer sounds descriptive, specific, expressive, natural, and reusable.\n"
+            "- These must be meaningful improvement cards, not grammar lessons or full essay rewrites.\n"
+            "- Acceptance does not mean articulation completion. A sentence can be correct and still need an upgrade because it is too thin.\n"
+            "- Classify articulation depth internally: Level 1 Minimal = a bare sentence like 'The image shows a child.' Level 2 Basic descriptive = one simple detail like 'The image shows a young child smiling.' Level 3 Rich = specific subject plus expression/action/positioning. Level 4 Expressive = rich, natural, atmospheric wording.\n"
+            "- If the answer is Level 1 or Level 2, initialAttemptFeedback.improvements must contain 1-5 inline upgrade opportunities. Do not return an empty improvements array for shallow but correct answers.\n"
+            "- For grammatically weak sentences, initialAttemptFeedback.improvements must prioritize grammar_fix or sentence_flow before any expressive wording. Example: 'The shows a baby.' currentText 'The shows', suggestedText 'The image shows'.\n"
+            "- Also suggest upgrades for understandable Level 3 sentences when there is a clear opportunity for a stronger but still simple sentence opener, smoother movement/action phrasing, cleaner sentence flow, more natural collocation, spelling correction, or a more reusable phrase.\n"
+            "- Suggest an upgrade when the answer lacks descriptive adjectives for mentioned nouns, specific nouns for mentioned things, action or expression phrasing for mentioned actions, positioning language already implied by the sentence, natural sentence flow, or reusable phrases.\n"
+            "- The app should almost never use an empty improvements array. Return improvements: [] only when the learner already used natural, descriptive, polished wording with no meaningful phrase-level improvement.\n"
+            "- If improvements is empty, message must not say 'No major upgrade needed' or 'clear enough.' Use a short positive message such as 'You can make this sound more natural and descriptive.'\n"
+            "- For shallow correct answers, message should be 'Let’s make this more expressive.' or 'You can make this sound more natural and descriptive.'\n"
+            "- currentText/targetText must be an exact word or short phrase copied from the learner's sentence. It must not be the whole sentence.\n"
+            "- suggestedText/replacementText must be only the replacement word or phrase for currentText/targetText. It must not be a full rewritten sentence.\n"
+            "- suggestedText must be a complete safe sentence segment that fits grammatically into the original sentence.\n"
+            "- finalPreview must be a complete safe sentence preview after applying the targetText -> replacementText upgrade.\n"
+            "- Keep each currentText target to 1-10 words and each suggestedText replacement to 1-16 words. Do not target more than about half of the learner's sentence.\n"
+            "- Prefer multi-word targets like 'The shows' -> 'The image shows', 'driving on the road' -> 'moving along the road', or 'on the road on a sunny day' -> 'along the road on a sunny day'.\n"
+            "- For Level 1 answers, target grammar or clarity first, such as 'The shows' -> 'The image shows', or simple noun specificity like 'child' -> 'young child' only if the learner already mentioned a child.\n"
+            "- Do not add image details the learner did not mention. If the learner says 'a child', do not upgrade it to 'a young child looking at the camera' unless the learner already mentioned age/look/camera direction.\n"
+            "- For vehicle sentences, prefer small upgrades like 'rikshaw' -> 'rickshaw', 'driving on the road' -> 'moving along the road', or 'white sedan' -> 'white sedan car' only when those ideas already appear in the learner's text.\n"
+            "- Good Level 1 upgrade: learner says 'The image shows a child.' currentText 'child', suggestedText 'young child', whyItHelps 'This makes the subject more specific and descriptive.'\n"
+            "- Bad upgrade: currentText 'The image shows a child.', suggestedText 'The image shows a young child looking directly at the camera with a cheerful expression.' This replaces the whole sentence and must not be used.\n"
+            "- Good reusable language should come from mentioned ideas, such as 'white sedan', 'moving along the road', or 'on a sunny day' when those ideas are already in the learner's sentence.\n"
+            "- Do NOT return random vocabulary swaps, style preferences, or suggestions that may break grammar. Small changes are good when they clearly improve spelling, naturalness, specificity, fluency, or reusable articulation.\n"
+            "- initialAttemptFeedback.improvements item shape: {id, category, title, currentText, suggestedText, whyItHelps, example, finalPreview, xpReward}. category must be subject_clarity, sentence_flow, natural_phrasing, grammar_fix, or visual_clarity.\n"
             "- inlineImprovements must be an empty array. Do not use inline replacement suggestions for Step 2.\n"
             "- Every array must contain strings only, except misused and initialAttemptFeedback.improvements which must contain objects with the requested keys.\n"
             "- Never put JSON text, markdown, or code inside string fields.\n"
@@ -711,6 +744,7 @@ class AIAnalyzer:
         payload: dict[str, Any],
         learner_text: str,
         analysis: dict[str, Any],
+        attempt_index: int = 1,
     ) -> None:
         payload = payload if isinstance(payload, dict) else {}
         initial_payload = (
@@ -725,6 +759,12 @@ class AIAnalyzer:
             acknowledgement = self._initial_acknowledgement(covered_areas, learner_text)
 
         covered_enhancement = self._clean_text_value(initial_payload.get("coveredEnhancement"))
+        enhancement_payload = self._initial_enhancement_payload(payload, initial_payload)
+        improved_preview = self._clean_text_value(
+            enhancement_payload.get("improvedPreview") or enhancement_payload.get("improved_preview")
+        )
+        if not covered_enhancement and improved_preview:
+            covered_enhancement = improved_preview
         if not covered_enhancement:
             covered_enhancement = self._covered_only_enhancement(
                 learner_text=learner_text,
@@ -735,6 +775,7 @@ class AIAnalyzer:
                 learner_text=learner_text,
                 covered_areas=covered_areas,
             )
+            improved_preview = covered_enhancement
 
         reusable_payload = (
             initial_payload.get("reusableLanguageFromEnhancement")
@@ -747,38 +788,114 @@ class AIAnalyzer:
             analysis=analysis,
             covered_areas=covered_areas,
         )
+        raw_improvements = (
+            enhancement_payload.get("upgrades")
+            or enhancement_payload.get("improvements")
+            or initial_payload.get("upgrades")
+            or initial_payload.get("improvements")
+            or initial_payload.get("improvementCards")
+            or []
+        )
+        improvements = self._normalize_initial_improvement_cards(
+            raw_improvements,
+            learner_text=learner_text,
+        )
+        if missing_areas:
+            improvements = [
+                card
+                for card in improvements
+                if not self._enhancement_mentions_missing_area(
+                    " ".join(
+                        [
+                            self._clean_text_value(card.get("suggestedText")),
+                            self._clean_text_value(card.get("finalPreview")),
+                        ]
+                    ),
+                    missing_areas,
+                )
+            ]
+        if not improvements:
+            improvements = self._fallback_initial_improvement_cards(learner_text)
+        improved_preview = self._clean_text_value(improved_preview or covered_enhancement)
+        upgrades = self._initial_upgrades_payload(improvements)
         initial_feedback = {
             "acknowledgement": acknowledgement,
             "covered_enhancement": covered_enhancement,
-            "improvements": self._normalize_initial_improvement_cards(
-                initial_payload.get("improvements") or initial_payload.get("improvementCards") or [],
-                learner_text=learner_text,
-            ),
+            "has_improvements": bool(upgrades),
+            "improved_preview": improved_preview,
+            "upgrades": upgrades,
+            "enhancement": {
+                "hasImprovements": bool(upgrades),
+                "improvedPreview": improved_preview,
+                "upgrades": upgrades,
+            },
+            "improvements": improvements,
             "message": self._clean_text_value(initial_payload.get("message"))
-            or "Nice work — your sentence is already clear enough to continue.",
+            or "Let’s make this more expressive.",
             "reusable_language": reusable_language,
             "missing_visual_areas": missing_areas[:5],
             "prepares_coverage_layers": True,
         }
         feedback["initial_attempt_feedback"] = initial_feedback
-        feedback["better_version"] = covered_enhancement
-        feedback["main_issue"] = (
-            f"Next, add another visual area: {missing_areas[0]}."
-            if missing_areas
-            else "You covered the main visual areas; next you can make the wording more natural."
-        )
-        feedback["missing_details"] = missing_areas[:3]
-        feedback["next_step_instructions"] = (
-            [f"Add {missing_areas[0]} in the next layer."]
-            if missing_areas
-            else ["Move to a polish pass for clearer, more natural wording."]
-        )
+        if attempt_index <= 1:
+            feedback["better_version"] = covered_enhancement
+            feedback["main_issue"] = (
+                f"Next, add another visual area: {missing_areas[0]}."
+                if missing_areas
+                else "You covered the main visual areas; next you can make the wording more natural."
+            )
+            feedback["missing_details"] = missing_areas[:3]
+            feedback["next_step_instructions"] = (
+                [f"Add {missing_areas[0]} in the next layer."]
+                if missing_areas
+                else ["Move to a polish pass for clearer, more natural wording."]
+            )
+        else:
+            feedback.setdefault("better_version", covered_enhancement)
+            if missing_areas and not feedback.get("missing_details"):
+                feedback["missing_details"] = missing_areas[:3]
+
+    def _initial_enhancement_payload(
+        self,
+        payload: dict[str, Any],
+        initial_payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        for value in (
+            initial_payload.get("enhancement"),
+            initial_payload.get("aiEnhancement"),
+            initial_payload.get("ai_enhancement"),
+            payload.get("aiEnhancement"),
+            payload.get("ai_enhancement"),
+            payload.get("enhancement"),
+        ):
+            if isinstance(value, dict):
+                return value
+        return {}
+
+    def _initial_upgrades_payload(self, improvements: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        upgrades: list[dict[str, Any]] = []
+        for index, item in enumerate(improvements[:5]):
+            target = self._clean_text_value(item.get("targetText") or item.get("currentText"))
+            replacement = self._clean_text_value(item.get("replacementText") or item.get("suggestedText"))
+            if not target or not replacement:
+                continue
+            upgrades.append(
+                {
+                    "id": self._clean_text_value(item.get("id")) or f"u{index + 1}",
+                    "targetText": target,
+                    "replacementText": replacement,
+                    "reason": self._clean_text_value(item.get("reason") or item.get("whyItHelps")),
+                    "example": self._clean_text_value(item.get("example")),
+                    "finalPreview": self._clean_text_value(item.get("finalPreview")),
+                    "category": self._clean_text_value(item.get("category")) or "natural_phrasing",
+                }
+            )
+        return upgrades
 
     def _normalize_initial_improvement_cards(self, raw_items: Any, *, learner_text: str) -> list[dict[str, Any]]:
         items = raw_items if isinstance(raw_items, list) else []
-        allowed = {"subject_clarity", "sentence_flow", "natural_phrasing", "grammar_fix", "visual_clarity"}
         cards: list[dict[str, Any]] = []
-        for index, item in enumerate(items[:3]):
+        for index, item in enumerate(items[:5]):
             if not isinstance(item, dict):
                 continue
             suggested = self._clean_text_value(
@@ -798,19 +915,41 @@ class AIAnalyzer:
                 or item.get("oldText")
                 or item.get("old")
             )
-            if not suggested or not current or not re.search(re.escape(current), learner_text, flags=re.IGNORECASE) or normalize_answer(suggested) == normalize_answer(current):
+            current = self._find_initial_text_occurrence(learner_text, current)
+            current_words = current.split()
+            suggested_words = suggested.split()
+            final_preview = self._replacement_preview(
+                learner_text,
+                current=current,
+                suggested=suggested,
+            )
+            if (
+                not suggested
+                or not current
+                or normalize_answer(suggested) == normalize_answer(current)
+                or normalize_answer(current) == normalize_answer(learner_text)
+                or len(current_words) > 10
+                or len(suggested_words) > 16
+                or len(current_words) > max(4, len(learner_text.split()) // 2)
+                or not self._initial_preview_looks_safe(
+                    final_preview,
+                    original=learner_text,
+                    current=current,
+                    suggested=suggested,
+                )
+            ):
                 continue
-            category = self._clean_text_value(item.get("category"))
-            if category not in allowed:
-                category = "natural_phrasing"
+            category = self._normalize_initial_improvement_category(item.get("category"))
             try:
                 xp_reward = int(item.get("xpReward") or item.get("xp_reward") or 10)
             except (TypeError, ValueError):
                 xp_reward = 10
             why_it_helps = self._clean_text_value(item.get("whyItHelps") or item.get("why_it_helps") or item.get("why") or item.get("reason"))
+            if not why_it_helps:
+                why_it_helps = "This keeps your meaning but makes the sentence sound a little more natural."
             example = self._clean_text_value(item.get("example"))
-            if not why_it_helps or not example:
-                continue
+            if not example:
+                example = self._generic_improvement_example(current=current, suggested=suggested)
             cards.append(
                 {
                     "id": self._clean_text_value(item.get("id")) or f"{category}-{index + 1}",
@@ -818,12 +957,509 @@ class AIAnalyzer:
                     "title": self._clean_text_value(item.get("title")) or "Useful improvement",
                     "currentText": current,
                     "suggestedText": suggested,
+                    "targetText": current,
+                    "replacementText": suggested,
                     "whyItHelps": why_it_helps,
+                    "reason": why_it_helps,
                     "example": example,
+                    "finalPreview": final_preview,
                     "xpReward": 5,
                 }
             )
         return cards
+
+    def _find_initial_text_occurrence(self, source: str, target: str) -> str:
+        source = self._clean_text_value(source)
+        target = self._clean_text_value(target)
+        if not source or not target:
+            return ""
+        if target in source:
+            return target
+        match = re.search(re.escape(target), source, flags=re.IGNORECASE)
+        return match.group(0) if match else ""
+
+    def _replacement_preview(self, source: str, *, current: str, suggested: str) -> str:
+        source = self._clean_text_value(source)
+        current = self._clean_text_value(current)
+        suggested = self._clean_text_value(suggested)
+        if not source or not current or not suggested:
+            return ""
+        match = re.search(re.escape(current), source, flags=re.IGNORECASE)
+        if not match:
+            return ""
+        return self._clean_text_value(f"{source[:match.start()]}{suggested}{source[match.end():]}")
+
+    def _initial_preview_looks_safe(
+        self,
+        preview: str,
+        *,
+        original: str,
+        current: str,
+        suggested: str,
+    ) -> bool:
+        preview = self._clean_text_value(preview)
+        original = self._clean_text_value(original)
+        current = self._clean_text_value(current)
+        suggested = self._clean_text_value(suggested)
+        if not preview or not original or not current or not suggested:
+            return False
+        if normalize_answer(preview) == normalize_answer(original):
+            return False
+        if normalize_answer(current) == normalize_answer(original):
+            return False
+        if re.search(r"\b([A-Za-z][A-Za-z'-]*)\s+\1\b", preview, flags=re.IGNORECASE):
+            return False
+        if re.search(r"\b(?:of|with|to|in|on|at|near|around|beside|behind|under)\s*[.!?]?$", preview, flags=re.IGNORECASE):
+            return False
+        if len(preview.split()) > max(28, len(original.split()) + 12):
+            return False
+        return True
+
+    def _normalize_initial_improvement_category(self, category: Any) -> str:
+        value = self._clean_text_value(category).casefold().replace("-", "_").replace(" ", "_")
+        allowed = {"subject_clarity", "sentence_flow", "natural_phrasing", "grammar_fix", "visual_clarity"}
+        category_map = {
+            "grammar": "grammar_fix",
+            "grammar_correction": "grammar_fix",
+            "spelling": "grammar_fix",
+            "spelling_correction": "grammar_fix",
+            "article": "grammar_fix",
+            "article_correction": "grammar_fix",
+            "article_usage": "grammar_fix",
+            "preposition": "grammar_fix",
+            "preposition_correction": "grammar_fix",
+            "preposition_usage": "grammar_fix",
+            "sentence_restructuring": "sentence_flow",
+            "cleaner_sentence_flow": "sentence_flow",
+            "flow": "sentence_flow",
+            "better_descriptive_wording": "visual_clarity",
+            "stronger_visual_detail": "visual_clarity",
+            "visual_detail": "visual_clarity",
+            "better_atmosphere_wording": "visual_clarity",
+            "atmosphere_phrasing": "visual_clarity",
+            "better_positioning_language": "visual_clarity",
+            "positioning_language": "visual_clarity",
+            "more_reusable_phrase": "natural_phrasing",
+            "reusable_phrase": "natural_phrasing",
+            "natural_phrase": "natural_phrasing",
+        }
+        mapped = category_map.get(value, value)
+        return mapped if mapped in allowed else "natural_phrasing"
+
+    def _generic_improvement_example(self, *, current: str, suggested: str) -> str:
+        suggested = self._clean_text_value(suggested)
+        current = self._clean_text_value(current)
+        if not suggested:
+            suggested = current or "clear wording"
+        lower = suggested.casefold()
+        if lower.startswith(("shows", "includes", "features", "appears")):
+            return f"The image {suggested} the main detail."
+        if lower.startswith(("moving", "standing", "sitting", "walking", "looking")):
+            return f"The subject is {suggested}."
+        return f"Use '{suggested}' to make the sentence sound more natural."
+
+    def _fallback_initial_improvement_cards(self, learner_text: str) -> list[dict[str, Any]]:
+        text = self._clean_text_value(learner_text)
+        if not text:
+            return []
+
+        def spelling_suggestion(match: re.Match[str]) -> str:
+            value = match.group(0)
+            plural = value.casefold().endswith("s")
+            return "rickshaws" if plural else "rickshaw"
+
+        def image_has_suggestion(match: re.Match[str]) -> str:
+            phrase = match.group(0)
+            subject = re.sub(r"\s+has$", "", phrase, flags=re.IGNORECASE)
+            return f"{subject} includes"
+
+        def image_includes_suggestion(match: re.Match[str]) -> str:
+            return "The image includes" if match.group(0)[:1].isupper() else "the image includes"
+
+        def image_show_agreement_suggestion(match: re.Match[str]) -> str:
+            phrase = match.group(0)
+            subject = re.sub(r"\s+show$", "", phrase, flags=re.IGNORECASE)
+            return f"{subject} shows"
+
+        def image_is_shows_suggestion(match: re.Match[str]) -> str:
+            phrase = match.group(0)
+            subject = re.sub(r"\s+is\s+shows$", "", phrase, flags=re.IGNORECASE)
+            return f"{subject} shows"
+
+        def vehicle_movement_suggestion(match: re.Match[str]) -> str:
+            phrase = match.group(1)
+            if not re.search(
+                r"\b(?:car|cars|sedan|sedans|rickshaw|rickshaws|rikshaw|rikshaws|bus|buses|truck|trucks|van|vans|vehicle|vehicles|bike|bikes|motorcycle|motorcycles|bicycle|bicycles)\b",
+                phrase,
+                flags=re.IGNORECASE,
+            ):
+                return ""
+            phrase = re.sub(r"\brikshaws\b", "rickshaws", phrase, flags=re.IGNORECASE)
+            phrase = re.sub(r"\brikshaw\b", "rickshaw", phrase, flags=re.IGNORECASE)
+            return f"{phrase} moving"
+
+        candidates: list[dict[str, Any]] = []
+        checks: list[tuple[str, str | Any, str, str, str, str]] = [
+            (
+                r"\battached with\b",
+                "attached to",
+                "grammar_fix",
+                "Better preposition",
+                "This uses the natural preposition for something connected to a surface.",
+                "The vines are attached to the wall.",
+            ),
+            (
+                r"\bscene create\b",
+                "scene creates",
+                "grammar_fix",
+                "Correct verb form",
+                "This fixes the verb so the sentence sounds natural.",
+                "The scene creates a calm feeling.",
+            ),
+            (
+                r"\bcalm feeling\b",
+                "peaceful atmosphere",
+                "visual_clarity",
+                "Smoother feeling phrase",
+                "This is a natural way to describe the mood of a scene.",
+                "The greenery creates a peaceful atmosphere.",
+            ),
+            (
+                r"\bbuilding with vines\b",
+                "building covered with climbing vines",
+                "visual_clarity",
+                "More visual wording",
+                "This describes the same building and vines more clearly.",
+                "The image shows a building covered with climbing vines.",
+            ),
+            (
+                r"\bcovered by vines\b",
+                "covered with vines",
+                "natural_phrasing",
+                "More natural phrase",
+                "This is the more common phrase for describing a surface.",
+                "The wall is covered with vines.",
+            ),
+            (
+                r"\bcovered with vines\b",
+                "covered with climbing vines",
+                "visual_clarity",
+                "More specific wording",
+                "This keeps your idea and names the type of vines more clearly.",
+                "The building is covered with climbing vines.",
+            ),
+            (
+                r"\bwith vines\b",
+                "with climbing vines",
+                "visual_clarity",
+                "More specific wording",
+                "This keeps the same detail but makes it a little more visual.",
+                "The building is covered with climbing vines.",
+            ),
+            (
+                r"\b(?:The|A|An) shows\b",
+                "The image shows",
+                "grammar_fix",
+                "Clearer sentence structure",
+                "This fixes the sentence structure while keeping your meaning simple.",
+                "The image shows a baby.",
+            ),
+            (
+                r"\b(?:the|a|an) shows\b",
+                "the image shows",
+                "grammar_fix",
+                "Clearer sentence structure",
+                "This fixes the sentence structure while keeping your meaning simple.",
+                "The image shows a baby.",
+            ),
+            (
+                r"\bThis shows\b",
+                "This image shows",
+                "grammar_fix",
+                "Clearer sentence structure",
+                "This makes the subject of the sentence clear.",
+                "This image shows a baby.",
+            ),
+            (
+                r"\bthis shows\b",
+                "this image shows",
+                "grammar_fix",
+                "Clearer sentence structure",
+                "This makes the subject of the sentence clear.",
+                "This image shows a baby.",
+            ),
+            (
+                r"\b(?:image|picture|photo|scene) show\b",
+                image_show_agreement_suggestion,
+                "grammar_fix",
+                "Correct verb form",
+                "This fixes the verb so the sentence sounds natural.",
+                "The image shows a baby.",
+            ),
+            (
+                r"\b(?:image|picture|photo|scene) is shows\b",
+                image_is_shows_suggestion,
+                "grammar_fix",
+                "Cleaner sentence structure",
+                "This removes the extra verb and makes the sentence clear.",
+                "The image shows a baby.",
+            ),
+            (
+                r"\b((?:a|an|the)\s+[\w'-]+(?:\s+[\w'-]+){0,2}\s+and\s+(?:(?:a|an|the)\s+)?[\w'-]+(?:\s+[\w'-]+){0,2})\s+driving\b",
+                vehicle_movement_suggestion,
+                "sentence_flow",
+                "Smoother action phrase",
+                "This improves the movement phrase while keeping the same vehicles and action.",
+                "A car and rickshaw are moving along the road.",
+            ),
+            (
+                r"\brikshaws?\b",
+                spelling_suggestion,
+                "grammar_fix",
+                "Cleaner spelling",
+                "This fixes the spelling while keeping your meaning the same.",
+                "A rickshaw is moving along the road.",
+            ),
+            (
+                r"\bricksha\b",
+                "rickshaw",
+                "grammar_fix",
+                "Cleaner spelling",
+                "This uses the standard spelling for the vehicle.",
+                "A rickshaw is moving along the road.",
+            ),
+            (
+                r"\bt\s*shirt\b|\btshirt\b",
+                "T-shirt",
+                "grammar_fix",
+                "Cleaner spelling",
+                "This is the more natural spelling for the clothing word.",
+                "He is wearing a blue T-shirt.",
+            ),
+            (
+                r"\bdriving on the road\b",
+                "moving along the road",
+                "natural_phrasing",
+                "Smoother movement",
+                "This sounds smoother when describing vehicles in an image.",
+                "Two vehicles are moving along the road.",
+            ),
+            (
+                r"\bon the road on a sunny day\b",
+                "along the road on a sunny day",
+                "sentence_flow",
+                "Cleaner flow",
+                "This avoids repeating 'on' and makes the sentence flow better.",
+                "The vehicles move along the road on a sunny day.",
+            ),
+            (
+                r"\bon the road\b",
+                "along the road",
+                "natural_phrasing",
+                "Smoother position phrase",
+                "This sounds more natural when describing where something appears.",
+                "The vehicle is along the road.",
+            ),
+            (
+                r"\bin the image\b",
+                "in the scene",
+                "natural_phrasing",
+                "More natural image wording",
+                "This is a reusable phrase for image descriptions.",
+                "Several details appear in the scene.",
+            ),
+            (
+                r"\bis on\b",
+                "is positioned on",
+                "visual_clarity",
+                "Clearer positioning",
+                "This makes the position sound more specific.",
+                "The object is positioned on the table.",
+            ),
+            (
+                r"\bare on\b",
+                "are positioned on",
+                "visual_clarity",
+                "Clearer positioning",
+                "This makes the position sound more specific.",
+                "The objects are positioned on the table.",
+            ),
+            (
+                r"\bthere is\b",
+                image_includes_suggestion,
+                "natural_phrasing",
+                "More direct image phrasing",
+                "This sounds more natural for describing what appears in an image.",
+                "The image includes one clear subject.",
+            ),
+            (
+                r"\bthere are\b",
+                image_includes_suggestion,
+                "natural_phrasing",
+                "More direct image phrasing",
+                "This sounds more natural for describing what appears in an image.",
+                "The image includes several clear details.",
+            ),
+            (
+                r"\b(?:picture|photo|scene|image) has\b",
+                image_has_suggestion,
+                "natural_phrasing",
+                "Cleaner image phrasing",
+                "This sounds smoother and more reusable for image descriptions.",
+                "The image includes several visible details.",
+            ),
+            (
+                r"\bis standing\b",
+                "is standing clearly",
+                "visual_clarity",
+                "Slightly clearer action",
+                "This keeps the action but makes it sound more descriptive.",
+                "The person is standing clearly near the doorway.",
+            ),
+            (
+                r"\bis sitting\b",
+                "is sitting calmly",
+                "visual_clarity",
+                "Slightly clearer action",
+                "This keeps the action but makes it sound more descriptive.",
+                "The person is sitting calmly on a chair.",
+            ),
+            (
+                r"\bis walking\b",
+                "is walking along",
+                "visual_clarity",
+                "Smoother action",
+                "This makes the movement sound more natural.",
+                "The person is walking along the path.",
+            ),
+            (
+                r"\bis smiling\b",
+                "is smiling gently",
+                "visual_clarity",
+                "More expressive detail",
+                "This keeps the expression but makes it more descriptive.",
+                "The person is smiling gently.",
+            ),
+            (
+                r"\bsmiles\b",
+                "smiles gently",
+                "visual_clarity",
+                "More expressive action",
+                "This keeps the expression but makes it more descriptive.",
+                "The person smiles gently.",
+            ),
+            (
+                r"\bstands\b",
+                "stands clearly",
+                "visual_clarity",
+                "Slightly clearer action",
+                "This keeps the action but makes it sound more descriptive.",
+                "The person stands clearly near the doorway.",
+            ),
+            (
+                r"\bsits\b",
+                "sits calmly",
+                "visual_clarity",
+                "Slightly clearer action",
+                "This keeps the action but makes it sound more descriptive.",
+                "The person sits calmly on a chair.",
+            ),
+            (
+                r"\bwalks\b",
+                "walks along",
+                "visual_clarity",
+                "Smoother action",
+                "This makes the movement sound more natural.",
+                "The person walks along the path.",
+            ),
+        ]
+
+        occupied: list[tuple[int, int]] = []
+        for pattern, replacement, category, title, why_it_helps, example in checks:
+            match = re.search(pattern, text, flags=re.IGNORECASE)
+            if not match:
+                continue
+            start, end = match.span()
+            if any(start < used_end and end > used_start for used_start, used_end in occupied):
+                continue
+            current = self._clean_text_value(match.group(0))
+            suggested = replacement(match) if callable(replacement) else replacement
+            suggested = self._clean_text_value(suggested)
+            if (
+                not current
+                or not suggested
+                or normalize_answer(current) == normalize_answer(suggested)
+                or len(current.split()) > 10
+                or len(suggested.split()) > 16
+                or len(current.split()) > max(4, len(text.split()) // 2)
+            ):
+                continue
+            final_preview = self._replacement_preview(text, current=current, suggested=suggested)
+            if not self._initial_preview_looks_safe(
+                final_preview,
+                original=text,
+                current=current,
+                suggested=suggested,
+            ):
+                continue
+            occupied.append((start, end))
+            candidates.append(
+                {
+                    "id": f"fallback-enhancement-{len(candidates) + 1}",
+                    "category": category,
+                    "title": title,
+                    "currentText": current,
+                    "suggestedText": suggested,
+                    "targetText": current,
+                    "replacementText": suggested,
+                    "whyItHelps": why_it_helps,
+                    "reason": why_it_helps,
+                    "example": example,
+                    "finalPreview": final_preview,
+                    "xpReward": 5,
+                }
+            )
+            if len(candidates) >= 3:
+                return candidates
+
+        words = re.findall(r"[A-Za-z][A-Za-z'-]*", text)
+        normalized = normalize_answer(text)
+        if (
+            len(candidates) < 3
+            and len(words) <= 8
+            and re.search(r"\b(?:the|this) (?:image|picture|photo|scene) shows\b", text, flags=re.IGNORECASE)
+            and "clear view" not in normalized
+        ):
+            match = re.search(r"\b(?:the|this) (?:image|picture|photo|scene) shows\b", text, flags=re.IGNORECASE)
+            if match:
+                starter = match.group(0)
+                suggested = f"{starter} a clear view of"
+                final_preview = self._replacement_preview(text, current=starter, suggested=suggested)
+                if not self._initial_preview_looks_safe(
+                    final_preview,
+                    original=text,
+                    current=starter,
+                    suggested=suggested,
+                ):
+                    return candidates[:3]
+                candidates.append(
+                    {
+                        "id": f"fallback-enhancement-{len(candidates) + 1}",
+                        "category": "natural_phrasing",
+                        "title": "More natural phrasing",
+                        "currentText": starter,
+                        "suggestedText": suggested,
+                        "targetText": starter,
+                        "replacementText": suggested,
+                        "whyItHelps": "This keeps your idea but makes the sentence sound a little more descriptive.",
+                        "reason": "This keeps your idea but makes the sentence sound a little more descriptive.",
+                        "example": "The image shows a clear view of the main subject.",
+                        "finalPreview": final_preview,
+                        "xpReward": 5,
+                    }
+                )
+
+        return candidates[:3]
 
     def _covered_area_labels(self, feedback: dict[str, Any]) -> list[str]:
         coverage = feedback.get("coverage") if isinstance(feedback.get("coverage"), dict) else {}

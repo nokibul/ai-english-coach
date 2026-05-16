@@ -39,10 +39,13 @@ const state = {
     initialImprovementCards: [],
     initialImprovementIndex: 0,
     initialImprovementDraft: "",
+    initialImprovementSourceText: "",
+    initialImprovementContinuationStage: "",
     initialAppliedImprovementIds: [],
     initialSkippedImprovementIds: [],
     initialLastAppliedImprovementId: "",
     articulationUpgrade: null,
+    focusSupportLevels: {},
     layerRewards: [],
     allLayersBonusAwarded: false,
   },
@@ -50,6 +53,7 @@ const state = {
 
 const els = {};
 const SESSION_CHUNK_SIZE = 6;
+const SESSION_FLOW_STORAGE_PREFIX = "aiEnglishSessionFlow:";
 const IMAGE_UPLOAD_TARGET_BYTES = 4 * 1024 * 1024;
 const IMAGE_UPLOAD_MAX_DIMENSION = 1920;
 const LEARNING_STAGES = Object.freeze({
@@ -172,8 +176,11 @@ function bindEvents() {
       closeStarterHintPopovers();
     }
   });
+  window.addEventListener("popstate", handleRouteChange);
   window.addEventListener("resize", positionActiveStarterHintPopover, { passive: true });
   window.addEventListener("scroll", positionActiveStarterHintPopover, { passive: true });
+  window.addEventListener("resize", positionActiveInitialModalPopover, { passive: true });
+  window.addEventListener("scroll", positionActiveInitialModalPopover, { passive: true });
 }
 
 function initializeTheme() {
@@ -220,6 +227,90 @@ function safeLocalStorageSet(key, value) {
   }
 }
 
+function safeLocalStorageRemove(key) {
+  try {
+    localStorage.removeItem(key);
+  } catch (error) {
+    // Preference persistence is optional.
+  }
+}
+
+function sessionRoutePath(sessionId) {
+  const id = Number(sessionId);
+  return Number.isFinite(id) && id > 0 ? `/sessions/${id}` : "/";
+}
+
+function routeSessionId() {
+  const match = window.location.pathname.match(/^\/sessions\/(\d+)\/?$/);
+  if (match) return Number(match[1]);
+  const queryId = Number(new URLSearchParams(window.location.search).get("session"));
+  return Number.isFinite(queryId) && queryId > 0 ? queryId : null;
+}
+
+function updateSessionUrl(sessionId, options = {}) {
+  const path = sessionRoutePath(sessionId);
+  if (window.location.pathname === path && !window.location.search && !window.location.hash) {
+    return;
+  }
+  const method = options.replace ? "replaceState" : "pushState";
+  window.history[method]({ sessionId: Number(sessionId) || null }, "", path);
+}
+
+function updateHomeUrl(options = {}) {
+  if (window.location.pathname === "/" && !window.location.search && !window.location.hash) {
+    return;
+  }
+  const method = options.replace ? "replaceState" : "pushState";
+  window.history[method]({ sessionId: null }, "", "/");
+}
+
+async function handleRouteChange() {
+  if (!state.user) return;
+  const sessionId = routeSessionId();
+  if (sessionId) {
+    await loadSession(sessionId, { updateUrl: false });
+    return;
+  }
+  openNewSessionComposer({ updateUrl: false });
+}
+
+async function restoreSessionFromRoute() {
+  const sessionId = routeSessionId();
+  if (!sessionId || !state.user) return false;
+  await loadSession(sessionId, { updateUrl: false, replaceUrl: true });
+  return true;
+}
+
+function sessionFlowStorageKey(sessionId) {
+  return `${SESSION_FLOW_STORAGE_PREFIX}${sessionId}`;
+}
+
+function persistCurrentSessionFlow() {
+  const sessionId = state.currentSessionId || state.currentSession?.id;
+  if (!sessionId || !state.sessionFlow) return;
+  safeLocalStorageSet(
+    sessionFlowStorageKey(sessionId),
+    JSON.stringify({
+      version: 1,
+      savedAt: new Date().toISOString(),
+      flow: state.sessionFlow,
+    })
+  );
+}
+
+function restoreStoredSessionFlow(sessionId, fallbackFlow) {
+  const raw = safeLocalStorageGet(sessionFlowStorageKey(sessionId));
+  if (!raw) return fallbackFlow;
+  try {
+    const parsed = JSON.parse(raw);
+    const flow = parsed?.flow && typeof parsed.flow === "object" ? parsed.flow : null;
+    return flow ? { ...fallbackFlow, ...flow } : fallbackFlow;
+  } catch (error) {
+    safeLocalStorageRemove(sessionFlowStorageKey(sessionId));
+    return fallbackFlow;
+  }
+}
+
 async function bootstrap() {
   try {
     const data = await api("/api/bootstrap");
@@ -238,6 +329,7 @@ async function bootstrap() {
       renderQuizButton();
       renderDashboardContent();
       await fetchSessions();
+      await restoreSessionFromRoute();
       startQuizPolling();
     } else {
       switchAuthTab("signup");
@@ -337,6 +429,7 @@ function clearUserState() {
   state.lastQuizReminderKey = "";
   stopQuizPolling();
   teardownSessionObserver();
+  updateHomeUrl({ replace: true });
   resetUploadPreview();
   renderLearnPlaceholder();
   renderSessionLibrary();
@@ -385,15 +478,20 @@ function renderLearnPlaceholder() {
   renderLearnMode();
 }
 
-function renderSession(session) {
+function renderSession(session, options = {}) {
   state.currentSession = session;
   state.currentSessionId = session.id;
   state.learnView = "session";
   closeLanguageModal();
   renderLearnMode();
   els.sessionDetailPanel.classList.remove("hidden");
-  state.sessionFlow = createInitialSessionFlow(session);
-  renderSessionStep("write");
+  state.sessionFlow = options.restoreFlow === false
+    ? createInitialSessionFlow(session)
+    : restoreStoredSessionFlow(session.id, createInitialSessionFlow(session));
+  if (options.updateUrl !== false) {
+    updateSessionUrl(session.id, { replace: options.replaceUrl });
+  }
+  renderSessionStep(state.sessionFlow.step || "write");
 }
 
 function createInitialSessionFlow(session = {}) {
@@ -408,6 +506,8 @@ function createInitialSessionFlow(session = {}) {
     initialImprovementCards: [],
     initialImprovementIndex: 0,
     initialImprovementDraft: "",
+    initialImprovementSourceText: "",
+    initialImprovementContinuationStage: "",
     initialAppliedImprovementIds: [],
     initialSkippedImprovementIds: [],
     initialLastAppliedImprovementId: "",
@@ -415,6 +515,7 @@ function createInitialSessionFlow(session = {}) {
     coverageComplete: false,
     skippedCoverageLayers: [],
     polishUnlocked: false,
+    focusSupportLevels: {},
     articulationUpgrade: null,
     finalPolishedText: "",
     layerRewards: [],
@@ -467,23 +568,27 @@ function renderSessionStep(step, updates = {}) {
     setFocusedSessionLayout(true);
     renderWriteStep(session);
     animateStepTransition();
+    persistCurrentSessionFlow();
     return;
   }
   if (step === "feedback") {
     setFocusedSessionLayout(true);
     renderFeedbackStep(session, state.sessionFlow.feedback);
     animateStepTransition();
+    persistCurrentSessionFlow();
     return;
   }
   if (step === "improve") {
     setFocusedSessionLayout(true);
     renderImproveStep(session);
     animateStepTransition();
+    persistCurrentSessionFlow();
     return;
   }
   setFocusedSessionLayout(true);
   renderWriteStep(session);
   animateStepTransition();
+  persistCurrentSessionFlow();
 }
 
 function updateAppHeaderForStage(stage) {
@@ -1504,10 +1609,17 @@ function renderFeedbackStep(session, feedback) {
 }
 
 function renderInitialAttemptFeedbackStep(session, feedback, initialFeedback) {
+  cleanupInitialModalPopovers();
   const latestAttempt = (state.sessionFlow.attempts || []).at(-1) || {};
   const originalAttempt = latestAttempt.text || state.sessionFlow.explanation || "";
-  const upgrades = state.sessionFlow.initialImprovementCards?.length
-    ? state.sessionFlow.initialImprovementCards
+  const sourceChanged = normalizeClientText(state.sessionFlow.initialImprovementSourceText) !== normalizeClientText(originalAttempt);
+  if (sourceChanged) {
+    resetInitialImprovementStateForSource(originalAttempt);
+  }
+  state.sessionFlow.initialImprovementContinuationStage = enhancementContinuationStage(feedback);
+  const storedUpgrades = sanitizeInitialImprovementCards(state.sessionFlow.initialImprovementCards || [], originalAttempt);
+  const upgrades = storedUpgrades.length
+    ? storedUpgrades
     : buildInitialImprovementCards(originalAttempt, initialFeedback, feedback);
   state.sessionFlow.initialImprovementCards = upgrades;
   state.sessionFlow.initialImprovementDraft = state.sessionFlow.initialImprovementDraft || originalAttempt;
@@ -1515,7 +1627,7 @@ function renderInitialAttemptFeedbackStep(session, feedback, initialFeedback) {
   state.sessionFlow.initialSkippedImprovementIds = state.sessionFlow.initialSkippedImprovementIds || [];
   const draft = state.sessionFlow.initialImprovementDraft || originalAttempt;
   const completed = initialEnhancementComplete(upgrades);
-  const message = cleanUiText(initialFeedback.message) || "Nice work — your sentence is clear enough to continue.";
+  const message = cleanUiText(initialFeedback.message) || "Let’s make this more expressive.";
   const handledCount = initialEnhancementHandledIds().size;
   const totalChoices = upgrades.length;
 
@@ -1544,7 +1656,7 @@ function renderInitialAttemptFeedbackStep(session, feedback, initialFeedback) {
         <header class="ai-modal-header">
           <span class="ai-enhancement-kicker"><span aria-hidden="true">✣</span> AI enhancement</span>
           <h3 id="aiEnhancementTitle">Let’s polish your description</h3>
-          <p>${upgrades.length ? "Tap the highlighted parts to see how we can improve them." : "Your description is already clear enough to continue."}</p>
+          <p>${upgrades.length ? "Tap the highlighted parts to see how we can improve them." : "You can make this sound more natural and descriptive."}</p>
         </header>
 
         <section class="ai-sentence-section initial-sentence-card initial-inline-sentence-card">
@@ -1577,12 +1689,16 @@ function renderInitialAttemptFeedbackStep(session, feedback, initialFeedback) {
   `;
 
   els.sessionDetailPanel.querySelector(".ai-enhancement-back-button")?.addEventListener("click", () => {
-    renderWriteStep(session);
+    if ((state.sessionFlow.attempts || []).length > 1) {
+      renderSessionStep("improve", { stage: state.sessionFlow.initialImprovementContinuationStage || enhancementContinuationStage(feedback) });
+    } else {
+      renderSessionStep("write");
+    }
     window.scrollTo({ top: 0, behavior: "smooth" });
   });
   document.getElementById("feedbackPrimaryButton").addEventListener("click", () => {
     state.sessionFlow.explanation = cleanUiText(document.getElementById("initialImprovementPreview")?.textContent) || draft || state.sessionFlow.explanation;
-    renderSessionStep("improve", { stage: LEARNING_STAGES.COVERAGE_LAYERS });
+    renderSessionStep("improve", { stage: state.sessionFlow.initialImprovementContinuationStage || enhancementContinuationStage(feedback) });
     window.scrollTo({ top: 0, behavior: "smooth" });
   });
   bindInitialEnhancementInteractions(session, feedback, initialFeedback);
@@ -1595,6 +1711,25 @@ function renderInitialAttemptFeedbackStep(session, feedback, initialFeedback) {
       showInitialModalXpPulse(target || document.getElementById("initialEnhancementSentence"), 5);
     }, 40);
   }
+  persistCurrentSessionFlow();
+}
+
+function resetInitialImprovementStateForSource(sourceText = "") {
+  state.sessionFlow.initialImprovementSourceText = cleanUiText(sourceText);
+  state.sessionFlow.initialImprovementCards = [];
+  state.sessionFlow.initialImprovementIndex = 0;
+  state.sessionFlow.initialImprovementDraft = cleanUiText(sourceText);
+  state.sessionFlow.initialAppliedImprovementIds = [];
+  state.sessionFlow.initialSkippedImprovementIds = [];
+  state.sessionFlow.initialLastAppliedImprovementId = "";
+}
+
+function enhancementContinuationStage(feedback = {}) {
+  const stage = normalizeLearningStage(feedback?.learning_stage || state.sessionFlow?.stage);
+  if (!stage || stage === LEARNING_STAGES.FIRST_FEEDBACK || stage === LEARNING_STAGES.INITIAL_ATTEMPT) {
+    return LEARNING_STAGES.COVERAGE_LAYERS;
+  }
+  return stage;
 }
 
 function renderAiEnhancementDots() {
@@ -1610,7 +1745,7 @@ function renderInitialImprovementCompleteState(message, draft = "", upgradeCount
     <section class="initial-improvement-done coach-reveal" ${coachRevealStyle(1)}>
       <span aria-hidden="true">✓</span>
       <div>
-        <h4>${upgradeCount ? "All choices handled" : "No major upgrade needed"}</h4>
+        <h4>${upgradeCount ? "All choices handled" : "Let’s make this more expressive."}</h4>
         <p>${escapeHtml(upgradeCount ? "Here is your polished sentence." : message)}</p>
       </div>
     </section>
@@ -1693,11 +1828,15 @@ function bindInitialEnhancementInteractions(session, feedback, initialFeedback) 
   els.sessionDetailPanel.querySelectorAll("[data-initial-modal-upgrade]").forEach((target) => {
     target.addEventListener("click", (event) => {
       if (event.target.closest("[data-apply-initial-improvement], [data-skip-initial-improvement], [data-dismiss-initial-modal]")) return;
+      target.dataset.anchorX = String(event.clientX || "");
+      target.dataset.anchorY = String(event.clientY || "");
       toggleInitialModalPopover(target);
     });
     target.addEventListener("keydown", (event) => {
       if (event.key !== "Enter" && event.key !== " ") return;
       event.preventDefault();
+      delete target.dataset.anchorX;
+      delete target.dataset.anchorY;
       toggleInitialModalPopover(target);
     });
   });
@@ -1721,12 +1860,11 @@ function bindInitialEnhancementInteractions(session, feedback, initialFeedback) 
   els.sessionDetailPanel.querySelectorAll("[data-dismiss-initial-modal]").forEach((button) => {
     button.addEventListener("click", (event) => {
       event.stopPropagation();
-      const target = button.closest("[data-initial-modal-upgrade]");
-      target?.classList.remove("active");
-      target?.setAttribute("aria-expanded", "false");
+      const popover = button.closest(".initial-modal-popover");
+      const target = initialModalOwnerForPopover(popover) || button.closest("[data-initial-modal-upgrade]");
+      closeInitialModalPopover(target);
     });
   });
-  window.addEventListener("resize", positionActiveInitialModalPopover, { passive: true });
 }
 
 function applyInitialImprovement(id, session, feedback, initialFeedback) {
@@ -1748,11 +1886,13 @@ function skipInitialImprovement(id, session, feedback, initialFeedback) {
 function buildInitialImprovementCards(originalAttempt = "", initialFeedback = {}, feedback = {}) {
   const original = cleanUiText(originalAttempt);
   if (!original) return [];
-  const rawCards = Array.isArray(initialFeedback.improvements)
-    ? initialFeedback.improvements
-    : Array.isArray(initialFeedback.improvement_cards)
-      ? initialFeedback.improvement_cards
-      : [];
+  const enhancement = initialFeedback.enhancement || initialFeedback.aiEnhancement || initialFeedback.ai_enhancement || {};
+  let rawCards = [];
+  if (Array.isArray(enhancement.upgrades)) rawCards = enhancement.upgrades;
+  else if (Array.isArray(enhancement.improvements)) rawCards = enhancement.improvements;
+  else if (Array.isArray(initialFeedback.upgrades)) rawCards = initialFeedback.upgrades;
+  else if (Array.isArray(initialFeedback.improvements)) rawCards = initialFeedback.improvements;
+  else if (Array.isArray(initialFeedback.improvement_cards)) rawCards = initialFeedback.improvement_cards;
   const cards = rawCards
     .map((item, index) => normalizeInitialImprovementCard(item, original, index))
     .filter(Boolean);
@@ -1763,33 +1903,71 @@ function buildInitialImprovementCards(originalAttempt = "", initialFeedback = {}
     if (occupied.some((item) => range.start < item.end && range.end > item.start)) return false;
     occupied.push(range);
     return true;
-  }).slice(0, 3);
+  }).slice(0, 5);
+}
+
+function sanitizeInitialImprovementCards(cards = [], originalAttempt = "") {
+  const original = cleanUiText(originalAttempt);
+  if (!original || !Array.isArray(cards) || !cards.length) return [];
+  const occupied = [];
+  return cards
+    .map((item, index) => normalizeInitialImprovementCard(item, original, index))
+    .filter((card) => {
+      if (!card) return false;
+      const range = initialImprovementCardRange(original, card);
+      if (!range) return false;
+      if (occupied.some((item) => range.start < item.end && range.end > item.start)) return false;
+      occupied.push(range);
+      return true;
+    })
+    .slice(0, 5);
 }
 
 function normalizeInitialImprovementCard(item, original, index = 0) {
   if (!item || typeof item !== "object") return null;
   const category = normalizeInitialImprovementCategory(item.category);
   const title = cleanUiText(item.title) || initialImprovementCategoryTitle(category);
-  const rawCurrent = cleanUiText(item.currentText || item.targetText || item.oldText || item.old);
+  const rawCurrent = cleanUiText(item.currentText || item.current_text || item.targetText || item.target_text || item.oldText || item.old_text || item.old);
   const currentText = findTextOccurrence(original, rawCurrent) || rawCurrent;
-  const suggestedText = cleanUiText(item.suggestedText || item.replacementText || item.newText || item.suggested || item.rewrite || item.new);
-  const whyItHelps = cleanUiText(item.whyItHelps || item.why || item.reason);
-  const example = cleanUiText(item.example);
+  const suggestedText = cleanUiText(
+    item.suggestedText
+      || item.suggested_text
+      || item.replacementText
+      || item.replacement_text
+      || item.newText
+      || item.new_text
+      || item.suggested
+      || item.rewrite
+      || item.new
+  );
+  const whyItHelps = cleanUiText(item.whyItHelps || item.why_it_helps || item.why || item.reason)
+    || "This keeps your meaning but makes the sentence sound more natural.";
+  const example = cleanUiText(item.example) || genericInitialImprovementExample(currentText, suggestedText);
   const xpReward = [10, 5].includes(Number(item.xpReward)) ? Number(item.xpReward) : 5;
+  const currentWordCount = currentText.split(/\s+/).filter(Boolean).length;
+  const suggestedWordCount = suggestedText.split(/\s+/).filter(Boolean).length;
   if (!suggestedText || normalizeClientText(suggestedText) === normalizeClientText(currentText)) return null;
-  if (!currentText || !whyItHelps || !example) return null;
+  if (!currentText || !findTextOccurrence(original, currentText)) return null;
+  if (normalizeClientText(currentText) === normalizeClientText(original)) return null;
+  if (currentWordCount > 10 || suggestedWordCount > 16) return null;
+  if (currentWordCount > Math.max(4, original.split(/\s+/).filter(Boolean).length / 2)) return null;
   const card = {
     id: cleanUiText(item.id) || `${category}-${index + 1}`,
     category,
     title,
     currentText,
     suggestedText,
+    targetText: currentText,
+    replacementText: suggestedText,
     whyItHelps,
+    reason: whyItHelps,
     example,
+    finalPreview: "",
     xpReward,
   };
   const preview = applyInitialImprovementToText(original, card);
   if (!initialImprovementPreviewLooksSafe(preview, original, card)) return null;
+  card.finalPreview = preview;
   return card;
 }
 
@@ -1800,7 +1978,7 @@ function applyInitialImprovementToText(text, card) {
   if (current) {
     return replaceFirstTextOccurrence(source, current, card.suggestedText);
   }
-  return card.suggestedText;
+  return source;
 }
 
 function initialImprovementCardRange(text, card) {
@@ -1814,24 +1992,59 @@ function initialImprovementCardRange(text, card) {
 function initialImprovementPreviewLooksSafe(preview, original, card) {
   const text = cleanUiText(preview);
   if (!text || normalizeClientText(text) === normalizeClientText(original)) return false;
+  if (normalizeClientText(card.currentText) === normalizeClientText(original)) return false;
   if (hasAdjacentRepeatedWords(text)) return false;
+  if (/\b(?:of|with|to|in|on|at|near|around|beside|behind|under)\s*[.!?]?$/i.test(text)) return false;
   if (text.split(/\s+/).length > Math.max(28, original.split(/\s+/).length + 12)) return false;
-  const currentWords = normalizeClientText(card.currentText).split(/\s+/).filter((word) => word.length > 2);
-  const suggestedWords = normalizeClientText(card.suggestedText);
-  const preservesSomeMeaning = currentWords.length === 0 || currentWords.some((word) => suggestedWords.includes(word));
-  if (!preservesSomeMeaning && card.currentText !== original) return false;
   return true;
 }
 
 function normalizeInitialImprovementCategory(category) {
-  const value = String(category || "").trim();
+  const value = String(category || "").trim().toLowerCase().replace(/[-\s]+/g, "_");
+  const mapped = {
+    grammar: "grammar_fix",
+    grammar_correction: "grammar_fix",
+    spelling: "grammar_fix",
+    spelling_correction: "grammar_fix",
+    article: "grammar_fix",
+    article_correction: "grammar_fix",
+    article_usage: "grammar_fix",
+    preposition: "grammar_fix",
+    preposition_correction: "grammar_fix",
+    preposition_usage: "grammar_fix",
+    sentence_restructuring: "sentence_flow",
+    cleaner_sentence_flow: "sentence_flow",
+    flow: "sentence_flow",
+    better_descriptive_wording: "visual_clarity",
+    stronger_visual_detail: "visual_clarity",
+    visual_detail: "visual_clarity",
+    better_atmosphere_wording: "visual_clarity",
+    atmosphere_phrasing: "visual_clarity",
+    better_positioning_language: "visual_clarity",
+    positioning_language: "visual_clarity",
+    more_reusable_phrase: "natural_phrasing",
+    reusable_phrase: "natural_phrasing",
+    natural_phrase: "natural_phrasing",
+  }[value] || value;
   return [
     "subject_clarity",
     "sentence_flow",
     "natural_phrasing",
     "grammar_fix",
     "visual_clarity",
-  ].includes(value) ? value : "natural_phrasing";
+  ].includes(mapped) ? mapped : "natural_phrasing";
+}
+
+function genericInitialImprovementExample(currentText = "", suggestedText = "") {
+  const suggested = cleanUiText(suggestedText) || cleanUiText(currentText) || "clear wording";
+  const lower = suggested.toLowerCase();
+  if (/^(shows|includes|features|appears)\b/.test(lower)) {
+    return `The image ${suggested} the main detail.`;
+  }
+  if (/^(moving|standing|sitting|walking|looking)\b/.test(lower)) {
+    return `The subject is ${suggested}.`;
+  }
+  return `Use "${suggested}" to make the sentence sound more natural.`;
 }
 
 function initialImprovementCategoryTitle(category) {
@@ -1903,12 +2116,12 @@ function hasAdjacentRepeatedWords(text) {
 function toggleInitialModalPopover(target) {
   const active = target.classList.contains("active");
   els.sessionDetailPanel.querySelectorAll(".initial-modal-weak.active").forEach((item) => {
-    item.classList.remove("active");
-    item.setAttribute("aria-expanded", "false");
+    closeInitialModalPopover(item);
   });
   if (!active) {
     target.classList.add("active");
     target.setAttribute("aria-expanded", "true");
+    portalInitialModalPopover(target);
     window.requestAnimationFrame(() => positionInitialModalPopover(target));
   }
 }
@@ -1921,29 +2134,31 @@ function positionActiveInitialModalPopover() {
 }
 
 function positionInitialModalPopover(target) {
-  const popover = target?.querySelector(".initial-modal-popover");
+  const popover = initialModalPopoverForTarget(target);
   if (!target || !popover || !target.classList.contains("active")) return;
   const safe = 12;
-  const gap = 12;
+  const gap = 10;
   const viewportWidth = Math.max(document.documentElement.clientWidth || 0, window.innerWidth || 0);
   const viewportHeight = Math.max(document.documentElement.clientHeight || 0, window.innerHeight || 0);
   const modalRect = target.closest(".ai-enhancement-modal")?.getBoundingClientRect();
   const availableWidth = modalRect
     ? Math.min(viewportWidth - safe * 2, modalRect.width - safe * 2)
     : viewportWidth - safe * 2;
-  const width = Math.min(512, Math.max(248, availableWidth));
+  const width = Math.min(372, Math.max(248, availableWidth));
   popover.style.width = `${width}px`;
+  popover.style.maxHeight = `${Math.max(160, Math.min(380, viewportHeight - safe * 2))}px`;
 
   const targetRect = target.getBoundingClientRect();
+  const anchorRect = initialModalAnchorRect(target) || targetRect;
   let popoverRect = popover.getBoundingClientRect();
-  const height = Math.min(popoverRect.height, Math.max(180, viewportHeight - safe * 2));
-  const spaceAbove = targetRect.top - safe;
-  const spaceBelow = viewportHeight - targetRect.bottom - safe;
-  const openBelow = spaceAbove < height + gap && spaceBelow > spaceAbove;
-  let top = openBelow ? targetRect.bottom + gap : targetRect.top - height - gap;
+  const height = Math.min(popoverRect.height || 240, Math.max(180, Math.min(380, viewportHeight - safe * 2)));
+  const spaceAbove = anchorRect.top - safe;
+  const spaceBelow = viewportHeight - anchorRect.bottom - safe;
+  const openBelow = spaceBelow >= Math.min(height, 320) + gap || (spaceAbove < height + gap && spaceBelow > spaceAbove);
+  let top = openBelow ? anchorRect.bottom + gap : anchorRect.top - height - gap;
   top = Math.max(safe, Math.min(top, viewportHeight - height - safe));
 
-  const center = targetRect.left + targetRect.width / 2;
+  const center = anchorRect.left + anchorRect.width / 2;
   let left = center - width / 2;
   if (modalRect) {
     left = Math.max(modalRect.left + safe, Math.min(left, modalRect.right - width - safe));
@@ -1952,10 +2167,88 @@ function positionInitialModalPopover(target) {
   const arrowLeft = Math.max(18, Math.min(width - 18, center - left));
 
   target.classList.toggle("popover-below", openBelow);
+  popover.classList.toggle("popover-below", openBelow);
   popover.style.left = `${left}px`;
   popover.style.top = `${top}px`;
-  popover.style.maxHeight = `${Math.max(160, viewportHeight - safe * 2)}px`;
   popover.style.setProperty("--arrow-left", `${arrowLeft}px`);
+}
+
+function firstVisibleClientRect(element) {
+  const rects = [...(element?.getClientRects?.() || [])]
+    .filter((rect) => rect.width > 0 && rect.height > 0);
+  return rects[0] || null;
+}
+
+function initialModalAnchorRect(target) {
+  const rects = [...(target?.getClientRects?.() || [])]
+    .filter((rect) => rect.width > 0 && rect.height > 0);
+  if (!rects.length) return firstVisibleClientRect(target);
+  const anchorX = Number(target.dataset.anchorX);
+  const anchorY = Number(target.dataset.anchorY);
+  if (Number.isFinite(anchorX) && Number.isFinite(anchorY)) {
+    return rects.find((rect) => (
+      anchorX >= rect.left - 2 &&
+      anchorX <= rect.right + 2 &&
+      anchorY >= rect.top - 2 &&
+      anchorY <= rect.bottom + 2
+    )) || rects
+      .map((rect) => ({
+        rect,
+        distance: Math.abs(anchorX - (rect.left + rect.width / 2)) + Math.abs(anchorY - (rect.top + rect.height / 2)),
+      }))
+      .sort((a, b) => a.distance - b.distance)[0]?.rect;
+  }
+  return rects[0];
+}
+
+function portalInitialModalPopover(target) {
+  const popover = target?.querySelector(".initial-modal-popover") || initialModalPopoverForTarget(target);
+  if (!target || !popover) return;
+  popover.dataset.initialPortal = "true";
+  popover.dataset.activeOwner = target.dataset.initialModalUpgrade || "";
+  popover.classList.add("is-open");
+  document.body.appendChild(popover);
+}
+
+function closeInitialModalPopover(target) {
+  if (!target) return;
+  const popover = initialModalPopoverForTarget(target);
+  target.classList.remove("active", "popover-below");
+  target.setAttribute("aria-expanded", "false");
+  delete target.dataset.anchorX;
+  delete target.dataset.anchorY;
+  if (popover) {
+    popover.classList.remove("is-open", "popover-below");
+    popover.removeAttribute("style");
+    delete popover.dataset.initialPortal;
+    delete popover.dataset.activeOwner;
+    target.appendChild(popover);
+  }
+}
+
+function initialModalPopoverForTarget(target) {
+  if (!target) return null;
+  const owner = target.dataset.initialModalUpgrade || "";
+  return target.querySelector(".initial-modal-popover")
+    || (owner ? document.querySelector(`.initial-modal-popover[data-active-owner="${cssEscape(owner)}"]`) : null);
+}
+
+function initialModalOwnerForPopover(popover) {
+  const owner = popover?.dataset?.activeOwner || "";
+  return owner ? els.sessionDetailPanel?.querySelector(`[data-initial-modal-upgrade="${cssEscape(owner)}"]`) : null;
+}
+
+function cleanupInitialModalPopovers() {
+  document.querySelectorAll(".initial-modal-popover[data-initial-portal]").forEach((popover) => {
+    popover.remove();
+  });
+}
+
+function cssEscape(value = "") {
+  if (window.CSS?.escape) {
+    return window.CSS.escape(String(value));
+  }
+  return String(value).replace(/["\\]/g, "\\$&");
 }
 
 function showInitialModalXpPulse(anchor, xp = 5) {
@@ -2544,7 +2837,8 @@ function renderImproveStep(session) {
   const issue = coverageLayers.currentLayer
     ? buildLayerFeedbackIssue(coverageLayers.currentLayer, latestFeedback, session)
     : buildFeedbackIssue(latestFeedback, session);
-  const escalation = buildImproveEscalationContext(session, attempts, issue, coverageLayers.currentLayer);
+  const autoEscalation = buildImproveEscalationContext(session, attempts, issue, coverageLayers.currentLayer);
+  const escalation = applyManualFocusSupportLevel(autoEscalation, coverageLayers.currentLayer, session);
   const currentFocus = coverageLayers.currentLayer
     ? buildLayerCurrentFocus(coverageLayers.currentLayer, session, escalation)
     : buildImproveCurrentFocus(issue, session, escalation);
@@ -2610,11 +2904,13 @@ function renderImproveStep(session) {
     }
     const baseText = cleanUiText(document.getElementById("evolvingParagraph")?.textContent || rewriteDraft);
     const improvedText = mergeParagraphDetail(baseText, detailText);
-    const preview = document.getElementById("liveMergePreview");
-    preview?.classList.add("merge-insert-glow");
     showCoverageLayerSuccess(coverageLayers.currentLayer);
     await new Promise((resolve) => window.setTimeout(resolve, 420));
     requestImprovementFeedback(session, state.sessionFlow.explanation, improvedText);
+  });
+  document.getElementById("makeFocusEasierButton")?.addEventListener("click", () => {
+    increaseFocusSupportLevel(coverageLayers.currentLayer, escalation.level || 1);
+    renderImproveStep(session);
   });
   document.getElementById("upgradeMyArticulationButton")?.addEventListener("click", () => {
     state.sessionFlow.coverageCompleteAcknowledged = true;
@@ -2681,10 +2977,6 @@ function renderImproveStep(session) {
   window.setTimeout(() => {
     const detailInput = document.getElementById("learnerImproveInput");
     detailInput?.focus();
-    detailInput?.addEventListener("input", () => updateLiveMergePreview(rewriteDraft));
-    document.getElementById("editEvolvingParagraphButton")?.addEventListener("click", () => {
-      enableEvolvingParagraphEdit(rewriteDraft);
-    });
     positionInlineUpgradePopovers();
   }, 50);
 }
@@ -2742,32 +3034,24 @@ function positionInlineUpgradePopover(target) {
 function renderImproveEditor({ rewriteDraft, currentFocus, hintGroups, articulation, escalation = {}, session = {}, latestText = "", latestFeedback = {} }) {
   const focus = buildLayerFocusDisplay(articulation?.currentLayer, currentFocus, escalation);
   const supportActive = (escalation.level || 1) > 1;
+  const supportLevel = Math.max(1, Math.min(5, Number(escalation.level || 1)));
+  const canMakeEasier = Boolean(articulation?.currentLayer) && supportLevel < 5;
   const hints = supportActive
     ? progressiveSupportHints(hintGroups, escalation, currentFocus).slice(0, 6)
     : focusedMiniHints(hintGroups).slice(0, 6);
   const nextLayer = nextCoverageLayer(articulation);
-  const originalAttempt = (state.sessionFlow.attempts || [])[0]?.text || state.sessionFlow.explanation || latestText || "";
   return `
     ${renderTinyCoverageProgress(articulation)}
-    <details class="original-attempt-collapse coach-reveal" ${coachRevealStyle(0)}>
-      <summary>
-        <span aria-hidden="true">♙</span>
-        <strong>Your original attempt</strong>
-      </summary>
-      <p>${escapeHtml(originalAttempt)}</p>
-    </details>
-
     ${supportActive ? renderProgressiveSupportBanner(escalation, currentFocus) : ""}
 
     <section class="evolving-paragraph-section coach-reveal" ${coachRevealStyle(supportActive ? 2 : 1)}>
       <div class="coverage-section-head">
-        <h3>Your evolving description</h3>
+        <h3>Your description</h3>
         <span aria-hidden="true">🔊</span>
       </div>
       <div id="evolvingParagraph" class="evolving-paragraph-card" tabindex="0">
         ${renderEvolvingParagraphMarkup(rewriteDraft, latestFeedback, session)}
       </div>
-      <button id="editEvolvingParagraphButton" class="edit-paragraph-button" type="button">✎ Edit paragraph</button>
     </section>
 
     <section class="single-focus-card coach-reveal" ${coachRevealStyle(2)}>
@@ -2776,9 +3060,12 @@ function renderImproveEditor({ rewriteDraft, currentFocus, hintGroups, articulat
         <span>Current focus</span>
         <h4>${escapeHtml(cleanFocusTitle(focus.title))}</h4>
         <p>${escapeHtml(progressiveSupportHelper(focus, escalation, currentFocus) || "Add one more clear detail.")}</p>
+        <small>Help level ${supportLevel} of 5</small>
         ${nextLayer ? `<small>Next: ${escapeHtml(shortFocusPreview(nextLayer))}</small>` : ""}
       </div>
-      <span class="single-focus-arrow" aria-hidden="true">›</span>
+      <button id="makeFocusEasierButton" class="focus-ease-button" type="button" ${canMakeEasier ? "" : "disabled"} aria-label="Make this focus easier">
+        ${canMakeEasier ? "Easier" : "Max"}
+      </button>
     </section>
 
     ${hints.length ? `
@@ -2801,13 +3088,31 @@ function renderImproveEditor({ rewriteDraft, currentFocus, hintGroups, articulat
       </div>
     </section>
 
-    <section class="live-merge-section coach-reveal" ${coachRevealStyle(5)}>
-      <h4><span aria-hidden="true">◉</span> Live preview</h4>
-      <div id="liveMergePreview" class="live-merge-card">
-        ${renderEvolvingParagraphMarkup(rewriteDraft, latestFeedback, session)}
-      </div>
-    </section>
   `;
+}
+
+function focusSupportKey(layer) {
+  return cleanUiText(layer?.key || layer?.id || layer?.visualFocus || layer?.label || "").replace(/\s+/g, "_");
+}
+
+function applyManualFocusSupportLevel(escalation = {}, layer = null, session = {}) {
+  const key = focusSupportKey(layer);
+  const stored = key ? Number(state.sessionFlow.focusSupportLevels?.[key] || 0) : 0;
+  const level = Math.max(1, Math.min(5, Math.max(Number(escalation.level || 1), stored || 1)));
+  return {
+    ...escalation,
+    level,
+    manualSupportLevel: stored,
+    message: layer ? supportiveLayerMessage(layer, level, session) : escalation.message,
+  };
+}
+
+function increaseFocusSupportLevel(layer, currentLevel = 1) {
+  const key = focusSupportKey(layer);
+  if (!key) return;
+  state.sessionFlow.focusSupportLevels = state.sessionFlow.focusSupportLevels || {};
+  state.sessionFlow.focusSupportLevels[key] = Math.min(5, Math.max(2, Number(currentLevel || 1) + 1));
+  persistCurrentSessionFlow();
 }
 
 function renderProgressiveSupportBanner(escalation = {}, currentFocus = "") {
@@ -2863,9 +3168,9 @@ function progressiveSupportHints(hintGroups = [], escalation = {}, currentFocus 
 
 function evolvingParagraphText(latestText, latestFeedback = {}) {
   return cleanUiText(
-    latestFeedback?.initial_attempt_feedback?.covered_enhancement
+    latestText
+    || latestFeedback?.initial_attempt_feedback?.covered_enhancement
     || latestFeedback?.better_version
-    || latestText
   );
 }
 
@@ -2964,33 +3269,6 @@ function focusVisualIcon(layer, title = "") {
   if (/\b(light|shadow|shade|sun)\b/.test(text)) return "☀️";
   if (/\b(road|street|vehicle|car|motorcycle)\b/.test(text)) return "🛣️";
   return "✦";
-}
-
-function updateLiveMergePreview(baseText) {
-  const preview = document.getElementById("liveMergePreview");
-  const input = document.getElementById("learnerImproveInput");
-  if (!preview || !input) return;
-  const editableBase = cleanUiText(document.getElementById("evolvingParagraph")?.textContent || baseText);
-  const merged = mergeParagraphDetail(editableBase, input.value);
-  const highlightTerms = [...document.querySelectorAll("#evolvingParagraph mark")]
-    .map((item) => cleanUiText(item.textContent))
-    .filter(Boolean);
-  preview.innerHTML = highlightTextTerms(merged, highlightTerms, "evolving-ai-highlight");
-}
-
-function enableEvolvingParagraphEdit(originalText) {
-  const paragraph = document.getElementById("evolvingParagraph");
-  if (!paragraph) return;
-  paragraph.setAttribute("contenteditable", "true");
-  paragraph.classList.add("editable");
-  paragraph.addEventListener("input", () => updateLiveMergePreview(originalText));
-  paragraph.focus();
-  const range = document.createRange();
-  range.selectNodeContents(paragraph);
-  range.collapse(false);
-  const selection = window.getSelection();
-  selection?.removeAllRanges();
-  selection?.addRange(range);
 }
 
 function showCoverageLayerSuccess(layer) {
@@ -3159,18 +3437,9 @@ function renderArticulationUpgradeStage(upgradeState, suggestions) {
   const handled = new Set([...(upgradeState.applied || []), ...(upgradeState.skipped || [])]);
   const activeSuggestions = suggestions.filter((item) => !handled.has(item.id)).slice(0, 5);
   const annotated = buildInlineUpgradeMarkup(answer, activeSuggestions, upgradeState.lastAppliedNewText || "");
-  const originalAttempt = (state.sessionFlow.attempts || [])[0]?.text || upgradeState.original || "";
   const upgradeTags = richnessUpgradeTypes(activeSuggestions.length ? activeSuggestions : suggestions).slice(0, 5);
   return `
     <section class="articulation-polish-stage coach-reveal" ${coachRevealStyle(0)}>
-      <details class="original-attempt-collapse polish-original-attempt">
-        <summary>
-          <span aria-hidden="true">♙</span>
-          <strong>Your original attempt</strong>
-        </summary>
-        <p>${escapeHtml(originalAttempt)}</p>
-      </details>
-
       <div class="polish-stage-heading">
         <div>
           <h3>Upgrade your articulation</h3>
@@ -3181,7 +3450,7 @@ function renderArticulationUpgradeStage(upgradeState, suggestions) {
 
       <section class="articulation-upgrade-card richness-upgrade-card">
         <div class="coverage-section-head polish-paragraph-head">
-          <h4>Your evolving description</h4>
+          <h4>Your description</h4>
           <span aria-hidden="true">🔊</span>
         </div>
         <div class="inline-upgrade-answer ${upgradeState.justApplied ? "replacement-flash" : ""}" aria-live="polite">
@@ -3484,7 +3753,9 @@ function renderCoverageLayerProgress(coverageLayers) {
 }
 
 function buildLayerFocusDisplay(layer, currentFocus, escalation = {}) {
-  const title = conciseLayerFocusTitle(layer, currentFocus);
+  const title = layer?.dynamic && cleanUiText(currentFocus)
+    ? cleanUiText(currentFocus)
+    : conciseLayerFocusTitle(layer, currentFocus);
   const guidance = cleanUiText(currentFocus);
   const defaultSupport = supportingLineForLayer(layer);
   return {
@@ -3733,7 +4004,7 @@ function buildCoverageLayerState(feedback, session, learnerText = "") {
   if (currentIndex >= 0) {
     layers[currentIndex].current = true;
   }
-  const gate = coverageCompletionGate(feedback, session);
+  const gate = coverageCompletionGate(feedback, session, learnerText);
   return {
     layers,
     currentIndex,
@@ -3749,7 +4020,7 @@ function coverageLayerDefinitions(feedback, session, learnerText = "") {
   const normalizedText = normalizeClientText(learnerText);
   const analysis = session?.analysis || {};
   const allTargets = analysisArticulationTargets(analysis);
-  const missingAreas = missingVisualAreaLabels(feedback, session);
+  const missingAreas = missingVisualAreaLabels(feedback, session, learnerText);
   if (!missingAreas.length) {
     return [];
   }
@@ -3774,11 +4045,11 @@ function coverageLayerDefinitions(feedback, session, learnerText = "") {
   }).slice(0, 6);
 }
 
-function missingVisualAreaLabels(feedback = {}, session = {}) {
+function missingVisualAreaLabels(feedback = {}, session = {}, learnerText = "") {
   const coverage = feedback.coverage || {};
   const flow = feedback.learning_flow || {};
   const initial = feedback.initial_attempt_feedback || {};
-  const gate = coverageCompletionGate(feedback, session);
+  const gate = coverageCompletionGate(feedback, session, learnerText);
   if (gate.complete) {
     return [];
   }
@@ -3793,19 +4064,20 @@ function missingVisualAreaLabels(feedback = {}, session = {}) {
     }
     currentLabels.push(cleanUiText(part.name || part.description || part.type || ""));
   });
-  const labels = currentLabels.length
-    ? currentLabels
-    : [
-        ...cleanUiList(gate.missingFocuses || [], 8),
-        ...cleanUiList(initial.missing_visual_areas || [], 8),
-      ];
+  const inferredLabels = analysisMissingCoverageLabels(session?.analysis || {}, feedback, learnerText, currentLabels);
+  const labels = [
+    ...currentLabels,
+    ...(!currentLabels.length ? cleanUiList(gate.missingFocuses || [], 8) : []),
+    ...cleanUiList(initial.missing_visual_areas || [], 8),
+    ...inferredLabels,
+  ];
   return uniqueWritingHints(labels)
     .map((item) => item.replace(/_/g, " "))
     .filter((item) => !/no major visual detail/i.test(item))
     .slice(0, 6);
 }
 
-function coverageCompletionGate(feedback = {}, session = {}) {
+function coverageCompletionGate(feedback = {}, session = {}, learnerText = "") {
   const coverage = feedback.coverage || {};
   const progressive = getProgressiveCoverageState(feedback);
   const analysis = session?.analysis || {};
@@ -3813,26 +4085,35 @@ function coverageCompletionGate(feedback = {}, session = {}) {
   const imageParts = Array.isArray(coverage.imageParts) ? coverage.imageParts : [];
   const coveredParts = imageParts.filter(isCoveragePartCovered);
   const relevant = relevantCoverageDimensions(analysis, feedback);
+  const categoryState = coverageCategoryState(imageParts, analysis);
   const missingFocuses = [];
-  const hasMainFocus = Boolean(progressive.subjectOk || coveredPartMatches(coveredParts, /main_subject|subject|main_object|person|object/));
+  const hasMainFocus = Boolean(progressive.subjectOk && categoryState.mainSubject !== "missing");
   const actionRequired = relevant.action;
-  const hasAction = !actionRequired || Boolean(progressive.actionOk || coveredPartMatches(coveredParts, /main_action|action|movement|interaction/));
-  const hasSetting = Boolean(progressive.settingOk || coveredPartMatches(coveredParts, /setting|background|environment|context|place/));
-  const detailCount = meaningfulDetailCount(coveredParts);
-  const hasDetails = detailCount >= (relevant.detailHeavy ? 2 : 1);
-  const hasAtmosphere = !relevant.atmosphere || Boolean(coveredPartMatches(coveredParts, /mood|atmosphere|condition|feeling/) || coveragePercent >= 82);
-  const hasComposition = !relevant.composition || Boolean(coveredPartMatches(coveredParts, /composition|position|positioning|foreground|layout|lighting|shadow/) || coveragePercent >= 82);
+  const hasAction = !actionRequired || Boolean(progressive.actionOk && categoryState.peopleAction !== "missing");
+  const hasSetting = Boolean(
+    progressive.settingOk &&
+    (categoryState.settingEnvironment !== "missing" || categoryState.background !== "missing")
+  );
+  const supportingCoveredCount = coveredSupportingCategoryCount(categoryState);
+  const supportingNeeded = Math.min(relevant.detailHeavy ? 3 : 2, applicableSupportingCategoryCount(categoryState));
+  const hasDetails = supportingCoveredCount >= supportingNeeded;
+  const hasAtmosphere = categoryState.atmosphereLighting === "not_applicable" || categoryState.atmosphereLighting !== "missing";
+  const hasComposition = categoryState.foreground === "not_applicable" || categoryState.foreground !== "missing";
   const naturalEnough = Boolean(progressive.notListOk && (progressive.naturalOk || coveragePercent >= 70));
+  const highPriorityRatio = applicableHighPriorityCoverageRatio(categoryState);
+  const criticalMissing = criticalMissingCoverageCategories(categoryState, { actionRequired });
+  const initialEnhancementOnly = Boolean(feedback.initial_attempt_feedback?.prepares_coverage_layers)
+    && (state?.sessionFlow?.attempts || []).length <= 1;
+  const initialHasEnoughSupport = !initialEnhancementOnly || (supportingCoveredCount >= 3 && coveragePercent >= 80);
 
   if (!hasMainFocus) missingFocuses.push("main visual focus");
   if (!hasAction) missingFocuses.push("main action");
   if (!hasSetting) missingFocuses.push("setting or background");
-  if (!hasDetails) missingFocuses.push(relevant.detailHeavy ? "important objects and meaningful details" : "one meaningful visual detail");
+  if (!hasDetails) missingFocuses.push(relevant.detailHeavy ? "important supporting details" : "another important supporting visual area");
   if (!hasAtmosphere) missingFocuses.push("atmosphere or condition");
   if (!hasComposition) missingFocuses.push("composition or positioning");
   if (!naturalEnough) missingFocuses.push("a clear connected sentence");
 
-  const highPriorityMissing = missingFocuses.filter((item) => !/atmosphere|composition|connected sentence/i.test(item));
   const complete = (
     hasMainFocus &&
     hasAction &&
@@ -3841,8 +4122,10 @@ function coverageCompletionGate(feedback = {}, session = {}) {
     hasAtmosphere &&
     hasComposition &&
     naturalEnough &&
-    coveragePercent >= 68 &&
-    highPriorityMissing.length === 0
+    coveragePercent >= 70 &&
+    highPriorityRatio >= 0.7 &&
+    criticalMissing.length === 0 &&
+    initialHasEnoughSupport
   );
 
   return {
@@ -3856,7 +4139,144 @@ function coverageCompletionGate(feedback = {}, session = {}) {
     hasAtmosphere,
     hasComposition,
     naturalEnough,
+    supportingCoveredCount,
+    supportingNeeded,
+    highPriorityRatio,
+    criticalMissing,
   };
+}
+
+function coverageCategoryState(imageParts = [], analysis = {}) {
+  const categories = {
+    mainSubject: "missing",
+    foreground: "not_applicable",
+    background: "not_applicable",
+    importantObjects: "not_applicable",
+    peopleAction: relevantCoverageDimensions(analysis, {}).action ? "missing" : "not_applicable",
+    settingEnvironment: "missing",
+    atmosphereLighting: "not_applicable",
+    notableVisualDetails: "not_applicable",
+  };
+  const parts = Array.isArray(imageParts) ? imageParts : [];
+  parts.forEach((part) => {
+    if (!part || part.required === false) return;
+    const category = coverageCategoryForPart(part);
+    if (!category) return;
+    categories[category] = strongestCoverageStatus(categories[category], coveragePartStatus(part));
+  });
+  if (!parts.some((part) => coverageCategoryForPart(part) === "foreground")) {
+    categories.foreground = "not_applicable";
+  }
+  if (!parts.some((part) => coverageCategoryForPart(part) === "background")) {
+    categories.background = "not_applicable";
+  }
+  if (categories.settingEnvironment === "missing" && categories.background !== "not_applicable") {
+    categories.settingEnvironment = categories.background;
+    categories.background = "not_applicable";
+  }
+  if (!parts.some((part) => coverageCategoryForPart(part) === "importantObjects")) {
+    categories.importantObjects = "not_applicable";
+  }
+  if (!parts.some((part) => coverageCategoryForPart(part) === "atmosphereLighting")) {
+    categories.atmosphereLighting = relevantCoverageDimensions(analysis, {}).atmosphere ? "missing" : "not_applicable";
+  }
+  if (!parts.some((part) => coverageCategoryForPart(part) === "notableVisualDetails")) {
+    categories.notableVisualDetails = categories.importantObjects;
+  }
+  return categories;
+}
+
+function coverageCategoryForPart(part = {}) {
+  const text = normalizeClientText(`${part.type || ""} ${part.name || ""} ${part.description || ""}`);
+  if (/\b(main_subject|main subject|primary subject|subject)\b/.test(text)) return "mainSubject";
+  if (/\b(main_action|main action|action|movement|interaction|people)\b/.test(text)) return "peopleAction";
+  if (/\b(setting|environment|context|place)\b/.test(text)) return "settingEnvironment";
+  if (/\b(background|sky|behind)\b/.test(text)) return "background";
+  if (/\b(foreground|front|nearest|nearby|ground|entrance|bottom)\b/.test(text)) return "foreground";
+  if (/\b(mood|atmosphere|lighting|light|bright|shadow|weather|condition|feeling)\b/.test(text)) return "atmosphereLighting";
+  if (/\b(important|object|detail|tree|bush|shrub|greenery|column|roof|architecture|vehicle|building)\b/.test(text)) return "importantObjects";
+  return "notableVisualDetails";
+}
+
+function coveragePartStatus(part = {}) {
+  const status = String(part.coverageStatus || "").toLowerCase();
+  if (part.covered === true || status === "covered") return "covered";
+  if (status === "partially_covered") return "partially_covered";
+  return "missing";
+}
+
+function strongestCoverageStatus(current = "missing", next = "missing") {
+  const rank = { not_applicable: -1, missing: 0, partially_covered: 1, covered: 2 };
+  return (rank[next] || 0) > (rank[current] || 0) ? next : current;
+}
+
+function coverageStatusCredit(status = "missing") {
+  if (status === "covered") return 1;
+  if (status === "partially_covered") return 0.5;
+  return 0;
+}
+
+function applicableHighPriorityCoverageRatio(categoryState = {}) {
+  const categories = [
+    "mainSubject",
+    "peopleAction",
+    "settingEnvironment",
+    "background",
+    "foreground",
+    "importantObjects",
+    "atmosphereLighting",
+    "notableVisualDetails",
+  ].filter((key) => categoryState[key] !== "not_applicable");
+  if (!categories.length) return 0;
+  const credit = categories.reduce((sum, key) => sum + coverageStatusCredit(categoryState[key]), 0);
+  return credit / categories.length;
+}
+
+function applicableSupportingCategoryCount(categoryState = {}) {
+  return supportingCoverageCategoryKeys(categoryState).length;
+}
+
+function coveredSupportingCategoryCount(categoryState = {}) {
+  return supportingCoverageCategoryKeys(categoryState)
+    .filter((key) => coverageStatusCredit(categoryState[key]) > 0)
+    .length;
+}
+
+function supportingCoverageCategoryKeys(categoryState = {}) {
+  return [
+    "peopleAction",
+    "settingEnvironment",
+    "background",
+    "foreground",
+    "importantObjects",
+    "atmosphereLighting",
+    "notableVisualDetails",
+  ].filter((key) => categoryState[key] !== "not_applicable");
+}
+
+function criticalMissingCoverageCategories(categoryState = {}, { actionRequired = false } = {}) {
+  const critical = ["mainSubject"];
+  if (categoryState.settingEnvironment === "missing" && categoryState.background === "missing") {
+    critical.push("settingEnvironment");
+  }
+  if (actionRequired) critical.push("peopleAction");
+  return critical.filter((key) => categoryState[key] === "missing");
+}
+
+function analysisMissingCoverageLabels(analysis = {}, feedback = {}, learnerText = "", existing = []) {
+  const normalizedText = normalizeClientText(learnerText);
+  if (!normalizedText) return [];
+  const existingText = normalizeClientText(existing.join(" "));
+  return analysisArticulationTargets(analysis)
+    .filter((target) => !dynamicTargetCompleted(target, feedback, analysis, normalizedText))
+    .filter((target) => {
+      const key = normalizeClientText(`${target.label} ${target.visualFocus}`);
+      return key && !existingText.includes(key);
+    })
+    .sort((a, b) => Number(b.importance || 0) - Number(a.importance || 0))
+    .map((target) => target.visualFocus || target.label)
+    .filter(Boolean)
+    .slice(0, 6);
 }
 
 function relevantCoverageDimensions(analysis = {}, feedback = {}) {
@@ -3982,7 +4402,24 @@ function coverageLayerLabel(area, target = {}) {
 function coverageLayerPrompt(area, target = {}) {
   const label = coverageLayerLabel(area, target);
   if (label.endsWith("?")) return label;
-  return `${label}.`;
+  const focus = cleanUiText(target.visualFocus || area || label).replace(/^add detail about\s+/i, "");
+  const key = normalizeClientText(`${focus} ${area || ""} ${target.category || ""} ${label}`);
+  if (/\b(tree|trees|greenery|plants|leaves|bushes|shrubs|vines)\b/.test(key)) {
+    return "What other greenery do you notice around the main subject?";
+  }
+  if (/\b(column|columns|roof|overhang|architecture|structure|building)\b/.test(key)) {
+    return "What makes the building structure noticeable?";
+  }
+  if (/\b(people|person|group|entrance|foreground|near|bottom|position)\b/.test(key)) {
+    return "Where are the people or foreground details in relation to the main subject?";
+  }
+  if (/\b(light|lighting|shadow|sunlight|bright|sky|weather|atmosphere|mood|feeling)\b/.test(key)) {
+    return "What does the weather or lighting make the scene feel like?";
+  }
+  if (/\b(setting|environment|place|institution|school|campus|area)\b/.test(key)) {
+    return "What kind of place does this seem to be?";
+  }
+  return `What do you notice about ${focus || "this missing visual area"}?`;
 }
 
 function completedArticulationLayerKeys(feedback, session, learnerText = "") {
@@ -4010,6 +4447,7 @@ function awardNewLayerCompletionXp(session, feedback, learnerText = "") {
     awardLocalXp(20);
     showToast("+20 XP — All image layers covered");
   }
+  persistCurrentSessionFlow();
 }
 
 function articulationLayerDefinitions(feedback, session, learnerText = "") {
@@ -4342,11 +4780,105 @@ function buildLayerCurrentFocus(layer, session, escalation = {}) {
 function dynamicTargetPrompt(layer, session, level = 1) {
   const base = cleanUiText(layer.prompt || `Describe ${layer.visualFocus || layer.label}.`);
   if (level <= 1) return base;
+  if (layer.category === "atmosphere") return atmospherePromptForLevel(layer, session, level);
+  if (isGreeneryLayer(layer)) return greeneryPromptForLevel(layer, session, level);
   if (level === 2) return dynamicNoticePrompt(layer, session);
   if (level === 3) return dynamicContrastPrompt(layer, session);
   if (level === 4) return dynamicSentenceScaffold(layer, session);
   if (level >= 5) return directLayerHelp(layer, session);
   return base;
+}
+
+function greeneryPromptForLevel(layer, session, level = 1) {
+  const anchor = greeneryAnchor(layer) || "the building";
+  const items = greeneryItems(layer);
+  if (level <= 2) return `Look near the bottom and sides of ${anchor}. What plants can you see?`;
+  if (level === 3) return `Can you mention the ${joinOrList(items.length ? items : ["trees", "bushes", "shrubs"])}?`;
+  if (level === 4) return `There are ___ around ${anchor}.`;
+  return `Try writing: ${greeneryDirectSentence(layer, anchor)}`;
+}
+
+function atmospherePromptForLevel(layer, session, level = 1) {
+  const evidence = atmosphereEvidencePair(layer, session);
+  const evidenceText = normalizeClientText([...(layer.hints || []), ...(layer.evidence || []), evidence.join(" ")].join(" "));
+  const choices = uniqueWritingHints([
+    ...atmosphereWordsFromText(evidenceText),
+    ...atmosphereChoiceWords(session?.analysis || {}),
+  ]).filter(Boolean).slice(0, 3);
+  if (level <= 2) {
+    return evidence.length
+      ? `Look at the ${joinReadableList(evidence)}. What feeling do they create?`
+      : "Look at the light, weather, and surroundings. What feeling do they create?";
+  }
+  if (level === 3) {
+    return choices.length
+      ? `Can you mention if the scene feels ${joinOrList(choices)}?`
+      : "Can you mention if the scene feels calm, open, or bright?";
+  }
+  if (level === 4) return "The scene feels ___ because of ___.";
+  const subject = evidence.length ? joinReadableList(evidence) : "the light and surroundings";
+  const feeling = choices.includes("calm") ? "open and calm" : choices.slice(0, 2).join(" and ") || "calm";
+  return `Try writing: The ${subject} make the scene feel ${feeling}.`;
+}
+
+function isGreeneryLayer(layer = {}) {
+  return /\b(greenery|trees?|plants?|leaves|bushes?|shrubs?|palm|vines?)\b/i.test(
+    `${layer.visualFocus || ""} ${layer.label || ""} ${layer.prompt || ""} ${(layer.hints || []).join(" ")} ${(layer.evidence || []).join(" ")}`
+  );
+}
+
+function greeneryAnchor(layer = {}) {
+  const text = normalizeClientText(`${layer.visualFocus || ""} ${layer.label || ""} ${(layer.hints || []).join(" ")} ${(layer.evidence || []).join(" ")}`);
+  if (text.includes("building")) return "the building";
+  if (text.includes("road")) return "the road";
+  if (text.includes("wall")) return "the wall";
+  return "";
+}
+
+function greeneryItems(layer = {}) {
+  const text = normalizeClientText(`${layer.visualFocus || ""} ${(layer.hints || []).join(" ")} ${(layer.evidence || []).join(" ")}`);
+  const items = [];
+  if (/\btall trees?\b/.test(text)) items.push("tall trees");
+  else if (/\btrees?\b|\bpalm\b/.test(text)) items.push(text.includes("palm") ? "palm trees" : "trees");
+  if (/\bbushes?\b/.test(text)) items.push("bushes");
+  if (/\bshrubs?\b/.test(text)) items.push("shrubs");
+  if (!items.length && /\bvines?\b/.test(text)) items.push("vines");
+  return uniqueWritingHints(items).slice(0, 4);
+}
+
+function greeneryDirectSentence(layer = {}, anchor = "the building") {
+  const items = greeneryItems(layer);
+  const details = items.length ? joinReadableList(items) : "trees, bushes, and shrubs";
+  return `There are ${details} around ${anchor}.`;
+}
+
+function atmosphereEvidencePair(layer = {}, session = {}) {
+  const candidates = cleanLayerHints([
+    ...(layer.evidence || []),
+    ...(layer.hints || []),
+    layer.visualFocus,
+    ...(session?.analysis?.environment_details || []),
+  ], 8);
+  const useful = candidates.filter((item) => {
+    const text = normalizeClientText(item);
+    return /\b(bright sky|sky|greenery|trees?|plants?|leaves|light|sun|shade|weather)\b/.test(text);
+  });
+  return uniqueWritingHints(useful.map((item) => {
+    const text = normalizeClientText(item);
+    if (text.includes("bright sky")) return "bright sky";
+    if (text.includes("greenery")) return "greenery";
+    if (/\btrees?\b/.test(text)) return "trees";
+    if (/\blight|sun\b/.test(text)) return "light";
+    return item;
+  })).slice(0, 2);
+}
+
+function joinOrList(items = []) {
+  const clean = cleanUiList(items, 4);
+  if (!clean.length) return "";
+  if (clean.length === 1) return clean[0];
+  if (clean.length === 2) return `${clean[0]} or ${clean[1]}`;
+  return `${clean.slice(0, -1).join(", ")}, or ${clean.at(-1)}`;
 }
 
 function dynamicNoticePrompt(layer, session) {
@@ -5452,6 +5984,9 @@ function cleanLayerHints(values, limit = 5) {
 }
 
 function buildDynamicTargetHintGroups(target, analysis = {}, level = 1) {
+  if (["atmosphere", "condition", "interpretation"].includes(target.category)) {
+    return buildFeelingTargetHintGroups(target, analysis, level);
+  }
   const focus = cleanUiText(target.visualFocus || target.label);
   const pack = focusLanguagePack(target, analysis);
   const baseHints = cleanLayerHints([...(target.hints || []), ...(target.evidence || []), focus], level >= 3 ? 8 : 5);
@@ -5499,6 +6034,70 @@ function buildDynamicTargetHintGroups(target, analysis = {}, level = 1) {
     { label: "Sentence frames", items: frames },
     ];
   return groups.filter((group) => group.items.length);
+}
+
+function buildFeelingTargetHintGroups(target = {}, analysis = {}, level = 1) {
+  const category = target.category === "condition" ? "condition" : target.category === "interpretation" ? "interpretation" : "atmosphere";
+  const evidence = feelingEvidenceHints(target, analysis);
+  const choices = feelingChoiceHints(target, analysis, category);
+  const frames = uniqueWritingHints([
+    ...abstractSentenceFrames(category, analysis, level),
+    dynamicTargetSentenceFrame(target, analysis, level),
+    category === "atmosphere" ? "The scene feels ___ because of ___" : "",
+  ]).filter(Boolean).slice(0, 3);
+
+  return [
+    { label: category === "interpretation" ? "Ideas" : "Feeling words", items: choices.slice(0, level >= 3 ? 6 : 5) },
+    { label: "Visible clues", items: evidence.slice(0, 4) },
+    { label: "Sentence frame", items: frames },
+  ].filter((group) => group.items.length);
+}
+
+function feelingChoiceHints(target = {}, analysis = {}, category = "atmosphere") {
+  const targetText = normalizeClientText(`${target.visualFocus || ""} ${target.label || ""} ${(target.hints || []).join(" ")} ${(target.evidence || []).join(" ")}`);
+  if (category === "interpretation") {
+    return cleanLayerHints(["educational", "institutional", "daily life", "work", "relaxation"], 6);
+  }
+  if (category === "condition") {
+    return cleanLayerHints([...conditionHintWords(analysis), ...(target.hints || [])], 6).filter((item) => conditionRelatedHint(item));
+  }
+  const choices = [
+    primaryAtmosphereHint(analysis),
+    ...atmosphereWordsFromText(targetText),
+    ...atmosphereChoiceWords(analysis),
+    ...cleanLayerHints(target.hints || [], 6),
+    ...cleanLayerHints(target.evidence || [], 6),
+  ].filter((item) => atmosphereRelatedHint(item));
+  return uniqueWritingHints(choices).slice(0, 7);
+}
+
+function feelingEvidenceHints(target = {}, analysis = {}) {
+  const raw = uniqueWritingHints([
+    ...(target.evidence || []),
+    ...(target.hints || []),
+    target.visualFocus,
+    ...(analysis.environment_details || []),
+    analysis.environment,
+  ]);
+  return cleanLayerHints(raw, 8)
+    .filter((item) => {
+      const text = normalizeClientText(item);
+      return atmosphereRelatedHint(item)
+        || /\b(sky|light|sun|greenery|trees?|plants?|leaves|open|bright|shade|shaded|clean|quiet|crowded|people)\b/.test(text);
+    })
+    .filter((item) => !/^(buildings?|apartment buildings?|balconies|concrete walls?|rise|stand)$/i.test(item))
+    .slice(0, 5);
+}
+
+function atmosphereWordsFromText(text = "") {
+  const key = normalizeClientText(text);
+  const words = [];
+  if (/\b(bright|sky|sunlight|open)\b/.test(key)) words.push("bright", "open");
+  if (/\b(greenery|trees?|plants?|leaves|garden|shrubs?|bushes?)\b/.test(key)) words.push("calm", "fresh", "peaceful");
+  if (/\b(crowd|people|busy|traffic)\b/.test(key)) words.push("busy", "lively");
+  if (/\b(clean|tidy|well maintained|well-kept)\b/.test(key)) words.push("clean", "well maintained");
+  if (/\b(dirty|messy|dust|damaged|broken|neglected)\b/.test(key)) words.push("messy", "neglected");
+  return words;
 }
 
 function focusLanguagePack(target = {}, analysis = {}) {
@@ -5860,7 +6459,7 @@ function positioningRelatedHint(value) {
 }
 
 function atmosphereRelatedHint(value) {
-  return /\b(quiet|busy|calm|bright|dark|peaceful|crowded|clean|messy|dusty|cluttered|neglected|maintained|well-kept|sunny|focused|lively|warm|serene|dramatic|inviting)\b/i.test(value);
+  return /\b(quiet|busy|calm|bright|dark|peaceful|crowded|clean|messy|dusty|cluttered|neglected|maintained|well-kept|sunny|focused|lively|warm|serene|dramatic|inviting|open|fresh|relaxed)\b/i.test(value);
 }
 
 function conditionRelatedHint(value) {
@@ -6017,6 +6616,8 @@ function onInitialAttemptInput(event) {
   const starter = state.sessionFlow?.initialStarterText || "";
   if (state.sessionFlow) {
     state.sessionFlow.initialStarterTouched = true;
+    state.sessionFlow.explanation = input.value || "";
+    persistCurrentSessionFlow();
   }
   limitWritingInput(event);
   const value = input.value || "";
@@ -6487,14 +7088,22 @@ async function fetchSessions() {
   }
 }
 
-async function loadSession(sessionId) {
+async function loadSession(sessionId, options = {}) {
   try {
     const data = await api(`/api/sessions/${sessionId}`);
-    renderSession(data.session);
+    renderSession(data.session, {
+      updateUrl: options.updateUrl,
+      replaceUrl: options.replaceUrl,
+      restoreFlow: options.restoreFlow,
+    });
     renderSessionLibrary();
     renderDashboardContent();
   } catch (error) {
     showToast(error.message, true);
+    if (options.updateUrl === false && routeSessionId()) {
+      updateHomeUrl({ replace: true });
+      openNewSessionComposer({ updateUrl: false });
+    }
   }
 }
 
@@ -6540,12 +7149,17 @@ async function onFileChange() {
   await startImageAnalysis();
 }
 
-function openNewSessionComposer() {
+function openNewSessionComposer(options = {}) {
   state.learnView = "compose";
+  state.currentSession = null;
+  state.currentSessionId = null;
   closeLanguageModal();
   resetUploadPreview();
   els.analyzeForm.reset();
   els.analyzeButton.disabled = !state.user;
+  if (options.updateUrl !== false) {
+    updateHomeUrl({ replace: options.replaceUrl });
+  }
   renderLearnPlaceholder();
   window.scrollTo({ top: 0, behavior: "smooth" });
 }
@@ -6601,6 +7215,7 @@ async function onLogin(event) {
       fetchProgressDashboard(),
       fetchChallenge(),
     ]);
+    await restoreSessionFromRoute();
     startQuizPolling();
     showToast("Welcome back.");
   } catch (error) {
@@ -6630,6 +7245,7 @@ async function onVerifyOtp(event) {
       fetchProgressDashboard(),
       fetchChallenge(),
     ]);
+    await restoreSessionFromRoute();
     startQuizPolling();
     showToast("Your account is verified. You can start learning now.");
   } catch (error) {
@@ -6865,10 +7481,10 @@ async function submitExplanationFeedback(session) {
 async function requestImprovementFeedback(session, explanation, improvedText) {
   const button = document.getElementById("submitImproveButton");
   setButtonBusy(button, true, "Checking...");
-  showSessionThinkingState("Checking this layer...", [
+  showSessionThinkingState("Finding ways to improve your wording...", [
     "Comparing with the image reference",
-    "Finding the next missing details",
-    "Checking whether the layer is covered",
+    "Looking for useful phrase upgrades",
+    "Checking the next coverage layer",
   ]);
   try {
     const data = await api(`/api/sessions/${session.id}/feedback`, {
@@ -6891,6 +7507,7 @@ async function requestImprovementFeedback(session, explanation, improvedText) {
       serverStage === LEARNING_STAGES.COVERAGE_LAYERS && didCoverageImprove(previousFeedback, feedback)
         ? LEARNING_STAGES.LAYER_SUCCESS
         : serverStage || null;
+    feedback.learning_stage = nextStage || serverStage || feedback.learning_stage;
     const attempts = [
       ...(state.sessionFlow.attempts || []),
       {
@@ -6899,8 +7516,9 @@ async function requestImprovementFeedback(session, explanation, improvedText) {
         score: feedbackTotalScore(feedback),
       },
     ];
-    renderSessionStep("improve", {
+    renderSessionStep("feedback", {
       stage: nextStage,
+      feedback,
       attempts,
       polishMode: false,
     });
@@ -6933,6 +7551,7 @@ async function startPostImproveQuiz(session) {
   if (state.currentSession) {
     state.currentSession.learning_stage = LEARNING_STAGES.QUIZ;
   }
+  persistCurrentSessionFlow();
   const button = document.getElementById("continueToQuizButton");
   const attempts = state.sessionFlow.attempts || [];
   const firstAttempt = attempts[0] || {};
@@ -6969,6 +7588,7 @@ async function startPostImproveQuiz(session) {
     renderQuizRun(data.run);
   } catch (error) {
     state.sessionFlow.quizLaunchStarted = false;
+    persistCurrentSessionFlow();
     showToast(error.message, true);
     closeQuizModal();
   } finally {
