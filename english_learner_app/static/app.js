@@ -1022,7 +1022,6 @@ function getStarterIdeaHints(session) {
     addHint(item.label, 115, kind, item.insert || item.label, item, item.category || "");
   });
   const aiStarterHints = uniqueStarterIdeas(candidates)
-    .filter((item) => item.meaning && item.example)
     .slice(0, 3);
   if (aiStarterHints.length) {
     return aiStarterHints;
@@ -1184,7 +1183,11 @@ function nounChipsFromText(value) {
 
 function getWritingStarters(session) {
   const analysis = session?.analysis || {};
-  const aiStarters = Array.isArray(analysis.sentence_starters) ? analysis.sentence_starters : [];
+  const aiStarters = Array.isArray(analysis.sentenceStarters)
+    ? analysis.sentenceStarters
+    : Array.isArray(analysis.sentence_starters)
+      ? analysis.sentence_starters
+      : [];
   const defaults = [
     "The image shows ",
     "Here we see ",
@@ -1321,52 +1324,7 @@ function renderFeedbackStep(session, feedback) {
     return;
   }
 
-  const totalScore = feedbackTotalScore(feedback);
-  const latestAttempt = (state.sessionFlow.attempts || []).at(-1) || null;
-  const attemptCount = Math.max(1, (state.sessionFlow.attempts || []).length);
-  const latestText = latestAttempt?.text || state.sessionFlow.explanation || "";
-  const issue = buildFeedbackIssue(feedback, session);
-  const positive = buildFeedbackPositiveLine(feedback, totalScore, issue.focusAreas);
-
-  els.sessionDetailPanel.innerHTML = `
-    <div class="journey-shell focused-step-shell diagnosis-shell">
-      ${renderStepProgress("submit")}
-      <section class="feedback-screen-card fast-feedback-card diagnosis-card">
-        <div class="score-hero progressive-score-hero diagnosis-score-card coach-reveal" ${coachRevealStyle(0)}>
-          <span class="score-label">Attempt ${attemptCount}</span>
-          <div class="diagnosis-score-line">
-            <strong id="feedbackScoreValue" data-score="${totalScore}">0</strong>
-            <span>/100</span>
-          </div>
-        </div>
-
-        <section class="diagnosis-line-card diagnosis-good-card coach-reveal" ${coachRevealStyle(1)}>
-          <p><span aria-hidden="true">✓</span> Good: ${escapeHtml(positive)}</p>
-        </section>
-
-        <section class="diagnosis-line-card diagnosis-issue-card coach-reveal" ${coachRevealStyle(2)}>
-          <p><strong>Main issue:</strong> ${escapeHtml(issue.message)}</p>
-        </section>
-
-        <section class="simple-feedback-section diagnosis-focus-card coach-reveal" ${coachRevealStyle(3)}>
-          <h4>Next focus</h4>
-          <div class="focus-area-row">
-            ${issue.focusAreas.map((item) => `<span class="focus-area-chip diagnosis-chip">${escapeHtml(item)}</span>`).join("")}
-          </div>
-        </section>
-
-        <button id="feedbackPrimaryButton" class="primary-button journey-primary-button diagnosis-cta coach-reveal" ${coachRevealStyle(4)} type="button">
-          Continue Building Layers
-        </button>
-      </section>
-    </div>
-  `;
-
-  document.getElementById("feedbackPrimaryButton").addEventListener("click", () => {
-    renderSessionStep("improve", { stage: LEARNING_STAGES.COVERAGE_LAYERS });
-    window.scrollTo({ top: 0, behavior: "smooth" });
-  });
-  animateNumber("feedbackScoreValue", totalScore);
+  renderSessionStep("improve", { stage: LEARNING_STAGES.COVERAGE_LAYERS });
 }
 
 function renderInitialAttemptFeedbackStep(session, feedback, initialFeedback) {
@@ -4231,6 +4189,17 @@ function articulationLayerDefinitions(feedback, session, learnerText = "") {
 }
 
 function analysisArticulationTargets(analysis = {}) {
+  const coverageFocuses = Array.isArray(analysis.coverageFocuses)
+    ? analysis.coverageFocuses
+    : Array.isArray(analysis.coverage_focuses)
+      ? analysis.coverage_focuses
+      : [];
+  if (coverageFocuses.length) {
+    return coverageFocuses
+      .map((focus, index) => normalizeCoverageFocusTarget(focus, index))
+      .filter(Boolean)
+      .slice(0, 6);
+  }
   const rawTargets = Array.isArray(analysis.articulation_targets) ? analysis.articulation_targets : [];
   const normalized = rawTargets.map((target, index) => normalizeClientArticulationTarget(target, index)).filter(Boolean);
   const targets = normalized.length >= 3 ? normalized : buildFallbackArticulationTargets(analysis, normalized);
@@ -4241,6 +4210,30 @@ function analysisArticulationTargets(analysis = {}) {
     seen.add(key);
     return true;
   }).slice(0, 6);
+}
+
+function normalizeCoverageFocusTarget(focus, index = 0) {
+  if (!focus || typeof focus !== "object") return null;
+  const title = cleanUiText(focus.title || focus.label || focus.focus);
+  if (!title) return null;
+  const supportLevels = Array.isArray(focus.supportLevels)
+    ? focus.supportLevels
+    : Array.isArray(focus.support_levels)
+      ? focus.support_levels
+      : [];
+  const firstQuestion = cleanUiText(supportLevels.find((item) => Number(item?.level || 0) === 1)?.question || "");
+  return {
+    id: cleanTargetId(focus.id || `coverage_focus_${index + 1}_${title}`),
+    label: title,
+    prompt: firstQuestion || `What do you notice about ${title}?`,
+    expansionPrompt: `Keep your answer and add one clear detail about ${title}.`,
+    category: normalizeTargetCategory(title),
+    visualFocus: title,
+    hints: supportLevels.map((item) => cleanUiText(item?.question)).filter(Boolean),
+    evidence: [],
+    importance: Number(focus.importance || 0.7),
+    supportLevels,
+  };
 }
 
 function normalizeClientArticulationTarget(target, index = 0) {
@@ -4539,6 +4532,9 @@ function buildLayerCurrentFocus(layer, session, escalation = {}) {
 }
 
 function dynamicTargetPrompt(layer, session, level = 1) {
+  const supportLevels = Array.isArray(layer?.supportLevels) ? layer.supportLevels : [];
+  const supported = supportLevels.find((item) => Number(item?.level || 0) === Number(level));
+  if (supported?.question) return cleanUiText(supported.question);
   const base = cleanUiText(layer.prompt || `Describe ${layer.visualFocus || layer.label}.`);
   if (level <= 1) return base;
   if (layer.category === "atmosphere") return atmospherePromptForLevel(layer, session, level);
@@ -7045,9 +7041,9 @@ async function startImageAnalysis() {
   els.uploadProcessingLabel?.classList.remove("hidden");
   setButtonBusy(els.analyzeButton, true, "Preparing...");
   showSessionThinkingState("Preparing guided writing...", [
-    "Analyzing the image",
-    "Finding visible objects",
-    "Preparing beginner hints",
+    "Reading the image",
+    "Preparing starter hints",
+    "Choosing coverage focuses",
   ]);
   try {
     const uploadFile = await prepareImageForUpload(imageFile);
@@ -7063,8 +7059,6 @@ async function startImageAnalysis() {
     const session = data.session;
     state.currentSession = session;
     state.currentSessionId = session.id;
-    state.quizDashboard = data.quiz || state.quizDashboard;
-    state.challenge = data.challenge || state.challenge;
     state.progress = data.progress || state.progress;
     state.stats = data.stats || state.stats;
     state.sessions = [
@@ -7086,15 +7080,13 @@ async function startImageAnalysis() {
     );
 
     renderProgressHeader();
-    renderQuizButton();
     renderSession(session);
     renderSessionLibrary();
     renderDashboardContent();
     resetUploadPreview();
     els.analyzeForm.reset();
     els.analyzeButton.disabled = true;
-    await Promise.all([fetchReviewDashboard(), fetchProgressDashboard(), fetchChallenge()]);
-    startQuizPolling();
+    await fetchProgressDashboard();
     showToast("Image ready. Write one sentence to begin.");
   } catch (error) {
     showToast(error.message, true);
