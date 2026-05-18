@@ -1416,7 +1416,9 @@ function renderInitialAttemptFeedbackStep(session, feedback, initialFeedback) {
     window.scrollTo({ top: 0, behavior: "smooth" });
   });
   document.getElementById("feedbackPrimaryButton").addEventListener("click", () => {
-    state.sessionFlow.explanation = cleanUiText(document.getElementById("initialImprovementPreview")?.textContent) || draft || state.sessionFlow.explanation;
+    commitInitialImprovementDraft(
+      cleanUiText(document.getElementById("initialImprovementPreview")?.textContent) || draft
+    );
     renderSessionStep("improve", { stage: state.sessionFlow.initialImprovementContinuationStage || enhancementContinuationStage(feedback) });
     window.scrollTo({ top: 0, behavior: "smooth" });
   });
@@ -1441,6 +1443,24 @@ function resetInitialImprovementStateForSource(sourceText = "") {
   state.sessionFlow.initialAppliedImprovementIds = [];
   state.sessionFlow.initialSkippedImprovementIds = [];
   state.sessionFlow.initialLastAppliedImprovementId = "";
+}
+
+function commitInitialImprovementDraft(finalText = "") {
+  const text = cleanUiText(finalText || state.sessionFlow.initialImprovementDraft || state.sessionFlow.explanation);
+  if (!text) return "";
+  state.sessionFlow.initialImprovementDraft = text;
+  state.sessionFlow.explanation = text;
+  const attempts = Array.isArray(state.sessionFlow.attempts) ? state.sessionFlow.attempts : [];
+  if (attempts.length) {
+    const latestIndex = attempts.length - 1;
+    state.sessionFlow.attempts = attempts.map((attempt, index) => (
+      index === latestIndex
+        ? { ...attempt, text }
+        : attempt
+    ));
+  }
+  persistCurrentSessionFlow();
+  return text;
 }
 
 function enhancementContinuationStage(feedback = {}) {
@@ -2623,6 +2643,7 @@ function renderImproveStep(session) {
     }
     const baseText = cleanUiText(document.getElementById("evolvingParagraph")?.textContent || rewriteDraft);
     const improvedText = mergeParagraphDetail(baseText, detailText);
+    resetFocusSupportLevel(coverageLayers.currentLayer);
     showCoverageLayerSuccess(coverageLayers.currentLayer);
     await new Promise((resolve) => window.setTimeout(resolve, 420));
     requestImprovementFeedback(session, state.sessionFlow.explanation, improvedText);
@@ -2831,6 +2852,21 @@ function increaseFocusSupportLevel(layer, currentLevel = 1) {
   if (!key) return;
   state.sessionFlow.focusSupportLevels = state.sessionFlow.focusSupportLevels || {};
   state.sessionFlow.focusSupportLevels[key] = Math.min(5, Math.max(2, Number(currentLevel || 1) + 1));
+  persistCurrentSessionFlow();
+}
+
+function resetFocusSupportLevel(layer = null) {
+  if (!state.sessionFlow) return;
+  if (!layer) {
+    state.sessionFlow.focusSupportLevels = {};
+    persistCurrentSessionFlow();
+    return;
+  }
+  const key = focusSupportKey(layer);
+  if (!key || !state.sessionFlow.focusSupportLevels?.[key]) return;
+  const nextLevels = { ...state.sessionFlow.focusSupportLevels };
+  delete nextLevels[key];
+  state.sessionFlow.focusSupportLevels = nextLevels;
   persistCurrentSessionFlow();
 }
 
@@ -3146,6 +3182,7 @@ function moveToNextCoverageLayer() {
     ...(state.sessionFlow.skippedCoverageLayers || []),
     layer.key,
   ]);
+  resetFocusSupportLevel(layer);
   showToast("Good effort — moving to the next visual area.");
   renderSessionStep("improve", { stage: LEARNING_STAGES.COVERAGE_LAYERS });
   window.scrollTo({ top: 0, behavior: "smooth" });

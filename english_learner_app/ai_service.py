@@ -507,6 +507,10 @@ class AIAnalyzer:
             "Use coverageFocuses only to decide the next small area to ask the learner to add.\n"
             "If this is the first attempt, enhance only covered ideas and put missing areas in missingVisualAreas/nextStepInstructions.\n"
             "If this is a later attempt, enhance the evolving description and guide the next missing focus.\n\n"
+            "For later attempts:\n"
+            "- Evaluate coverage only from the Current learner explanation.\n"
+            "- Use the First learner explanation only as before/after context.\n"
+            "- Do not mark an area missing if the Current learner explanation already covers it.\n\n"
 
             "Invalid answers are:\n"
             "- random text\n"
@@ -617,12 +621,16 @@ class AIAnalyzer:
         fallback_coverage = (
             fallback.get("coverage") if isinstance(fallback.get("coverage"), dict) else {}
         )
-        has_fresh_coverage = bool(fallback_coverage.get("imageParts"))
+        ai_coverage_payload = (
+            payload.get("coverage") if isinstance(payload.get("coverage"), dict) else {}
+        )
+        has_ai_coverage = bool(ai_coverage_payload.get("imageParts"))
+        use_fallback_coverage = not has_ai_coverage and bool(fallback_coverage.get("imageParts"))
         validation_valid = validation_payload.get("valid")
         if (
             validation_valid is False
             or str(validation_valid).strip().casefold() == "false"
-        ) and not has_fresh_coverage:
+        ) and not has_ai_coverage:
             retry_feedback = self._retry_feedback(
                 score=self._normalize_retry_score(payload.get("score")),
                 main_issue=self._clean_text_value(
@@ -647,20 +655,20 @@ class AIAnalyzer:
             return retry_feedback
         coverage = (
             self._normalize_coverage(fallback_coverage)
-            if has_fresh_coverage
-            else self._normalize_coverage(payload.get("coverage"))
+            if use_fallback_coverage
+            else self._normalize_coverage(ai_coverage_payload)
         )
         score = (
             self._normalize_feedback_score(fallback.get("score"), fallback=fallback)
-            if has_fresh_coverage
+            if use_fallback_coverage
             else self._normalize_feedback_score(payload.get("score"), fallback=fallback)
         )
-        if has_fresh_coverage and isinstance(fallback.get("scores"), dict):
+        if use_fallback_coverage and isinstance(fallback.get("scores"), dict):
             scores = {
                 key: max(1, min(10, int(fallback["scores"].get(key, scores[key]))))
                 for key in ("vocabulary", "structure", "depth", "clarity")
             }
-        if has_fresh_coverage and isinstance(fallback.get("language_quality"), dict):
+        if use_fallback_coverage and isinstance(fallback.get("language_quality"), dict):
             language_quality = self._normalize_language_quality(fallback.get("language_quality"))
         score_cap = self._normalized_coverage_hard_cap(coverage)
         coverage["scoreCapApplied"] = score_cap
@@ -674,15 +682,19 @@ class AIAnalyzer:
         )
         fresh_missing_details = (
             self._clean_string_list(coverage.get("missingMajorParts"), limit=3)
-            if has_fresh_coverage
+            if has_ai_coverage or use_fallback_coverage
             else []
         )
-        missing_details_source = (
-            fresh_missing_details
-            or ["No major visual detail is missing; focus on making the wording stronger."]
-            if has_fresh_coverage
-            else payload.get("missingDetails") or payload.get("missing_details") or fallback["missing_details"]
-        )
+        if has_ai_coverage or use_fallback_coverage:
+            missing_details_source = fresh_missing_details or [
+                "No major visual detail is missing; focus on making the wording stronger."
+            ]
+        else:
+            missing_details_source = (
+                payload.get("missingDetails")
+                or payload.get("missing_details")
+                or fallback["missing_details"]
+            )
 
         normalized = {
             "score": score,
@@ -693,7 +705,7 @@ class AIAnalyzer:
             "is_ready": bool(readiness.get("ready")),
             "main_issue": (
                 self._clean_text_value(fallback.get("main_issue"))
-                if has_fresh_coverage
+                if use_fallback_coverage
                 else self._clean_text_value(payload.get("mainIssue") or payload.get("main_issue"))
             )
             or self._clean_text_value(fallback["main_issue"])
