@@ -131,9 +131,9 @@ class AIAnalyzer:
             raise
 
     def _build_prompt(self, *, difficulty_band: str, notes: str) -> str:
-        return self._build_scene_guidance_prompt(difficulty_band=difficulty_band, notes=notes)
+        return self._build_guided_coverage_analysis_prompt(difficulty_band=difficulty_band, notes=notes)
 
-    def _build_scene_guidance_prompt(self, *, difficulty_band: str, notes: str) -> str:
+    def _build_guided_coverage_analysis_prompt(self, *, difficulty_band: str, notes: str) -> str:
         learner_level = canonical_level(difficulty_band)
 
         notes_block = (
@@ -167,11 +167,9 @@ class AIAnalyzer:
             '      "title":"",\n'
             '      "importance":0.8,\n'
             '      "supportLevels":[\n'
-            '        {"level":1,"question":""},\n'
-            '        {"level":2,"question":""},\n'
-            '        {"level":3,"question":""},\n'
-            '        {"level":4,"question":""},\n'
-            '        {"level":5,"question":""}\n'
+            '        {"level":1,"prompt":"","hints":[""]},\n'
+            '        {"level":2,"prompt":"","hints":[""]},\n'
+            '        {"level":3,"prompt":"","hints":[""]}\n'
             "      ]\n"
             "    }\n"
             "  ]\n"
@@ -213,101 +211,92 @@ class AIAnalyzer:
 
             "COVERAGE FOCUS RULES:\n"
 
-            "- coverageFocuses must contain 3-5 important areas the learner may later describe.\n"
-            "- coverageFocuses are ONLY for guided gradual coverage.\n"
+            "- coverageFocuses must contain 3-5 important visual areas the learner may later describe.\n"
+            "- coverageFocuses are ONLY for gradual guided coverage.\n"
             "- Do NOT fully reveal or decompose the image.\n"
+            "- Keep focuses beginner-friendly, visually important, and conversational.\n\n"
 
-            "- Each coverage focus must contain exactly 5 supportLevels.\n"
+            "- Each coverage focus must contain exactly 3 supportLevels.\n"
+            "- Each supportLevels item must contain level, prompt, and hints fields only.\n"
+            "- supportLevels must become progressively easier from open observation to sentence frame.\n"
+            "- The learner should feel gradually more guided at each level.\n"
+            "- The final level should be easy enough for the learner to complete with hints.\n\n"
 
-            "- Level 1 asks an open-ended question.\n"
-            "- Level 2 guides where to look.\n"
-            "- Level 3 suggests observable details.\n"
-            "- Level 4 uses a blank sentence frame.\n"
-            "- Level 5 gives a short learner-friendly example sentence.\n\n"
+            "- supportLevels must sound human, supportive, and natural.\n"
+            "- Avoid robotic wording.\n"
+            "- Avoid academic wording.\n"
+            "- Avoid metadata-style descriptions.\n\n"
 
-            "ARTICULATION ENHANCEMENT PHILOSOPHY:\n"
+            "- Level 1 should guide independent observation.\n"
+            "- Level 1 should feel open-ended but still focused.\n"
+            "- Level 1 prompt should be an open observation question.\n"
+            "- Example styles:\n"
+            "  - What do you notice about the way the stopwatch is being held?\n"
+            "  - What do you notice about the greenery around the building?\n"
+            "  - What do you notice about the lighting in the scene?\n\n"
 
-            "- Prioritize articulation quality over sentence length.\n"
-            "- Prefer meaningful visual specificity.\n"
-            "- Prefer observable details.\n"
-            "- Prefer reusable descriptive language.\n"
-            "- Prefer natural human-like phrasing.\n"
-            "- Prefer concise but expressive descriptions.\n"
+            "- Level 2 should narrow the learner's attention toward a more specific detail.\n"
+            "- Level 2 prompt should give more focused guidance.\n"
+            "- Example styles:\n"
+            "  - Can you describe the grip or hand position?\n"
+            "  - Can you describe the plants attached to the wall?\n"
+            "  - Can you describe the bright daylight in the background?\n\n"
 
-            "- When improving learner language, consider whether the upgrade adds:\n"
-            "  - better articulation\n"
-            "  - grammatical correctness\n"
-            "  - stronger vocabulary\n"
-            "  - more natural phrasing\n"
-            "  - observable visual properties\n"
-            "  - clearer object specificity\n"
-            "  - reusable descriptive language\n"
-            "  - stronger verbs\n"
-            "  - meaningful elaboration\n"
-            "  - richer but still concise description\n"
-            "  - more fluent sentence structure\n"
+            "- Level 3 should provide one short sentence frame.\n"
+            "- The learner should only need to complete the sentence.\n"
+            "- Level 3 prompt must contain a blank using ___.\n"
+            "- Example styles:\n"
+            "  - The stopwatch is being held ___.\n"
+            "  - The building is covered with ___.\n"
+            "  - The scene is filled with ___.\n\n"
 
-            "- Strong upgrades often introduce:\n"
-            "  - visible object properties\n"
-            "  - color\n"
-            "  - shape\n"
-            "  - texture\n"
-            "  - visible components\n"
-            "  - framing language\n"
-            "  - stronger observable actions\n"
-            "  - practical descriptive phrases\n"
+            "- Hints should NOT appear automatically.\n"
+            "- Hints are shown ONLY when the learner taps 'Need Hint?'.\n"
+            "- Generate hints separately for each support level.\n"
+            "- Do NOT use one shared hint list for a focus.\n"
+            "- Each support level should have 1-3 optional hints.\n"
+            "- Hints must match only that level's prompt.\n"
+            "- Hints must become easier as support levels increase.\n"
+            "- Level 1 hints should support broad observation.\n"
+            "- Level 2 hints should support articulation of a specific visual detail.\n"
+            "- Level 3 hints must fit directly into the sentence-frame blank.\n"
+            "- Hints must be short articulation chunks.\n\n"
 
-            "- Good articulation patterns include:\n"
-            "  - close-up view\n"
-            "  - compact design\n"
-            "  - visible control buttons\n"
-            "  - rectangular display\n"
-            "  - wrist strap attached\n"
-            "  - handheld device\n"
-            "  - firmly holding\n"
-            "  - gripping\n"
-            "  - being held\n"
-            "  - modern digital interface\n\n"
+            "Good hint styles:\n"
+            "- firmly\n"
+            "- in one hand\n"
+            "- tightly\n"
+            "- climbing vines\n"
+            "- dense greenery\n"
+            "- bright daylight\n\n"
 
-            "QUALITY FILTER RULES:\n"
+            "Bad hint styles:\n"
+            "- What do you notice\n"
+            "- Look closely\n"
+            "- Can you mention\n"
+            "- Describe the image\n\n"
 
-            "- A good enhancement must feel genuinely more articulate or informative.\n"
-            "- The enhancement should help the learner express something more specific or observable.\n"
+            "- The support progression should gradually reduce:\n"
+            "  - visual search difficulty\n"
+            "  - idea generation difficulty\n"
+            "  - articulation difficulty\n"
+            "  - sentence construction difficulty\n\n"
 
-            "- Do NOT make cosmetic rewrites.\n"
-            "- Do NOT rewrite only to make the sentence longer.\n"
-            "- Do NOT add weak filler adjectives.\n"
+            "- Keep every level lightweight and beginner-friendly.\n"
+            "- Avoid long explanations.\n"
+            "- Avoid overwhelming the learner.\n\n"
 
-            "Avoid weak wording such as:\n"
-            "- clear view\n"
-            "- nice object\n"
-            "- beautiful image\n"
-            "- interesting object\n"
-            "- good device\n"
-
-            "- Grammar correction alone is NOT considered a meaningful enhancement.\n"
-            "- Adding only articles like 'a' or 'the' is NOT considered a strong articulation improvement.\n"
-
-            "- If the learner sentence is already sufficiently natural and specific, return no enhancement.\n"
-            "- If no meaningful articulation improvement is possible within the learner's current scope, return no enhancement.\n\n"
-
-            "SCOPE RESTRICTIONS:\n"
-
-            "- Stay strictly inside what the learner already described.\n"
-            "- Do not introduce unrelated scene elements.\n"
-            "- Do not prematurely describe untouched parts of the image.\n"
-            "- Guided coverage will expand the scene later.\n\n"
-
-            "Weak example:\n"
-            "- The image shows a digital stopwatch.\n"
-            "→ The image shows a clear view of a digital stopwatch.\n\n"
-
-            "Better example:\n"
-            "- The image shows a digital stopwatch.\n"
-            "→ The image shows a compact digital stopwatch with visible buttons.\n\n"
+            "OUTPUT VALIDATION:\n"
+            "- Do not include supportLevels beyond levels 1, 2, and 3.\n"
+            "- Do not use the old support level shape with hint-only objects.\n"
+            "- Do not put hints directly on the coverage focus.\n"
+            "- Do not include technical labels or UI instructions in prompts.\n"
+            "- Do not use question fragments as hints.\n"
+            "- Prompts must be human, focused, and learner-friendly.\n\n"
 
             f"{notes_block}"
         )
+
     async def feedback_on_explanation(
         self,
         *,
@@ -381,8 +370,6 @@ class AIAnalyzer:
         attempt_index: int,
     ) -> str:
         scene_guidance = {
-            "starterHints": analysis.get("starterHints") or [],
-            "sentenceStarters": analysis.get("sentenceStarters") or [],
             "coverageFocuses": analysis.get("coverageFocuses") or [],
         }
 
@@ -391,7 +378,6 @@ class AIAnalyzer:
             if attempt_index <= 1
             else "guided coverage enhancement"
         )
-
         return (
             "You are the Articulation Enhancement Engine for an image-description app.\n"
             "The learner, not the AI, writes the image description.\n"
@@ -500,12 +486,11 @@ class AIAnalyzer:
             "- Guided coverage will handle missing scene parts later.\n\n"
 
             "If no meaningful articulation improvement is possible within the learner's current coverage scope:\n"
-            "- set hasImprovements to false\n"
             "- keep upgrades empty\n"
             "- avoid forced rewrites\n\n"
 
             "Use coverageFocuses only to decide the next small area to ask the learner to add.\n"
-            "If this is the first attempt, enhance only covered ideas and put missing areas in missingVisualAreas/nextStepInstructions.\n"
+            "If this is the first attempt, enhance only covered ideas and put missing areas in missingDetails/nextStepInstructions.\n"
             "If this is a later attempt, enhance the evolving description and guide the next missing focus.\n\n"
             "For later attempts:\n"
             "- Evaluate coverage only from the Current learner explanation.\n"
@@ -520,65 +505,50 @@ class AIAnalyzer:
             "- off-task answers\n\n"
 
             "Return valid JSON only with this exact structured shape:\n"
-            '{ "score": 0, "scores": {"vocabulary": 0, "structure": 0, "depth": 0, "clarity": 0}, '
-            '"languageQuality": {"score": 0, "clarity": 0, "vocabulary": 0, "structure": 0, "grammar": 0, "naturalness": 0, "reusableLanguage": 0}, '
-            '"answerValidation": {"valid": true, "reason": "", "retryMessage": ""}, '
-            '"coverage": {"level": "low", "mainSubjectMentioned": false, "mainActionMentioned": false, '
-            '"imageParts": [{"name": "", "description": "", "type": "main_subject", "required": true, '
-            '"weight": 0, "coverageStatus": "missing", "covered": false, "evidence": ""}], '
-            '"missingMajorParts": [], "coverageScore": 0, "coveragePercent": 0, '
-            '"accuracyPenalty": 0, "scoreCapApplied": 0, "reason": ""}, '
-            '"readiness": {"ready": false, "reason": "", "criteria": {"mainSubject": false, '
-            '"mainAction": false, "settingBackground": false, "twoImportantDetails": false, '
-            '"naturalEnglish": false, "notAWordList": false, "overallSense": false}}, '
-            '"mainIssue": "", "whatWentWell": ["", ""], "fixes": ["", "", ""], '
-            '"nextStepInstructions": ["", "", ""], '
-            '"reusableLanguage": {"usedWell": [""], "tryNext": [""], '
-            '"misused": [{"phrase": "", "note": ""}], "message": ""}, '
-            '"missingDetails": ["", "", ""], '
-            '"inlineImprovements": [], '
-            '"initialAttemptFeedback": {'
-            '"acknowledgement": "", '
-            '"coveredEnhancement": "", '
-            '"enhancement": {'
-            '"hasImprovements": true, '
-            '"improvedPreview": "", '
-            '"upgrades": ['
-            '{"id": "u1", "targetText": "", "replacementText": "", '
-            '"reason": "", "example": "", "finalPreview": "", '
-            '"category": "natural_phrasing"}'
-            "]}, "
-            '"improvements": ['
-            '{"id": "", "category": "natural_phrasing", "title": "", '
-            '"currentText": "", "suggestedText": "", '
-            '"whyItHelps": "", "example": "", '
-            '"finalPreview": "", "xpReward": 5}'
-            "], "
-            '"message": "", '
-            '"reusableLanguageFromEnhancement": {'
-            '"nouns": [""], '
-            '"verbs": [""], '
-            '"phrases": [""], '
-            '"collocations": [""], '
-            '"sentenceStructures": [""], '
-            '"positioningLanguage": [""], '
-            '"atmosphereLanguage": [""]'
-            "}, "
-            '"missingVisualAreas": [""]'
-            "}, "
-            '"improvedVersion": "" }\n\n'
+            "{\n"
+            '  "score": 0,\n'
+            '  "scores": {"vocabulary": 0, "structure": 0, "depth": 0, "clarity": 0},\n'
+            '  "languageQuality": {"score": 0, "clarity": 0, "vocabulary": 0, "structure": 0, "grammar": 0, "naturalness": 0, "reusableLanguage": 0},\n'
+            '  "answerValidation": {"valid": true, "reason": "", "retryMessage": ""},\n'
+            '  "coverage": {\n'
+            '    "mainSubjectMentioned": false,\n'
+            '    "mainActionMentioned": false,\n'
+            '    "imageParts": [{"name": "", "description": "", "type": "main_subject", "required": true, "weight": 0, "coverageStatus": "missing", "covered": false, "evidence": ""}],\n'
+            '    "missingMajorParts": [],\n'
+            '    "coverageScore": 0,\n'
+            '    "coveragePercent": 0,\n'
+            '    "accuracyPenalty": 0,\n'
+            '    "scoreCapApplied": 0\n'
+            "  },\n"
+            '  "readiness": {"ready": false, "reason": "", "criteria": {"mainSubject": false, "mainAction": false, "settingBackground": false, "twoImportantDetails": false, "naturalEnglish": false, "notAWordList": false, "overallSense": false}},\n'
+            '  "mainIssue": "",\n'
+            '  "whatWentWell": ["", ""],\n'
+            '  "fixes": ["", "", ""],\n'
+            '  "nextStepInstructions": ["", ""],\n'
+            '  "reusableLanguage": {"usedWell": [""], "tryNext": [""], "misused": [{"phrase": "", "note": ""}], "message": ""},\n'
+            '  "missingDetails": ["", "", ""],\n'
+            '  "inlineImprovements": [{"targetText": "", "replacementText": "", "why": "", "example": ""}],\n'
+            '  "initialAttemptFeedback": {\n'
+            '    "acknowledgement": "",\n'
+            '    "coveredEnhancement": "",\n'
+            '    "enhancement": {"upgrades": [{"id": "u1", "targetText": "", "replacementText": "", "reason": "", "example": "", "category": "natural_phrasing"}]},\n'
+            '    "message": "",\n'
+            '    "reusableLanguageFromEnhancement": {"nouns": [""], "verbs": [""], "phrases": [""], "collocations": [""], "sentenceStructures": [""], "positioningLanguage": [""], "atmosphereLanguage": [""]}\n'
+            "  },\n"
+            '  "improvedVersion": ""\n'
+            "}\n\n"
 
             "Rules:\n"
             "- improvedVersion must remain the learner's own description made clearer, more articulate, and more natural.\n"
             "- Create 1-4 atomic upgrades.\n"
-            "- targetText/currentText must exactly exist in the learner answer.\n"
-            "- replacementText/suggestedText must be short replacement phrases, not full paragraphs.\n"
-            "- finalPreview must show the full upgraded sentence after applying the improvement.\n"
+            "- targetText must exactly exist in the learner answer.\n"
+            "- replacementText must be a short replacement phrase, not a full paragraph.\n"
+            "- If there is no meaningful articulation upgrade, return enhancement.upgrades as an empty array.\n"
             "- Keep feedback concise and action-oriented.\n"
             "- Use beginner-friendly natural English.\n"
             "- Avoid literary, poetic, or academic rewrites.\n"
-            "- missingDetails and missingVisualAreas should come only from uncovered coverageFocuses.\n"
-            "- nextStepInstructions should contain only the next one or two useful guidance questions.\n"
+            "- missingDetails should come only from uncovered coverageFocuses.\n"
+            "- nextStepInstructions should contain only the next one or two useful guidance steps.\n"
             "- Mark readiness.ready true only when most important coverageFocuses are covered and the description is understandable.\n\n"
 
             f"Scene guidance JSON:\n"
@@ -4364,7 +4334,7 @@ class AIAnalyzer:
         return focuses
 
     def _normalize_support_levels(self, raw_items: Any, title: str) -> list[dict[str, Any]]:
-        by_level: dict[int, str] = {}
+        by_level: dict[int, dict[str, Any]] = {}
         for item in raw_items if isinstance(raw_items, list) else []:
             if not isinstance(item, dict):
                 continue
@@ -4372,20 +4342,110 @@ class AIAnalyzer:
                 level = int(item.get("level") or 0)
             except (TypeError, ValueError):
                 level = 0
-            question = self._clean_text_value(item.get("question") or item.get("prompt"))
-            if 1 <= level <= 5 and question:
-                by_level[level] = question[:140]
-        fallback = [
-            f"What do you notice about {title}?",
-            f"Look at {title}. What can you add?",
-            f"Can you mention {title}?",
-            f"There is/are ___ related to {title}.",
-            f"Try writing: I can also see {title}.",
-        ]
+            if not 1 <= level <= 3:
+                continue
+            prompt = self._support_prompt_text(item.get("prompt") or item.get("question") or item.get("text"), title, level)
+            legacy_hint = item.get("hint") if item.get("prompt") is None and item.get("question") is None else None
+            hints = self._normalize_support_level_hints(item.get("hints") or item.get("hint_options") or [], title, level, legacy_hint)
+            by_level[level] = {"prompt": prompt, "hints": hints}
         return [
-            {"level": level, "question": by_level.get(level) or fallback[level - 1]}
-            for level in range(1, 6)
+            {
+                "level": level,
+                "prompt": by_level.get(level, {}).get("prompt") or self._fallback_support_prompt(title, level),
+                "hints": by_level.get(level, {}).get("hints") or self._fallback_support_hints(title, level),
+            }
+            for level in range(1, 4)
         ]
+
+    def _support_prompt_text(self, value: Any, title: str, level: int) -> str:
+        text = self._clean_text_value(value)
+        if not text:
+            return self._fallback_support_prompt(title, level)
+        text = text.strip()
+        if level == 3 and "___" not in text:
+            return self._fallback_support_prompt(title, level)
+        if level < 3 and not re.search(r"\?$", text):
+            return self._fallback_support_prompt(title, level)
+        return text[:180]
+
+    def _fallback_support_prompt(self, title: str, level: int) -> str:
+        readable_focus = self._support_focus_phrase(title)
+        if level == 1:
+            return f"What do you notice about {readable_focus}?"
+        if level == 2:
+            return f"Can you describe one specific detail about {readable_focus}?"
+        if re.match(r"^(how|the way)\b", readable_focus, flags=re.I):
+            return "It is ___."
+        if re.search(r"\b(and|or)\b", readable_focus, flags=re.I):
+            return "I can see ___."
+        return f"{readable_focus[:1].upper()}{readable_focus[1:]} is ___."
+
+    def _support_focus_phrase(self, title: str) -> str:
+        focus = self._clean_text_value(title).strip(" .") or "this part of the image"
+        readable_focus = focus[0].lower() + focus[1:] if focus else "this part of the image"
+        if not re.match(r"^(the|a|an|this|that|these|those|how|the way)\b", readable_focus, flags=re.I):
+            readable_focus = f"the {readable_focus}"
+        return readable_focus
+
+    def _normalize_support_level_hints(
+        self,
+        values: Any,
+        title: str,
+        level: int,
+        legacy_hint: Any = None,
+    ) -> list[str]:
+        candidates = values if isinstance(values, list) else []
+        if legacy_hint is not None:
+            candidates = [legacy_hint, *candidates]
+        cleaned: list[str] = []
+        seen: set[str] = set()
+        for value in candidates:
+            hint = self._support_hint_text(value, title)
+            if not hint:
+                continue
+            if len(hint.split()) > 5:
+                hint = " ".join(hint.split()[:5]).strip()
+            key = normalize_answer(hint)
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            cleaned.append(hint[:80])
+            if len(cleaned) >= 3:
+                break
+        return cleaned
+
+    def _fallback_support_hints(self, title: str, level: int) -> list[str]:
+        focus = self._support_hint_text(title, title) or "visible detail"
+        words = [word for word in re.split(r"\s+", focus) if len(word) > 2]
+        short_focus = " ".join(words[:3]) or focus
+        return [short_focus[:80]]
+
+    def _support_hint_text(self, value: Any, title: str) -> str:
+        text = self._clean_text_value(value)
+        clean_title = self._clean_text_value(title)
+        if not text:
+            return ""
+        text = text.replace("?", "").strip()
+        replacements = [
+            (r"^what do you notice about\s+", ""),
+            (r"^what can you add about\s+", ""),
+            (r"^what can you add to\s+", ""),
+            (r"^look closely at\s+", ""),
+            (r"^look at\s+", ""),
+            (r"^can you mention\s+", ""),
+            (r"^can you describe\s+", ""),
+            (r"^describe\s+", ""),
+            (r"^which\s+", ""),
+            (r"^where is\s+", "position of "),
+            (r"^where are\s+", "position of "),
+            (r"^who is\s+", ""),
+        ]
+        for pattern, replacement in replacements:
+            text = re.sub(pattern, replacement, text, flags=re.I).strip()
+        if not text or re.match(r"^(what|where|who|which|can you|look closely|look at|describe|add|mention|finish|use)\b", text, flags=re.I):
+            text = clean_title
+        text = re.sub(r"_{2,}", "", text).strip(" .!?")
+        return text[:140]
 
     def _fallback_scene_guidance(self) -> dict[str, Any]:
         return {
@@ -4801,7 +4861,7 @@ class AIAnalyzer:
             phrase = self._clean_text_value(action.get("phrase") or action.get("verb") or "")
             if phrase:
                 category = self._normalize_target_category(phrase)
-                add(f"What stands out about {phrase}?", category, phrase, [action.get("visible_evidence", ""), action.get("description", "")], [phrase, action.get("verb", "")], float(action.get("importance") or 0.6))
+                add(f"Add detail about {phrase}", category, phrase, [action.get("visible_evidence", ""), action.get("description", "")], [phrase, action.get("verb", "")], float(action.get("importance") or 0.6))
 
         for zone in sorted(visual_zones, key=lambda item: float(item.get("importance") or 0), reverse=True):
             if len(targets) >= 6:
@@ -4840,8 +4900,7 @@ class AIAnalyzer:
         phrase_hints = [self._clean_text_value(item.get("phrase") or "") for item in phrases[:4]]
         if phrase_hints and objects and len(targets) < 4:
             focus = self._clean_text_value(objects[0].get("name") or "")
-            plural = focus.endswith("s") and not focus.endswith("ss")
-            add(f"Where {'are' if plural else 'is'} the {focus}?", "positioning", focus, [objects[0].get("position", ""), *environment_details[:2]], phrase_hints)
+            add(f"Add the position of the {focus}", "positioning", focus, [objects[0].get("position", ""), *environment_details[:2]], phrase_hints)
         return targets
 
     def _normalize_visual_zones(self, raw_items: Any) -> list[dict[str, Any]]:
@@ -4912,9 +4971,9 @@ class AIAnalyzer:
         if re.search(r"\b(apartment|building|structure|construction|architecture)\b", focus_text, re.I):
             return f"Describe the {focus_text} in the background"
         if category == "lighting":
-            return f"What stands out about the lighting near {focus_text}?"
+            return f"Describe the lighting near {focus_text}"
         if category in {"composition", "positioning", "contrast"}:
-            return f"What stands out in the {zone_name or 'background'}?"
+            return f"Add the noticeable detail in the {zone_name or 'background'}"
         return f"Add detail about {focus_text}"
 
     def _normalize_target_category(self, value: Any) -> str:
