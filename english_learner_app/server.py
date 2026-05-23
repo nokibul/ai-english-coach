@@ -20,7 +20,6 @@ from .quiz_engine import (
     QuizSelectionProfile,
     arrange_session_quick_challenge,
     build_post_improve_quiz_rows,
-    build_session_assets,
     choose_quiz_candidates,
     evaluate_quiz_response,
 )
@@ -30,12 +29,9 @@ from .utils import (
     ALLOWED_IMAGE_MIME_TYPES,
     ensure_directory,
     from_iso,
-    highlight_phrases,
     normalize_answer,
     normalize_phone,
-    should_surface_term,
     slugify_filename,
-    term_surface_score,
     to_iso,
     utc_now,
 )
@@ -220,58 +216,6 @@ def _session_summary_json(row: dict[str, Any]) -> dict[str, Any]:
         return {}
 
 
-def build_highlight_terms(
-    *,
-    phrases: list[dict[str, Any]] | None = None,
-    vocabulary: list[dict[str, Any]] | None = None,
-    reusable_language: list[dict[str, Any]] | None = None,
-) -> list[str]:
-    terms: list[str] = []
-    seen: set[str] = set()
-
-    def push(value: str, *, kind: str = "") -> None:
-        text = str(value or "").strip()
-        key = normalize_answer(text)
-        if not text or not key or key in seen or not should_surface_term(text, kind=kind):
-            return
-        seen.add(key)
-        terms.append(text)
-
-    for item in phrases or []:
-        push(
-            str(item.get("phrase") or ""),
-            kind=str(item.get("collocation_type") or "phrase").strip(),
-        )
-    for item in vocabulary or []:
-        push(
-            str(item.get("word") or ""),
-            kind=str(item.get("part_of_speech") or "word").strip(),
-        )
-    for item in reusable_language or []:
-        push(
-            str(item.get("text") or ""),
-            kind=str(item.get("kind") or "phrase").strip(),
-        )
-    return sorted(
-        terms,
-        key=lambda term: (
-            -term_surface_score(
-                term,
-                kind=next(
-                    (
-                        str(item.get("kind") or "phrase").strip()
-                        for item in reusable_language or []
-                        if normalize_answer(str(item.get("text") or "")) == normalize_answer(term)
-                    ),
-                    "",
-                ),
-            ),
-            -len(term),
-            term.casefold(),
-        ),
-    )
-
-
 def serialize_session_detail(
     db: Database,
     row: dict[str, Any],
@@ -279,32 +223,10 @@ def serialize_session_detail(
     user_id: int,
 ) -> dict[str, Any]:
     summary = _session_summary_json(row)
-    vocabulary = db.list_session_vocabulary(user_id=user_id, session_id=int(row["id"]))
-    phrases = db.list_session_phrases(user_id=user_id, session_id=int(row["id"]))
     quiz_preview = db.list_session_quiz_items(user_id=user_id, session_id=int(row["id"]), limit=12)
-
-    simple_explanation = (
-        row.get("simple_explanation")
-        or summary.get("scene_summary_simple")
-        or row.get("natural_explanation")
-        or row.get("narrative_text")
-        or ""
-    )
-    natural_explanation = (
-        row.get("natural_explanation")
-        or row.get("narrative_text")
-        or summary.get("scene_summary_natural")
-        or summary.get("native_explanation")
-        or ""
-    )
-    highlighted_html = row.get("highlighted_html") or highlight_phrases(
-        natural_explanation,
-        build_highlight_terms(
-            phrases=phrases,
-            vocabulary=vocabulary,
-            reusable_language=summary.get("reusable_language", []),
-        ),
-    )
+    starter_hints = summary.get("starterHints") or summary.get("starter_hints") or []
+    sentence_starters = summary.get("sentenceStarters") or summary.get("sentence_starters") or []
+    coverage_focuses = summary.get("coverageFocuses") or summary.get("coverage_focuses") or []
 
     return {
         "id": row["id"],
@@ -318,26 +240,9 @@ def serialize_session_detail(
         "mastery_percent": float(row.get("mastery_percent") or 0.0),
         "image_url": f"/api/sessions/{row['id']}/image",
         "analysis": {
-            "simple_explanation": simple_explanation,
-            "natural_explanation": natural_explanation,
-            "highlighted_html": highlighted_html,
-            "image_type": summary.get("image_type", "other"),
-            "objects": summary.get("objects", []),
-            "actions": summary.get("actions", []),
-            "environment": summary.get("environment", ""),
-            "environment_details": summary.get("environment_details", []),
-            "visual_zones": summary.get("visual_zones", []),
-            "articulation_targets": summary.get("articulation_targets", []),
-            "teaching_notes": summary.get("teaching_notes") or summary.get("scene_notes", []),
-            "vocabulary": vocabulary or summary.get("vocabulary", []),
-            "phrases": phrases or summary.get("phrases", []),
-            "sentence_starters": summary.get("sentence_starters", []),
-            "sentence_patterns": summary.get("sentence_patterns", []),
-            "quiz_candidates": summary.get("quiz_candidates", []),
-            "reusable_language": summary.get("reusable_language", []),
-            "micro_quiz": summary.get("micro_quiz", []),
-            "difficulty_note": summary.get("difficulty_note", ""),
-            "difficulty_recommendation": summary.get("difficulty_recommendation", ""),
+            "starterHints": starter_hints,
+            "sentenceStarters": sentence_starters,
+            "coverageFocuses": coverage_focuses,
         },
         "quiz_preview": [
             {
@@ -1008,28 +913,6 @@ def quiz_difficulty_label(item: dict[str, Any]) -> str:
     return "hard"
 
 
-def quiz_base_xp(item: dict[str, Any]) -> int:
-    return {
-        "easy": 5,
-        "medium": 10,
-        "hard": 15,
-    }[quiz_difficulty_label(item)]
-
-
-def quiz_has_perfect_phrase_usage(
-    *, item: dict[str, Any], selected_answer: str, correct: bool
-) -> bool:
-    if not correct:
-        return False
-    metadata = item.get("metadata") or {}
-    phrase = str(metadata.get("related_reusable_phrase") or "").strip()
-    if not phrase:
-        return False
-    if str(item.get("quiz_type") or "") == "use_it_or_lose_it":
-        return True
-    return normalize_answer(phrase) in normalize_answer(selected_answer)
-
-
 def quiz_run_completion_bonuses(
     *,
     db: Database,
@@ -1265,7 +1148,6 @@ async def bootstrap(request: web.Request) -> web.Response:
     return web.json_response(
         {
             "app_name": request.app["config"].app_name,
-            "questions": ONBOARDING_QUESTIONS,
             "settings": {
                 "review_prompt_interval_seconds": request.app[
                     "config"
@@ -1290,7 +1172,12 @@ async def signup(request: web.Request) -> web.Response:
     email = str(payload.get("email") or "").strip().lower()
     phone = normalize_phone(str(payload.get("phone") or ""))
     password = str(payload.get("password") or "")
-    assessment_payload = payload.get("assessment") or {}
+    raw_assessment = payload.get("assessment")
+    assessment_payload = raw_assessment if isinstance(raw_assessment, dict) else {}
+    assessment_payload = {
+        question["id"]: assessment_payload.get(question["id"]) or 3
+        for question in ONBOARDING_QUESTIONS
+    }
 
     if len(full_name) < 2:
         raise web.HTTPBadRequest(reason="Please enter your full name.")
@@ -1555,6 +1442,7 @@ async def analyze_image(request: web.Request) -> web.Response:
     file_path.write_bytes(image_bytes)
 
     try:
+        print(user["difficulty_band"])
         analysis = await request.app["analyzer"].analyze_image(
             image_bytes=image_bytes,
             mime_type=mime_type,
@@ -1566,18 +1454,8 @@ async def analyze_image(request: web.Request) -> web.Response:
     except Exception as exc:
         print(f"[analyze-error] {type(exc).__name__}: {exc}")
         raise web.HTTPBadGateway(
-            reason="The image lesson could not be generated. Check your AI configuration."
+            reason="The image guidance could not be generated. Check your AI configuration."
         ) from exc
-
-    phrases_to_highlight = build_highlight_terms(
-        phrases=analysis.get("phrases", []),
-        vocabulary=analysis.get("vocabulary", []),
-        reusable_language=analysis.get("reusable_language", []),
-    )
-    highlighted_html = highlight_phrases(
-        analysis["scene_summary_natural"],
-        phrases_to_highlight,
-    )
 
     db: Database = request.app["db"]
     now = utc_now()
@@ -1591,34 +1469,16 @@ async def analyze_image(request: web.Request) -> web.Response:
         user_id=user["id"],
         image_name=image_name,
         image_path=stored_image_path,
-        title=analysis["title"],
+        title="Image articulation",
         difficulty_band=user["difficulty_band"],
-        simple_explanation=analysis["scene_summary_simple"],
-        natural_explanation=analysis["scene_summary_natural"],
-        highlighted_html=highlighted_html,
+        simple_explanation="",
+        natural_explanation="",
+        highlighted_html="",
         summary=analysis,
         raw_analysis=analysis.get("raw_analysis", analysis),
         source_mode=analysis.get("source_mode", "local"),
         created_at=created_at,
     )
-
-    assets = build_session_assets(
-        user_id=user["id"],
-        session_id=session_id,
-        analysis=analysis,
-        learner_level=user["difficulty_band"],
-        created_at=created_at,
-        first_review_minutes=config.first_review_minutes,
-    )
-    db.bulk_create_session_vocabulary_items(assets["vocabulary"])
-    db.bulk_create_session_phrase_items(assets["phrases"])
-    db.bulk_create_study_cards(assets["review_items"])
-    review_map = db.get_session_review_card_map(user_id=user["id"], session_id=session_id)
-    for item in assets["quiz_items"]:
-        source_text = str(item.get("metadata", {}).get("source_text") or item["correct_answer"])
-        item["review_card_id"] = review_map.get(normalize_answer(source_text))
-    db.bulk_create_quiz_items(assets["quiz_items"])
-    db.sync_session_mastery(session_id=session_id)
 
     progress, _ = apply_progress_event(
         db,
@@ -1628,14 +1488,11 @@ async def analyze_image(request: web.Request) -> web.Response:
         sessions_delta=1,
     )
     session = db.get_session(user_id=user["id"], session_id=session_id)
-    challenge = build_daily_challenge_summary(get_or_build_daily_challenge(db, user=user, now=now))
     return web.json_response(
         {
             "session": serialize_session_detail(db, session, user_id=user["id"]),
             "stats": db.get_stats(user_id=user["id"], now_iso=created_at),
             "progress": progress,
-            "quiz": build_quiz_dashboard(db, config, user=user, now=now),
-            "challenge": challenge,
         }
     )
 
@@ -1784,7 +1641,7 @@ async def session_post_improve_quiz(request: web.Request) -> web.Response:
         created_at=now_iso,
     )
     if not quiz_rows:
-        raise web.HTTPBadRequest(reason="There was not enough lesson feedback to build a quiz.")
+        raise web.HTTPBadRequest(reason="There was not enough articulation feedback to build a quiz.")
     for row in quiz_rows:
         metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
         metadata["score_improvement"] = score_improvement

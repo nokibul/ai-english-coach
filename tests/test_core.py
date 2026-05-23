@@ -555,7 +555,7 @@ const target = {
   evidence: ["bright sky", "greenery around the building"],
 };
 const groups = context.buildDynamicTargetHintGroups(target, analysis, 1);
-const hints = context.focusedMiniHints(groups);
+const hints = context.coverageLevelHints({ hintGroups: groups, layer: target, currentFocus: target.prompt, escalation: { level: 1 } });
 const text = hints.join(" | ").toLowerCase();
 assert(!/\\b(apartment buildings|balconies|concrete walls|rise|stand)\\b/.test(text), "object/architecture hints should not leak into atmosphere chips: " + text);
 assert(/\\b(calm|bright|open|peaceful|fresh|sky|greenery|scene feels)\\b/.test(text), "atmosphere chips should help answer the feeling question: " + text);
@@ -595,12 +595,10 @@ const greenery = {
   hints: ["tall trees", "bushes", "shrubs"],
   evidence: ["tall trees, bushes, and shrubs around the building"],
 };
-const prompts = [1, 2, 3, 4, 5].map((level) => context.dynamicTargetPrompt(greenery, {}, level));
+const prompts = [1, 2, 3].map((level) => context.dynamicTargetPrompt(greenery, {}, level));
 assert(prompts[0] === "What other greenery do you notice around the building?", "level 1 should keep the original question");
-assert(prompts[1].includes("bottom and sides"), "level 2 should point where to look");
-assert(prompts[2].includes("tall trees, bushes, or shrubs"), "level 3 should name answer options");
-assert(prompts[3] === "There are ___ around the building.", "level 4 should be a fill-in frame");
-assert(prompts[4] === "Try writing: There are tall trees, bushes, and shrubs around the building.", "level 5 should give a direct sentence");
+assert(prompts[1] === "Can you describe the plants near the bottom and sides of the building?", "level 2 should give focused guidance");
+assert(prompts[2] === "There are ___ around the building.", "level 3 should be a fill-in frame");
 """
         result = subprocess.run(
             ["node", "-e", script],
@@ -1044,18 +1042,16 @@ const feedback = {
 };
 const answer = "There is a road and buildings.";
 const layer = context.buildCoverageLayerState(feedback, session, answer).currentLayer;
-const attempts = Array.from({ length: 5 }, () => ({ text: answer, feedback, score: 40 }));
+const attempts = Array.from({ length: 3 }, () => ({ text: answer, feedback, score: 40 }));
 
-assert(context.dynamicTargetPrompt(layer, session, 1) === "Add more detail about the greenery.", "attempt 1 should use light guidance");
-assert(context.dynamicTargetPrompt(layer, session, 2).includes("Notice"), "attempt 2 should use guided noticing");
-assert(context.dynamicTargetPrompt(layer, session, 3).includes("Does this part feel"), "attempt 3 should use choices");
-assert(context.dynamicTargetPrompt(layer, session, 4).includes("___"), "attempt 4 should use a sentence scaffold");
-assert(context.dynamicTargetPrompt(layer, session, 5).startsWith("Try mentioning"), "attempt 5 should give direct short help");
+assert(context.dynamicTargetPrompt(layer, session, 1) === "What do you notice about the greenery?", "attempt 1 should use open observation guidance");
+assert(context.dynamicTargetPrompt(layer, session, 2).includes("Can you describe"), "attempt 2 should use focused guidance");
+assert(context.dynamicTargetPrompt(layer, session, 3).includes("___"), "attempt 3 should use a sentence scaffold");
 
 const issue = context.buildLayerFeedbackIssue(layer, feedback, session);
 const escalation = context.buildImproveEscalationContext(session, attempts, issue, layer);
-assert(escalation.level === 5, "five attempts should produce level 5 support");
-assert(escalation.canMoveForward === true, "level 5 should allow moving forward");
+assert(escalation.level === 3, "three attempts should produce level 3 support");
+assert(escalation.canMoveForward === true, "level 3 should allow moving forward");
 assert(!/wrong|failed/i.test(escalation.message), "support message should not use wrong/failed wording");
 
 const hintGroups = context.buildImproveHintGroups(session, feedback, issue, answer, escalation);
@@ -1071,7 +1067,7 @@ const supportHtml = context.renderImproveEditor({
 });
 assert(supportHtml.includes("Let's make this easier."), "support state should show a supportive tone banner");
 assert(supportHtml.includes("progressive-support-banner"), "support state should use the progressive support UI");
-assert(supportHtml.includes("Try mentioning"), "direct support should be visible in the updated helper");
+assert(supportHtml.includes("___"), "sentence-frame support should be visible in the updated helper");
 assert(!/wrong|failed/i.test(supportHtml), "support UI should not use punitive language");
 """
         result = subprocess.run(
