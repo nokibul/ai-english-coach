@@ -215,6 +215,12 @@ class AIAnalyzer:
             "- coverageFocuses are ONLY for gradual guided coverage.\n"
             "- Do NOT fully reveal or decompose the image.\n"
             "- Keep focuses beginner-friendly, visually important, and conversational.\n\n"
+            "- Never use generic wording like 'object', 'the object', 'main object', or 'thing' in coverage focus titles, prompts, sentence frames, or hints.\n"
+            "- If you know the visible subject, name it directly: 'stopwatch', 'digital stopwatch', 'building', 'child', 'bicycle'.\n"
+            "- If you are uncertain, phrase around the visible area instead of saying object: 'the item being held', 'the device', 'the main subject', 'the foreground detail'.\n"
+            "- Bad: The object is being held ___.\n"
+            "- Good: The digital stopwatch is being held ___.\n"
+            "- Good: The device is being held ___.\n\n"
 
             "- Each coverage focus must contain exactly 3 supportLevels.\n"
             "- Each supportLevels item must contain level, prompt, and hints fields only.\n"

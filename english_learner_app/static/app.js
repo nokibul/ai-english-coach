@@ -2623,7 +2623,7 @@ function renderImproveStep(session) {
 
   els.sessionDetailPanel.innerHTML = `
     <div class="journey-shell focused-step-shell ${showEditor || showCoverageComplete ? "coverage-layer-shell" : ""}">
-      ${showEditor || showCoverageComplete ? "" : renderStepProgress(stage)}
+      ${showEditor || showCoverageComplete || showUpgrade || showMoveOption ? "" : renderStepProgress(stage)}
       <section class="focused-writing-card improve-action-card ${showEditor ? "coverage-layer-card" : ""}">
         ${showEditor ? renderImproveEditor({ rewriteDraft, currentFocus, hintGroups, articulation: coverageLayers, escalation, session, latestText, latestFeedback }) : ""}
         ${showCoverageComplete ? renderCoverageCompleteStage(latestFeedback, session, coverageLayers) : ""}
@@ -2631,12 +2631,21 @@ function renderImproveStep(session) {
         ${showMoveOption && upgradeState.finalized ? renderFinalPolishedReveal(upgradeState, upgradeSuggestions, latestFeedback, session) : ""}
         ${showEditor ? `
           <button id="submitImproveButton" class="primary-button journey-primary-button" type="button">
-            ${(escalation.level || 1) > 1 ? "Try Again" : "Add This Detail"}
+            Submit
+            <span aria-hidden="true">➤</span>
           </button>
+          <p class="coverage-layer-tip"><span aria-hidden="true">☼</span><strong>Tip:</strong> Keep it simple. You can make it better in the next step.</p>
         ` : ""}
       </section>
     </div>
   `;
+
+  const coverageInput = document.getElementById("learnerImproveInput");
+  const coverageCount = document.getElementById("coverageInputCount");
+  coverageInput?.addEventListener("input", () => {
+    coverageInput.value = coverageInput.value.slice(0, 250);
+    if (coverageCount) coverageCount.textContent = `${coverageInput.value.length}/250`;
+  });
 
   document.getElementById("submitImproveButton")?.addEventListener("click", async () => {
     const detailText = document.getElementById("learnerImproveInput").value.trim();
@@ -2789,29 +2798,29 @@ function renderImproveEditor({ rewriteDraft, currentFocus, hintGroups, articulat
   const showHints = coverageLevelHintsVisible(currentLayer, supportLevel) && hints.length > 0;
   const helpButtonLabel = coverageHelpButtonLabel(supportLevel, showHints);
   const helpButtonDisabled = !currentLayer || (supportLevel >= MAX_FOCUS_SUPPORT_LEVEL && !showHints && !hints.length);
-  const nextLayer = nextCoverageLayer(articulation);
+  const focusHelp = coverageFocusHelpDisplay({
+    focus,
+    layer: currentLayer,
+    escalation,
+    currentFocus,
+    session,
+  });
   return `
-    ${renderTinyCoverageProgress(articulation)}
+    ${renderCoverageFocusTabs(articulation)}
     ${supportActive ? renderProgressiveSupportBanner(escalation, currentFocus) : ""}
 
-    <section class="evolving-paragraph-section coach-reveal" ${coachRevealStyle(supportActive ? 2 : 1)}>
-      <div class="coverage-section-head">
-        <h3>Your description</h3>
-        <span aria-hidden="true">🔊</span>
-      </div>
-      <div id="evolvingParagraph" class="evolving-paragraph-card" tabindex="0">
-        ${renderEvolvingParagraphMarkup(rewriteDraft, latestFeedback, session)}
-      </div>
-    </section>
+    <div id="evolvingParagraph" class="sr-only">${escapeHtml(rewriteDraft)}</div>
+
+    <img class="coverage-layer-image coach-reveal" ${coachRevealStyle(1)} src="${escapeHtml(session.image_url)}" alt="${escapeHtml(session.image_name || "Uploaded image")}">
 
     <section class="single-focus-card coach-reveal" ${coachRevealStyle(2)}>
       <div class="single-focus-icon" aria-hidden="true">${escapeHtml(focusVisualIcon(currentLayer, focus.title))}</div>
       <div class="single-focus-content">
         <span>Current focus</span>
-        <h4>${escapeHtml(cleanFocusTitle(focus.title))}</h4>
-        <p>${escapeHtml(coverageSupportPrompt(focus, escalation, currentFocus) || "Add one more clear detail.")}</p>
+        <h4>${escapeHtml(focusHelp.heading)}</h4>
+        <p>${escapeHtml(focusHelp.support)}</p>
+        ${focusHelp.frame ? `<div class="coverage-sentence-frame">${escapeHtml(focusHelp.frame)}</div>` : ""}
         ${showHints ? renderCoverageLevelHintChips(hints) : ""}
-        ${nextLayer ? `<small>Next: ${escapeHtml(shortFocusPreview(nextLayer))}</small>` : ""}
       </div>
       <div class="focus-support-actions">
         <button id="coverageHelpButton" class="focus-help-button" type="button" ${helpButtonDisabled ? "disabled" : ""} aria-label="${escapeHtml(helpButtonLabel)}">
@@ -2821,20 +2830,148 @@ function renderImproveEditor({ rewriteDraft, currentFocus, hintGroups, articulat
     </section>
 
     <section class="continuation-input-section coach-reveal" ${coachRevealStyle(4)}>
-      <h4>Continue your description</h4>
       <div class="continuation-input-wrap">
         <textarea
           id="learnerImproveInput"
           class="continuation-input"
-          rows="2"
-          maxlength="260"
-          placeholder="Add one more detail..."
+          rows="4"
+          maxlength="250"
+          placeholder="Write your sentence..."
         ></textarea>
-        <span class="continuation-mic" aria-hidden="true">🎙</span>
+        <span id="coverageInputCount" class="coverage-input-count">0/250</span>
       </div>
     </section>
 
   `;
+}
+
+function renderCoverageFocusTabs(articulation = {}) {
+  const layers = (articulation.layers || []).slice(0, 5);
+  if (!layers.length) return renderTinyCoverageProgress(articulation);
+  return `
+    <nav class="coverage-focus-tabs coach-reveal" ${coachRevealStyle(0)} aria-label="Coverage focus progress">
+      ${layers.map((layer, index) => {
+        const state = layer.completed ? "done" : layer.current ? "active" : "upcoming";
+        const label = coverageTabLabel(layer, index);
+        return `
+          <span class="coverage-focus-tab ${state}">
+            <i aria-hidden="true">${escapeHtml(coverageTabIcon(layer, state))}</i>
+            <strong>${escapeHtml(label)}</strong>
+          </span>
+        `;
+      }).join("")}
+    </nav>
+  `;
+}
+
+function coverageTabLabel(layer = {}, index = 0) {
+  const raw = cleanUiText(layer.visualFocus || layer.label || shortFocusPreview(layer) || "");
+  const explicit = cleanFocusTitle(raw);
+  const category = layer.category || "";
+  const text = normalizeClientText(`${category} ${raw} ${explicit}`);
+  if (/\b(hold|holding|held|hand|grip|finger)\b/.test(text)) return "Holding";
+  if (/\b(main|subject|object|stopwatch|device|item)\b/.test(text)) return "Main object";
+  if (/\b(structure|building|architecture|shape|display|screen|button|control)\b/.test(text)) return "Structure";
+  if (/\b(greenery|plant|tree|leaf|leaves|bush|shrub)\b/.test(text)) return "Greenery";
+  if (/\b(atmosphere|sky|mood|cloud|feeling)\b/.test(text)) return "Atmosphere";
+  if (/\b(light|lighting|sun|shadow|reflection)\b/.test(text)) return "Lighting";
+  if (/\b(texture|surface|material)\b/.test(text)) return "Texture";
+  if (explicit && !/\b(detail about|what|notice|add detail)\b/i.test(explicit)) return truncateWords(explicit, 2);
+  return `Focus ${index + 1}`;
+}
+
+function coverageTabIcon(layer = {}, state = "") {
+  if (state === "done") return "✓";
+  const text = normalizeClientText(`${layer.category || ""} ${layer.visualFocus || ""} ${layer.label || ""}`);
+  if (/\b(greenery|plant|tree|leaf)\b/.test(text)) return "◒";
+  if (/\b(atmosphere|sky|mood|cloud)\b/.test(text)) return "☁";
+  if (/\b(light|lighting|sun|shadow)\b/.test(text)) return "☼";
+  return focusVisualIcon(layer, layer.label || layer.visualFocus || "") || "✦";
+}
+
+function truncateWords(value = "", limit = 2) {
+  const words = cleanUiText(value).split(/\s+/).filter(Boolean);
+  return words.slice(0, Math.max(1, limit)).join(" ");
+}
+
+function coverageFocusHelpDisplay({ focus = {}, layer = {}, escalation = {}, currentFocus = "", session = {} } = {}) {
+  const level = clampFocusSupportLevel(escalation.level || 1);
+  const supportPrompt = supportPromptForLevel(layer, level);
+  const defaultQuestion = focusQuestionText(focus, layer);
+  const fallbackSupport = coverageSupportPrompt(focus, escalation, currentFocus) || "Add one more clear detail.";
+
+  if (level >= 3) {
+    const frame = sentenceFrameForFocus(layer, session, supportPrompt);
+    return {
+      heading: frame,
+      support: "Finish the sentence with one clear detail.",
+      frame: "",
+    };
+  }
+
+  if (level === 2) {
+    const prompt = supportPrompt && !isSentenceFrameText(supportPrompt) ? supportPrompt : "";
+    return {
+      heading: prompt || "Look for one visible clue",
+      support: "Add just one simple detail. Keep your sentence short.",
+      frame: "",
+    };
+  }
+
+  return {
+    heading: isSentenceFrameText(supportPrompt) ? defaultQuestion : supportPrompt || defaultQuestion,
+    support: fallbackSupport,
+    frame: "",
+  };
+}
+
+function supportPromptForLevel(layer = {}, level = 1) {
+  const supportLevels = Array.isArray(layer?.supportLevels) ? layer.supportLevels : [];
+  const supported = supportLevels.find((item) => Number(item?.level || 0) === Number(level));
+  return supportLevelPromptText(supported);
+}
+
+function isSentenceFrameText(value = "") {
+  const text = cleanUiText(value);
+  return /_{2,}|\.{3}|__/.test(text) || (!/\?$/.test(text) && /\b(is|are|looks|feels|being|has|shows)\b/i.test(text));
+}
+
+function sentenceFrameForFocus(layer = {}, session = {}, supportPrompt = "") {
+  const prompt = cleanUiText(supportPrompt);
+  const frame = prompt && isSentenceFrameText(prompt) ? prompt : dynamicTargetPrompt(layer, session, 3) || "It shows ___.";
+  return replaceGenericObjectReference(frame, layer, session);
+}
+
+function focusQuestionText(focus = {}, layer = {}) {
+  const prompt = cleanUiText(layer?.prompt || focus.microPrompt || "");
+  if (prompt && /\?$/.test(prompt) && !isSentenceFrameText(prompt)) return replaceGenericObjectReference(prompt, layer);
+  const title = cleanFocusTitle(focus.title || layer?.label || layer?.visualFocus || "");
+  const normalized = normalizeClientText(title);
+  if (/\b(greenery|plant|plants|tree|trees|leaf|leaves)\b/.test(normalized)) return "What do you notice about the greenery?";
+  if (/\b(light|lighting|sun|shadow)\b/.test(normalized)) return "What do you notice about the lighting?";
+  if (/\b(atmosphere|sky|mood|cloud)\b/.test(normalized)) return "What atmosphere do you notice?";
+  return title ? `What do you notice about ${stripLeadingArticle(title)}?` : "What do you notice?";
+}
+
+function replaceGenericObjectReference(text = "", layer = {}, session = {}) {
+  const replacement = concreteFocusName(layer, session);
+  if (!replacement) return text;
+  return cleanUiText(text)
+    .replace(/\bthe main object\b/gi, `the ${replacement}`)
+    .replace(/\bthe object\b/gi, `the ${replacement}`)
+    .replace(/\bmain object\b/gi, replacement)
+    .replace(/\bobject\b/gi, replacement);
+}
+
+function concreteFocusName(layer = {}, session = {}) {
+  const candidates = [
+    primaryObjectHint(session?.analysis || {}, 0),
+    primarySubjectHint(session?.analysis || {}),
+    layer.visualFocus,
+    layer.focusArea,
+    layer.label,
+  ].map(cleanUiText);
+  return candidates.find((item) => item && !/\b(object|thing|detail|area|focus|subject|holding|grip|position|structure|texture|lighting|atmosphere)\b/i.test(item)) || "";
 }
 
 function focusSupportKey(layer) {
@@ -3557,43 +3694,45 @@ function renderFinalPolishedReveal(upgradeState, suggestions = [], feedback = {}
   return `
     <section class="final-reveal-stage coach-reveal" ${coachRevealStyle(0)}>
       <div class="final-reveal-hero">
-        <div class="success-sparkles final-sparkles" aria-hidden="true">
-          <i></i><i></i><i></i><i></i><i></i><i></i>
+        <div class="final-reveal-badge" aria-hidden="true">
+          <span>✓</span>
         </div>
-        <div class="final-flame-badge" aria-hidden="true">🔥</div>
-        <h3>🔥 Your description evolved</h3>
-        <p>You turned a simple start into a clear, natural description.</p>
+        <span class="final-reveal-kicker">Session complete</span>
+        <h3>Your description evolved</h3>
+        <p>You turned a simple start into a clearer, more natural description.</p>
       </div>
 
       <div class="final-comparison-stack">
-        <section class="final-before-card">
-          <span class="final-section-pill">Before</span>
-          <div>
+        <section class="final-before-card final-compare-card">
+          <div class="final-card-heading">
+            <span class="final-section-pill">Before</span>
             <small>Your first attempt</small>
+          </div>
+          <div class="final-card-body">
             <p>${escapeHtml(firstAttempt)}</p>
           </div>
-          <span class="final-card-icon" aria-hidden="true">♙</span>
         </section>
 
         <div class="final-down-arrow" aria-hidden="true">↓</div>
 
-        <section class="final-after-card">
+        <section class="final-after-card final-compare-card">
           <div class="final-after-head">
-            <span class="final-section-pill after">After ✦</span>
-            <span class="final-card-icon" aria-hidden="true">🔊</span>
+            <div class="final-card-heading">
+              <span class="final-section-pill after">After</span>
+              <small>Your final description</small>
+            </div>
+            <span class="final-polished-mark" aria-hidden="true">✦</span>
           </div>
-          <small>Your final description</small>
-          <p>${highlightTextTerms(finalAnswer, learnedLanguage, "final-learned-highlight")}</p>
+          <div class="final-card-body final-card-body-after">
+            <p>${highlightTextTerms(finalAnswer, learnedLanguage, "final-learned-highlight")}</p>
+          </div>
           ${
             learnedLanguage.length
               ? `
                 <div class="final-language-box">
-                  <span aria-hidden="true">📖</span>
-                  <div>
-                    <strong>Reusable language you learned</strong>
-                    <div class="mini-suggestion-row">
-                      ${learnedLanguage.map((item) => `<span class="phrase-chip suggested">${escapeHtml(item)}</span>`).join("")}
-                    </div>
+                  <strong>Reusable language</strong>
+                  <div class="mini-suggestion-row">
+                    ${learnedLanguage.map((item) => `<span class="phrase-chip suggested">${escapeHtml(item)}</span>`).join("")}
                   </div>
                 </div>
               `
@@ -3604,24 +3743,24 @@ function renderFinalPolishedReveal(upgradeState, suggestions = [], feedback = {}
 
       <section class="final-reward-summary" aria-label="Reward summary">
         <div>
-          <span aria-hidden="true">✦</span>
+          <span aria-hidden="true">XP</span>
           <strong>+${reward.xp} XP</strong>
           <small>Earned</small>
         </div>
         <div>
-          <span aria-hidden="true">🎯</span>
+          <span aria-hidden="true">✓</span>
           <strong>${reward.focuses}</strong>
-          <small>Focuses Completed</small>
+          <small>Focuses completed</small>
         </div>
         <div>
-          <span aria-hidden="true">💬</span>
+          <span aria-hidden="true">Aa</span>
           <strong>${reward.phrases}</strong>
-          <small>Phrases Learned</small>
+          <small>Phrases learned</small>
         </div>
       </section>
 
       <button id="continueToQuizButton" class="primary-button journey-primary-button final-quiz-cta" type="button">
-        ✦ Continue to Quiz
+        Continue to Quiz <span aria-hidden="true">→</span>
       </button>
     </section>
   `;
@@ -3958,15 +4097,46 @@ function buildCoverageLayerState(feedback, session, learnerText = "") {
     layers[currentIndex].current = true;
   }
   const gate = coverageCompletionGate(feedback, session, learnerText);
+  const plannedTargetsComplete = plannedCoverageTargetsComplete(feedback, session, learnerText);
+  const serverCoverageComplete = feedback?.learning_flow?.coverage_complete === true
+    || String(feedback?.coverage_engine?.status || "").toLowerCase() === "complete";
+  const complete = Boolean(
+    gate.complete ||
+    plannedTargetsComplete ||
+    serverCoverageComplete
+  );
+  if (complete) {
+    layers.forEach((layer) => {
+      layer.current = false;
+    });
+  }
   return {
     layers,
-    currentIndex,
-    currentLayer: currentIndex >= 0 ? layers[currentIndex] : null,
-    complete: gate.complete && (currentIndex === -1 || layers.length === 0),
+    currentIndex: complete ? -1 : currentIndex,
+    currentLayer: complete ? null : currentIndex >= 0 ? layers[currentIndex] : null,
+    complete,
     coverage,
     gate,
     imageType: session?.analysis?.image_type || "dynamic",
   };
+}
+
+function plannedCoverageTargetsComplete(feedback = {}, session = {}, learnerText = "") {
+  const analysis = session?.analysis || {};
+  const hasPlannedFocuses = Array.isArray(analysis.coverageFocuses)
+    ? analysis.coverageFocuses.length > 0
+    : Array.isArray(analysis.coverage_focuses) && analysis.coverage_focuses.length > 0;
+  if (!hasPlannedFocuses) {
+    return false;
+  }
+  const normalizedText = normalizeClientText(learnerText);
+  if (!normalizedText) {
+    return false;
+  }
+  const targets = analysisArticulationTargets(analysis);
+  return targets.length > 0 && targets.every((target) => (
+    dynamicTargetCompleted(target, feedback, analysis, normalizedText)
+  ));
 }
 
 function coverageLayerDefinitions(feedback, session, learnerText = "") {
@@ -4733,6 +4903,10 @@ function dynamicTargetTerms(target = {}) {
     target.label,
     ...(target.hints || []),
     ...(target.evidence || []),
+    ...(target.supportLevels || []).flatMap((level) => [
+      level?.prompt,
+      ...(Array.isArray(level?.hints) ? level.hints : []),
+    ]),
   ]).flatMap((item) => compactTargetTerms(item));
 }
 
