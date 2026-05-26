@@ -134,6 +134,7 @@ class AIAnalyzer:
         return self._build_guided_coverage_analysis_prompt(difficulty_band=difficulty_band, notes=notes)
 
     def _build_guided_coverage_analysis_prompt(self, *, difficulty_band: str, notes: str) -> str:
+        print('_build_guided_coverage_analysis_prompt')
         learner_level = canonical_level(difficulty_band)
 
         notes_block = (
@@ -154,7 +155,7 @@ class AIAnalyzer:
             "No markdown.\n"
             "No text outside JSON.\n\n"
 
-            f"Learner level: {level_label(learner_level)}. \n\n"
+            # f"Learner level: {level_label(learner_level)}. \n\n"
             # f"{level_guidance(learner_level)}\n\n"
 
             "Return exactly this JSON structure:\n"
@@ -215,6 +216,12 @@ class AIAnalyzer:
             "- coverageFocuses are ONLY for gradual guided coverage.\n"
             "- Do NOT fully reveal or decompose the image.\n"
             "- Keep focuses beginner-friendly, visually important, and conversational.\n\n"
+            "- Every coverage focus must describe a different visual aspect of the image.\n"
+            "- Do not create two focuses that point to the same area, feature type, or learner task.\n"
+            "- Avoid near-duplicate focus titles such as 'Structure' and 'Building structure', 'Screen' and 'Visible buttons', or 'Atmosphere' and 'Lighting mood'.\n"
+            "- Treat screen, display, buttons, controls, shape, architecture, and structure as one structure-related aspect; choose only the strongest one.\n"
+            "- Prefer a varied set of aspects, such as subject/action, setting, position, appearance/detail, people, lighting, or atmosphere.\n"
+            "- Before returning JSON, compare all coverageFocuses and merge or replace any pair that would lead the learner to describe the same aspect twice.\n\n"
             "- Never use generic wording like 'object', 'the object', 'main object', or 'thing' in coverage focus titles, prompts, sentence frames, or hints.\n"
             "- If you know the visible subject, name it directly: 'stopwatch', 'digital stopwatch', 'building', 'child', 'bicycle'.\n"
             "- If you are uncertain, phrase around the visible area instead of saying object: 'the item being held', 'the device', 'the main subject', 'the foreground detail'.\n"
@@ -376,6 +383,8 @@ class AIAnalyzer:
         attempt_index: int,
     ) -> str:
         scene_guidance = {
+            "starterHints": analysis.get("starterHints") or [],
+            "sentenceStarters": analysis.get("sentenceStarters") or [],
             "coverageFocuses": analysis.get("coverageFocuses") or [],
         }
 
@@ -384,15 +393,16 @@ class AIAnalyzer:
             if attempt_index <= 1
             else "guided coverage enhancement"
         )
+
         return (
             "You are the Articulation Enhancement Engine for an image-description app.\n"
             "The learner, not the AI, writes the image description.\n"
-            "Your only job is to improve the learner's own sentences and guide the next missing coverage focus.\n\n"
+            "Your job is to improve the learner's own sentences and guide the next missing coverage focus.\n\n"
 
             f"Learner level: {level_label(canonical_level(learner_level))}.\n"
             f"Mode: {mode}.\n\n"
 
-            "Core behavior:\n"
+            "CORE BEHAVIOR:\n"
             "- Do not generate a full paragraph from scratch.\n"
             "- Do not replace the learner's idea with your own.\n"
             "- Do not introduce major new visual details the learner did not mention.\n"
@@ -400,7 +410,14 @@ class AIAnalyzer:
             "- Keep improvements incremental, natural, and beginner-friendly.\n"
             "- Guided coverage should introduce missing image areas gradually later.\n\n"
 
-            "Your enhancement goals:\n"
+            "CORE ENHANCEMENT PHILOSOPHY:\n"
+            "- Assume beginner learners almost always have room for articulation improvement.\n"
+            "- Unless the learner sentence is already highly natural, visually specific, fluent, reusable, and articulate, generate at least one meaningful upgrade.\n"
+            "- Prefer noticeable articulation improvement over conservative minimal edits.\n"
+            "- The learner should clearly feel that their sentence became richer and more expressive.\n"
+            "- Improvements should feel rewarding and visible to a human learner.\n\n"
+
+            "YOUR ENHANCEMENT GOALS:\n"
             "- improve articulation\n"
             "- improve grammar\n"
             "- improve sentence fluency\n"
@@ -410,100 +427,152 @@ class AIAnalyzer:
             "- improve reusable language\n"
             "- improve object clarity\n"
             "- improve observable detail expression\n"
-            "- improve concise elaboration\n\n"
+            "- improve concise elaboration\n"
+            "- improve positioning language\n"
+            "- improve stronger visual phrasing\n"
+            "- improve beginner-friendly natural expression\n\n"
 
-            "Enhancement evaluation process:\n"
-            "- Before generating upgrades, internally evaluate whether the learner sentence can become genuinely more articulate.\n"
-            "- A meaningful enhancement should feel noticeably richer, clearer, or more expressive to a human learner.\n"
+            "ENHANCEMENT EVALUATION PROCESS:\n"
+            "- Before generating upgrades, internally evaluate whether the learner sentence can become more natural, specific, visually descriptive, or reusable.\n"
             "- Prefer observable visual specificity over cosmetic rewrites.\n"
-            "- Prefer upgrades that improve articulation quality, not just sentence length.\n\n"
+            "- Prefer stronger articulation over longer sentences.\n"
+            "- Prefer reusable descriptive phrasing whenever possible.\n"
+            "- Prefer upgrades that sound more human and expressive.\n"
+            "- Prefer upgrades that introduce stronger observable image details already implied by the learner sentence.\n"
+            "- Grammar correction alone is usually NOT enough.\n"
+            "- Small article fixes or tiny wording swaps are usually NOT meaningful upgrades.\n\n"
 
-            "When evaluating possible upgrades, consider whether you can improve:\n"
-            "- articulation\n"
-            "- grammatical correctness\n"
-            "- natural phrasing\n"
-            "- stronger vocabulary\n"
-            "- observable visual properties\n"
-            "- object specificity\n"
-            "- reusable descriptive language\n"
-            "- stronger verbs\n"
-            "- concise elaboration\n"
+            "WHEN EVALUATING POSSIBLE UPGRADES, CONSIDER IMPROVING:\n"
+            "- visual specificity\n"
+            "- descriptive richness\n"
+            "- object detail\n"
+            "- reusable language chunks\n"
+            "- natural spoken English\n"
+            "- articulation quality\n"
             "- sentence fluency\n"
-            "- visual clarity\n\n"
+            "- positioning language\n"
+            "- observable object properties\n"
+            "- concise elaboration\n"
+            "- stronger verbs\n"
+            "- stronger adjectives\n"
+            "- stronger visual phrasing\n\n"
 
-            "Strong articulation upgrades often introduce:\n"
-            "- color\n"
-            "- shape\n"
+            "STRONG ARTICULATION UPGRADES OFTEN INTRODUCE:\n"
+            "- observable visual details\n"
+            "- visible object properties\n"
+            "- positioning language\n"
+            "- reusable descriptive phrases\n"
+            "- stronger observable verbs\n"
             "- texture\n"
-            "- visible object components\n"
-            "- positioning\n"
+            "- shape\n"
+            "- color\n"
+            "- structure\n"
             "- framing language\n"
-            "- stronger observable actions\n"
-            "- practical reusable descriptive phrases\n\n"
+            "- practical natural English phrasing\n\n"
 
-            "Prefer observable details such as:\n"
-            "- red digital stopwatch\n"
-            "- compact handheld device\n"
-            "- visible control buttons\n"
-            "- rectangular display screen\n"
-            "- wrist strap attached\n"
+            "PREFER REUSABLE ARTICULATION PATTERNS SUCH AS:\n"
+            "- covered with\n"
+            "- surrounded by\n"
+            "- attached to\n"
+            "- standing near\n"
             "- firmly holding\n"
-            "- gripping\n"
+            "- brightly lit\n"
+            "- visible in the background\n"
+            "- gathered together\n"
             "- close-up view\n\n"
 
-            "Avoid weak filler rewrites such as:\n"
+            "PREFER OBSERVABLE UPGRADES SUCH AS:\n"
+            "- climbing vines\n"
+            "- dense greenery\n"
+            "- tall concrete columns\n"
+            "- compact digital stopwatch\n"
+            "- visible control buttons\n"
+            "- rectangular display screen\n"
+            "- attached wrist strap\n"
+            "- bright daylight\n"
+            "- group of people standing together\n\n"
+
+            "AVOID WEAK FILLER REWRITES SUCH AS:\n"
             "- clear view\n"
             "- nice object\n"
             "- beautiful image\n"
             "- interesting object\n"
             "- good device\n\n"
 
-            "A rewrite is NOT meaningful if it only:\n"
+            "A MEANINGFUL UPGRADE SHOULD FEEL:\n"
+            "- more visual\n"
+            "- more expressive\n"
+            "- more natural\n"
+            "- more descriptive\n"
+            "- more reusable\n"
+            "- more articulate\n\n"
+
+            "A REWRITE IS WEAK IF IT ONLY:\n"
             "- adds articles like 'a' or 'the'\n"
             "- slightly rearranges wording\n"
             "- adds weak adjectives\n"
             "- increases sentence length without adding observable value\n"
-            "- performs grammar correction only\n\n"
+            "- performs grammar correction only\n"
+            "- replaces words with near-identical wording\n\n"
 
-            "Good enhancement behavior:\n"
+            "GOOD ENHANCEMENT BEHAVIOR:\n"
+            "- The image shows vines.\n"
+            "→ The image shows dense climbing vines attached to the building.\n\n"
+
+            "- The image shows a building.\n"
+            "→ The image shows a tall modern building.\n\n"
+
+            "- The image shows a building with vines.\n"
+            "→ The image shows a modern building covered with climbing vines.\n\n"
+
             "- The image shows stopwatch.\n"
-            "→ The image shows a digital stopwatch.\n\n"
+            "→ The image shows a compact digital stopwatch.\n\n"
 
             "- The image shows a digital stopwatch.\n"
             "→ The image shows a compact digital stopwatch with visible buttons.\n\n"
 
             "- hand holding a stopwatch\n"
-            "→ hand firmly holding a digital stopwatch\n\n"
+            "→ a hand firmly holding a digital stopwatch\n\n"
 
             "- holding a stopwatch\n"
-            "→ gripping a stopwatch\n\n"
+            "→ firmly holding a stopwatch\n\n"
 
-            "Bad enhancement behavior:\n"
+            "- The scene create a calm feeling.\n"
+            "→ The scene creates a calm and peaceful atmosphere.\n\n"
+
+            "BAD ENHANCEMENT BEHAVIOR:\n"
             "- The image shows a digital stopwatch.\n"
             "→ The image shows a clear view of a digital stopwatch.\n\n"
 
             "- The image shows stopwatch.\n"
             "→ The image shows a stopwatch.\n\n"
 
-            "Enhancement scope restriction:\n"
+            "- The image shows a building.\n"
+            "→ The image shows a nice building.\n\n"
+
+            "ENHANCEMENT SCOPE RESTRICTION:\n"
             "- Stay strictly inside what the learner already described.\n"
             "- Do not introduce unrelated scene details.\n"
             "- Do not prematurely expand into untouched image areas.\n"
             "- Guided coverage will handle missing scene parts later.\n\n"
 
-            "If no meaningful articulation improvement is possible within the learner's current coverage scope:\n"
-            "- keep upgrades empty\n"
-            "- avoid forced rewrites\n\n"
+            "EMPTY UPGRADE RULE:\n"
+            "- Return empty upgrades ONLY if the learner sentence is already highly natural, specific, fluent, visually descriptive, and articulate.\n"
+            "- Beginner learner descriptions will usually benefit from at least one articulation improvement.\n"
+            "- Do not return empty upgrades just because the sentence is understandable.\n"
+            "- Understandable is not the same as articulate.\n\n"
 
-            "Use coverageFocuses only to decide the next small area to ask the learner to add.\n"
-            "If this is the first attempt, enhance only covered ideas and put missing areas in missingDetails/nextStepInstructions.\n"
-            "If this is a later attempt, enhance the evolving description and guide the next missing focus.\n\n"
-            "For later attempts:\n"
+            "GUIDED COVERAGE RULE:\n"
+            "- Use coverageFocuses only to decide the next small area to ask the learner to add.\n"
+            "- If this is the first attempt, enhance only covered ideas and put missing areas in missingDetails/nextStepInstructions.\n"
+            "- If this is a later attempt, enhance the evolving description and guide the next missing focus.\n\n"
+
+            "FOR LATER ATTEMPTS:\n"
             "- Evaluate coverage only from the Current learner explanation.\n"
             "- Use the First learner explanation only as before/after context.\n"
             "- Do not mark an area missing if the Current learner explanation already covers it.\n\n"
 
-            "Invalid answers are:\n"
+            "INVALID ANSWERS ARE:\n"
             "- random text\n"
             "- keyword stuffing\n"
             "- disconnected fragments\n"
@@ -544,18 +613,19 @@ class AIAnalyzer:
             '  "improvedVersion": ""\n'
             "}\n\n"
 
-            "Rules:\n"
+            "OUTPUT RULES:\n"
             "- improvedVersion must remain the learner's own description made clearer, more articulate, and more natural.\n"
             "- Create 1-4 atomic upgrades.\n"
             "- targetText must exactly exist in the learner answer.\n"
             "- replacementText must be a short replacement phrase, not a full paragraph.\n"
-            "- If there is no meaningful articulation upgrade, return enhancement.upgrades as an empty array.\n"
             "- Keep feedback concise and action-oriented.\n"
             "- Use beginner-friendly natural English.\n"
             "- Avoid literary, poetic, or academic rewrites.\n"
             "- missingDetails should come only from uncovered coverageFocuses.\n"
             "- nextStepInstructions should contain only the next one or two useful guidance steps.\n"
-            "- Mark readiness.ready true only when most important coverageFocuses are covered and the description is understandable.\n\n"
+            "- Mark readiness.ready true only when most important coverageFocuses are covered and the description is understandable.\n"
+            "- initialAttemptFeedback.enhancement.upgrades should usually contain at least one upgrade unless the learner answer is already very articulate.\n"
+            "- inlineImprovements should mirror the same upgrade opportunities when possible.\n\n"
 
             f"Scene guidance JSON:\n"
             f"{json.dumps(scene_guidance, ensure_ascii=True)}\n\n"
@@ -4317,6 +4387,7 @@ class AIAnalyzer:
     def _normalize_coverage_focuses(self, raw_items: Any) -> list[dict[str, Any]]:
         focuses: list[dict[str, Any]] = []
         seen: set[str] = set()
+        seen_aspects: set[str] = set()
         for index, item in enumerate(raw_items if isinstance(raw_items, list) else []):
             if not isinstance(item, dict):
                 continue
@@ -4324,7 +4395,12 @@ class AIAnalyzer:
             key = normalize_answer(title)
             if not key or key in seen:
                 continue
+            aspect_key = self._coverage_focus_aspect_key(item, title)
+            if aspect_key and aspect_key in seen_aspects:
+                continue
             seen.add(key)
+            if aspect_key:
+                seen_aspects.add(aspect_key)
             focus_id = self._safe_target_id(item.get("id") or key or f"focus-{index + 1}")
             support_levels = self._normalize_support_levels(item.get("supportLevels") or item.get("support_levels"), title)
             focuses.append(
@@ -4338,6 +4414,40 @@ class AIAnalyzer:
             if len(focuses) >= 5:
                 break
         return focuses
+
+    def _coverage_focus_aspect_key(self, item: dict[str, Any], title: str) -> str:
+        parts: list[str] = [
+            title,
+            self._clean_text_value(item.get("id")),
+            self._clean_text_value(item.get("label")),
+            self._clean_text_value(item.get("focus")),
+            self._clean_text_value(item.get("visualFocus") or item.get("visual_focus")),
+            self._clean_text_value(item.get("category")),
+        ]
+        text = normalize_answer(" ".join(part for part in parts if part))
+        if not text:
+            return ""
+        if re.search(r"\b(hold|holding|held|hand|grip|finger)\b", text):
+            return "holding"
+        if re.search(r"\b(main|subject|stopwatch|device|item)\b", text):
+            return "main_subject"
+        if re.search(r"\b(structure|building|architecture|shape|display|screen|screens|button|buttons|control|controls)\b", text):
+            return "structure"
+        if re.search(r"\b(greenery|plant|plants|tree|trees|leaf|leaves|bush|shrub)\b", text):
+            return "greenery"
+        if re.search(r"\b(atmosphere|sky|mood|cloud|feeling)\b", text):
+            return "atmosphere"
+        if re.search(r"\b(light|lighting|sun|shadow|reflection)\b", text):
+            return "lighting"
+        if re.search(r"\b(texture|surface|material)\b", text):
+            return "texture"
+        if re.search(r"\b(person|people|man|woman|child|crowd)\b", text):
+            return "people"
+        if re.search(r"\b(walk|walking|run|running|drive|driving|move|moving|action)\b", text):
+            return "movement"
+        if re.search(r"\b(position|near|beside|behind|front|background|foreground|left|right|around)\b", text):
+            return "position"
+        return text
 
     def _normalize_support_levels(self, raw_items: Any, title: str) -> list[dict[str, Any]]:
         by_level: dict[int, dict[str, Any]] = {}

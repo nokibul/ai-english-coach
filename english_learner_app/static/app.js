@@ -2585,6 +2585,12 @@ function renderImproveStep(session) {
     ? buildLayerCurrentFocus(coverageLayers.currentLayer, session, escalation)
     : buildImproveCurrentFocus(issue, session, escalation);
   const hintGroups = buildImproveHintGroups(session, latestFeedback, issue, latestText, escalation);
+  const currentLevelHints = coverageLevelHints({
+    hintGroups,
+    layer: coverageLayers.currentLayer,
+    currentFocus,
+    escalation,
+  });
   const stage = showMoveOption
     ? LEARNING_STAGES.FINAL_REVEAL
     : showUpgrade
@@ -2663,6 +2669,10 @@ function renderImproveStep(session) {
   });
   document.getElementById("coverageHelpButton")?.addEventListener("click", () => {
     advanceCoverageHelp(coverageLayers.currentLayer, escalation.level || 1);
+    renderImproveStep(session);
+  });
+  document.getElementById("coverageHintButton")?.addEventListener("click", () => {
+    toggleCoverageLevelHints(coverageLayers.currentLayer, escalation.level || 1, currentLevelHints.length > 0);
     renderImproveStep(session);
   });
   document.getElementById("upgradeMyArticulationButton")?.addEventListener("click", () => {
@@ -2795,9 +2805,11 @@ function renderImproveEditor({ rewriteDraft, currentFocus, hintGroups, articulat
     currentFocus,
     escalation,
   });
-  const showHints = coverageLevelHintsVisible(currentLayer, supportLevel) && hints.length > 0;
-  const helpButtonLabel = coverageHelpButtonLabel(supportLevel, showHints);
-  const helpButtonDisabled = !currentLayer || (supportLevel >= MAX_FOCUS_SUPPORT_LEVEL && !showHints && !hints.length);
+  const hasHints = hints.length > 0;
+  const showHints = coverageLevelHintsVisible(currentLayer, supportLevel) && hasHints;
+  const helpButtonLabel = coverageHelpButtonLabel(supportLevel);
+  const hintButtonLabel = coverageHintButtonLabel(showHints);
+  const hintButtonDisabled = !currentLayer || !hasHints;
   const focusHelp = coverageFocusHelpDisplay({
     focus,
     layer: currentLayer,
@@ -2823,9 +2835,16 @@ function renderImproveEditor({ rewriteDraft, currentFocus, hintGroups, articulat
         ${showHints ? renderCoverageLevelHintChips(hints) : ""}
       </div>
       <div class="focus-support-actions">
-        <button id="coverageHelpButton" class="focus-help-button" type="button" ${helpButtonDisabled ? "disabled" : ""} aria-label="${escapeHtml(helpButtonLabel)}">
-          ${escapeHtml(helpButtonLabel)}
-        </button>
+        ${supportLevel < MAX_FOCUS_SUPPORT_LEVEL ? `
+          <button id="coverageHelpButton" class="focus-help-button" type="button" ${!currentLayer ? "disabled" : ""} aria-label="${escapeHtml(helpButtonLabel)}">
+            ${escapeHtml(helpButtonLabel)}
+          </button>
+        ` : ""}
+        ${hasHints ? `
+          <button id="coverageHintButton" class="focus-help-button" type="button" ${hintButtonDisabled ? "disabled" : ""} aria-label="${escapeHtml(hintButtonLabel)}">
+            ${escapeHtml(hintButtonLabel)}
+          </button>
+        ` : ""}
       </div>
     </section>
 
@@ -3006,16 +3025,30 @@ function advanceCoverageHelp(layer, currentLevel = 1) {
     return;
   }
   if (coverageLevelHintsVisible(layer, MAX_FOCUS_SUPPORT_LEVEL)) {
-    hideCoverageLevelHints(layer);
+    hideCoverageLevelHints(layer, MAX_FOCUS_SUPPORT_LEVEL);
     return;
   }
   showCoverageLevelHints(layer, MAX_FOCUS_SUPPORT_LEVEL);
 }
 
-function coverageHelpButtonLabel(level = 1, hintsVisible = false) {
+function toggleCoverageLevelHints(layer, currentLevel = 1, hasCurrentLevelHints = false) {
+  if (!hasCurrentLevelHints) return;
+  const level = clampFocusSupportLevel(currentLevel);
+  if (coverageLevelHintsVisible(layer, level)) {
+    hideCoverageLevelHints(layer, level);
+    return;
+  }
+  showCoverageLevelHints(layer, level);
+}
+
+function coverageHelpButtonLabel(level = 1) {
   const supportLevel = clampFocusSupportLevel(level);
   if (supportLevel <= 1) return "Need help?";
   if (supportLevel === 2) return "Need more help?";
+  return "Need more help?";
+}
+
+function coverageHintButtonLabel(hintsVisible = false) {
   return hintsVisible ? "Hide hint" : "Show hint";
 }
 
@@ -3058,7 +3091,7 @@ function showCoverageLevelHints(layer, level = 1) {
   persistCurrentSessionFlow();
 }
 
-function hideCoverageLevelHints(layer = null) {
+function hideCoverageLevelHints(layer = null, level = null) {
   if (!state.sessionFlow) return;
   if (!layer) {
     state.sessionFlow.focusHintVisibility = {};
@@ -3068,8 +3101,9 @@ function hideCoverageLevelHints(layer = null) {
   const key = focusSupportKey(layer);
   if (!key || !state.sessionFlow.focusHintVisibility) return;
   const nextVisibility = { ...state.sessionFlow.focusHintVisibility };
+  const levelKey = level == null ? "" : coverageHintVisibilityKey(layer, level);
   Object.keys(nextVisibility).forEach((itemKey) => {
-    if (itemKey === key || itemKey.startsWith(`${key}:`)) {
+    if ((levelKey && itemKey === levelKey) || (!levelKey && (itemKey === key || itemKey.startsWith(`${key}:`)))) {
       delete nextVisibility[itemKey];
     }
   });

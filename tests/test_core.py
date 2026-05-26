@@ -2079,6 +2079,59 @@ class ProgressRewardTests(unittest.TestCase):
 
 
 class AIAnalyzerTests(unittest.TestCase):
+    def test_guided_coverage_prompt_requires_distinct_visual_aspects(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with patch.dict(os.environ, {}, clear=True):
+                config = AppConfig.from_env(base_dir=Path(temp_dir))
+
+        analyzer = AIAnalyzer(config)
+        prompt = analyzer._build_guided_coverage_analysis_prompt(difficulty_band="beginner", notes="")
+
+        self.assertIn("Every coverage focus must describe a different visual aspect", prompt)
+        self.assertIn("Avoid near-duplicate focus titles", prompt)
+        self.assertIn("screen, display, buttons, controls, shape, architecture, and structure as one", prompt)
+        self.assertIn("merge or replace any pair", prompt)
+
+    def test_guided_coverage_normalization_removes_duplicate_ui_aspects(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with patch.dict(os.environ, {}, clear=True):
+                config = AppConfig.from_env(base_dir=Path(temp_dir))
+
+        analyzer = AIAnalyzer(config)
+        focuses = analyzer._normalize_coverage_focuses(
+            [
+                {
+                    "id": "screen_shape",
+                    "title": "Screen shape",
+                    "supportLevels": [
+                        {"level": 1, "prompt": "What do you notice about the screen shape?", "hints": ["wide screen"]},
+                        {"level": 2, "prompt": "Can you describe the display shape?", "hints": ["rectangular"]},
+                        {"level": 3, "prompt": "The screen looks ___.", "hints": ["wide"]},
+                    ],
+                },
+                {
+                    "id": "visible_buttons",
+                    "title": "Visible buttons",
+                    "supportLevels": [
+                        {"level": 1, "prompt": "What do you notice about the visible buttons?", "hints": ["small buttons"]},
+                        {"level": 2, "prompt": "Can you describe the buttons?", "hints": ["round"]},
+                        {"level": 3, "prompt": "The buttons are ___.", "hints": ["small"]},
+                    ],
+                },
+                {
+                    "id": "bright_lighting",
+                    "title": "Bright lighting",
+                    "supportLevels": [
+                        {"level": 1, "prompt": "What do you notice about the bright lighting?", "hints": ["bright"]},
+                        {"level": 2, "prompt": "Can you describe the light in the scene?", "hints": ["daylight"]},
+                        {"level": 3, "prompt": "The scene is ___.", "hints": ["bright"]},
+                    ],
+                },
+            ]
+        )
+
+        self.assertEqual(["Screen shape", "Bright lighting"], [focus["title"] for focus in focuses])
+
     def test_prompt_emphasizes_natural_english_and_reusable_language(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             with patch.dict(os.environ, {}, clear=True):
