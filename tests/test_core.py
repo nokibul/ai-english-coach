@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from datetime import timezone
 import os
 from pathlib import Path
 import shutil
@@ -14,21 +13,10 @@ from english_learner_app.assessment import evaluate_assessment
 from english_learner_app.ai_service import AIAnalyzer
 from english_learner_app.config import AppConfig
 from english_learner_app.database import Database, phrase_mastery_state
-from english_learner_app.quiz_engine import (
-    build_post_improve_quiz_rows,
-    build_session_assets,
-    evaluate_quiz_response,
-)
-from english_learner_app.review import (
-    build_study_cards,
-    calculate_next_review,
-    select_quiz_cards,
-)
 from english_learner_app.server import (
     apply_progress_event,
     build_learning_engines_payload,
     build_highlight_terms,
-    build_quiz_xp_breakdown,
     learning_stage_from_feedback,
 )
 from english_learner_app.utils import from_iso, highlight_phrases
@@ -449,6 +437,135 @@ assert(state.layers.length === 0, "completed coverage should not show more visua
         self.assertEqual(result.returncode, 0, result.stderr)
 
     @unittest.skipIf(shutil.which("node") is None, "node is required for static coverage tests")
+    def test_strong_first_description_creates_polish_focuses_before_completion(self) -> None:
+        script = r"""
+const fs = require("fs");
+const vm = require("vm");
+const code = fs.readFileSync("english_learner_app/static/app.js", "utf8");
+const context = {
+  document: { addEventListener() {}, getElementById() { return null; }, querySelectorAll() { return []; } },
+  window: { setTimeout() {}, clearTimeout() {} },
+  console,
+};
+vm.createContext(context);
+vm.runInContext(code, context);
+
+function assert(condition, message) {
+  if (!condition) throw new Error(message);
+}
+
+const session = {
+  analysis: {
+    coverageFocuses: [
+      {
+        id: "greenery",
+        title: "Greenery",
+        supportLevels: [
+          { level: 1, prompt: "What do you notice about the vines?", hints: ["vines"] },
+          { level: 2, prompt: "Can you describe the climbing vines?", hints: ["climbing vines"] },
+          { level: 3, prompt: "The building is covered with ___.", hints: ["dense climbing vines"] },
+        ],
+      },
+      {
+        id: "structure",
+        title: "Structure",
+        supportLevels: [
+          { level: 1, prompt: "What do you notice about the columns?", hints: ["columns"] },
+          { level: 2, prompt: "Can you describe the tall columns?", hints: ["tall columns"] },
+          { level: 3, prompt: "The building has ___.", hints: ["tall columns"] },
+        ],
+      },
+      {
+        id: "people_position",
+        title: "People position",
+        supportLevels: [
+          { level: 1, prompt: "What do you notice about the people?", hints: ["people"] },
+          { level: 2, prompt: "Can you describe where the people are?", hints: ["near the entrance"] },
+          { level: 3, prompt: "A group of people are standing ___.", hints: ["near the entrance"] },
+        ],
+      },
+    ],
+    objects: [{ name: "building" }, { name: "people" }],
+    environment: "modern building entrance",
+    environment_details: ["vines", "columns", "palm trees"],
+  },
+};
+const feedback = {
+  coverage: {
+    coveragePercent: 88,
+    imageParts: [
+      { name: "modern building", type: "main_subject", covered: true, coverageStatus: "covered" },
+      { name: "vines", type: "important_object", covered: true, coverageStatus: "covered" },
+      { name: "columns", type: "important_object", covered: true, coverageStatus: "covered" },
+      { name: "people near the entrance", type: "foreground", covered: true, coverageStatus: "covered" },
+      { name: "calm atmosphere", type: "atmosphere", covered: true, coverageStatus: "covered" },
+    ],
+  },
+  readiness: { ready: true, criteria: { mainSubject: true, mainAction: true, settingBackground: true, naturalEnglish: true, notAWordList: true } },
+};
+const text = "The image shows a modern building covered with vines, with tall columns, palm trees, people near the entrance, and a calm atmosphere.";
+const state = context.buildCoverageLayerState(feedback, session, text);
+
+assert(state.complete === false, "strong first descriptions should not finish the guided flow");
+assert(state.layers.length === 3, "covered planned focuses should become practice focuses");
+assert(state.currentLayer.mode === "polish_existing_detail", "the first already-covered focus should be polish mode");
+assert(state.currentLayer.alreadyMentioned === true, "polish focus should remember that it was mentioned");
+assert(state.currentLayer.sourceText, "polish focus should keep a source phrase from the learner text");
+assert(state.currentLayer.supportLevels[0].prompt.includes("You mentioned"), "polish prompt should acknowledge the learner's existing phrase");
+assert(state.layers.every((layer) => layer.mode === "polish_existing_detail"), "mentioned focuses should stay in the path as polish work");
+"""
+        result = subprocess.run(
+            ["node", "-e", script],
+            cwd=Path(__file__).resolve().parents[1],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    @unittest.skipIf(shutil.which("node") is None, "node is required for static coverage tests")
+    def test_polish_focus_replaces_existing_phrase_instead_of_appending_duplicate(self) -> None:
+        script = r"""
+const fs = require("fs");
+const vm = require("vm");
+const code = fs.readFileSync("english_learner_app/static/app.js", "utf8");
+const context = {
+  document: { addEventListener() {}, getElementById() { return null; }, querySelectorAll() { return []; } },
+  window: { setTimeout() {}, clearTimeout() {} },
+  console,
+};
+vm.createContext(context);
+vm.runInContext(code, context);
+
+function assert(condition, message) {
+  if (!condition) throw new Error(message);
+}
+
+const layer = {
+  mode: "polish_existing_detail",
+  alreadyMentioned: true,
+  sourceText: "covered with vines",
+  label: "Greenery",
+  visualFocus: "Greenery",
+  supportLevels: [{ level: 3, prompt: "The building is covered with ___.", hints: ["dense climbing vines"] }],
+};
+const base = "The image shows a modern building covered with vines, with tall columns and people near the entrance.";
+const merged = context.mergeParagraphFocusDetail(base, "dense climbing vines", layer);
+const normalized = merged.toLowerCase();
+
+assert(normalized.includes("covered with dense climbing vines"), "polish answer should enhance the existing phrase");
+assert(!normalized.includes("covered with vines,") && !normalized.endsWith("dense climbing vines."), "polish answer should not append a duplicate sentence");
+"""
+        result = subprocess.run(
+            ["node", "-e", script],
+            cwd=Path(__file__).resolve().parents[1],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    @unittest.skipIf(shutil.which("node") is None, "node is required for static coverage tests")
     def test_initial_enhancement_enters_guided_coverage_for_basic_building_description(self) -> None:
         script = r"""
 const fs = require("fs");
@@ -522,7 +639,7 @@ assert(/tree|bush|shrub|greenery|environment|setting/.test(prompt), "next focus 
         self.assertEqual(result.returncode, 0, result.stderr)
 
     @unittest.skipIf(shutil.which("node") is None, "node is required for static coverage tests")
-    def test_atmosphere_focus_hints_stay_relevant_to_feeling_question(self) -> None:
+    def test_atmosphere_focus_hints_stay_relevant_to_feeling_prompt(self) -> None:
         script = r"""
 const fs = require("fs");
 const vm = require("vm");
@@ -558,7 +675,7 @@ const groups = context.buildDynamicTargetHintGroups(target, analysis, 1);
 const hints = context.coverageLevelHints({ hintGroups: groups, layer: target, currentFocus: target.prompt, escalation: { level: 1 } });
 const text = hints.join(" | ").toLowerCase();
 assert(!/\\b(apartment buildings|balconies|concrete walls|rise|stand)\\b/.test(text), "object/architecture hints should not leak into atmosphere chips: " + text);
-assert(/\\b(calm|bright|open|peaceful|fresh|sky|greenery|scene feels)\\b/.test(text), "atmosphere chips should help answer the feeling question: " + text);
+assert(/\\b(calm|bright|open|peaceful|fresh|sky|greenery|scene feels)\\b/.test(text), "atmosphere chips should help answer the feeling prompt: " + text);
 """
         result = subprocess.run(
             ["node", "-e", script],
@@ -570,7 +687,7 @@ assert(/\\b(calm|bright|open|peaceful|fresh|sky|greenery|scene feels)\\b/.test(t
         self.assertEqual(result.returncode, 0, result.stderr)
 
     @unittest.skipIf(shutil.which("node") is None, "node is required for static coverage tests")
-    def test_dynamic_focus_questions_get_easier_incrementally(self) -> None:
+    def test_dynamic_focus_prompts_get_easier_incrementally(self) -> None:
         script = r"""
 const fs = require("fs");
 const vm = require("vm");
@@ -596,7 +713,7 @@ const greenery = {
   evidence: ["tall trees, bushes, and shrubs around the building"],
 };
 const prompts = [1, 2, 3].map((level) => context.dynamicTargetPrompt(greenery, {}, level));
-assert(prompts[0] === "What other greenery do you notice around the building?", "level 1 should keep the original question");
+assert(prompts[0] === "What other greenery do you notice around the building?", "level 1 should keep the original prompt");
 assert(prompts[1] === "Can you describe the plants near the bottom and sides of the building?", "level 2 should give focused guidance");
 assert(prompts[2] === "There are ___ around the building.", "level 3 should be a fill-in frame");
 """
@@ -783,7 +900,7 @@ assert(context.polishRewardLabel("vocabulary") === "stronger wording", "reward f
         self.assertEqual(result.returncode, 0, result.stderr)
 
     @unittest.skipIf(shutil.which("node") is None, "node is required for final reveal UI tests")
-    def test_final_polished_reveal_shows_growth_language_reward_and_quiz_cta(self) -> None:
+    def test_final_polished_reveal_shows_growth_language_reward_and_finish_cta(self) -> None:
         script = r"""
 const fs = require("fs");
 const vm = require("vm");
@@ -825,7 +942,7 @@ assert(html.includes("leafy branches"), "should show the final upgraded wording"
 assert(html.includes("Reusable language you learned"), "should show reusable language learned");
 assert(html.includes("3") && html.includes("Phrases Learned"), "progress should count learned reusable language");
 assert(html.includes("XP"), "should show an XP reward");
-assert(html.includes("Continue to Quiz"), "should include quiz CTA");
+assert(html.includes("Start New Image"), "should include finish CTA");
 """
         result = subprocess.run(
             ["node", "-e", script],
@@ -1980,103 +2097,6 @@ class ProgressRewardTests(unittest.TestCase):
         self.assertEqual("Used Correctly", used["mastery_state"])
         self.assertEqual(2, used["correct_count"])
 
-    def test_quiz_xp_breakdown_applies_base_and_bonuses(self) -> None:
-        breakdown = build_quiz_xp_breakdown(
-            item={
-                "quiz_type": "use_it_or_lose_it",
-                "metadata": {
-                    "difficulty": 0.72,
-                    "related_reusable_phrase": "in the background",
-                },
-            },
-            selected_answer="Cars are in the background while the cyclist rides.",
-            correct=True,
-            almost_correct=False,
-            response_ms=4500,
-            completion_bonuses={"complete_all_types_bonus": 20, "perfect_quiz_bonus": 30},
-        )
-
-        self.assertEqual("micro", breakdown["difficulty"])
-        self.assertEqual(15, breakdown["base_xp"])
-        self.assertEqual(0, breakdown["first_try_bonus"])
-        self.assertEqual(0, breakdown["phrase_bonus"])
-        self.assertEqual(0, breakdown["fast_bonus"])
-        self.assertEqual(20, breakdown["complete_all_types_bonus"])
-        self.assertEqual(0, breakdown["perfect_quiz_bonus"])
-        self.assertEqual(35, breakdown["total_before_combo"])
-
-        almost = build_quiz_xp_breakdown(
-            item={"quiz_type": "fix_the_sentence", "metadata": {}},
-            selected_answer="The man riding mower grass.",
-            correct=False,
-            almost_correct=True,
-            response_ms=4500,
-            completion_bonuses={"complete_all_types_bonus": 0, "perfect_quiz_bonus": 0},
-        )
-        self.assertEqual(5, almost["base_xp"])
-        self.assertEqual(5, almost["total_before_combo"])
-
-    def test_combo_rules_for_correct_almost_and_wrong(self) -> None:
-        with tempfile.TemporaryDirectory() as temp_dir:
-            db = Database(Path(temp_dir) / "app.sqlite3")
-            db.initialize()
-            user = db.create_user(
-                full_name="Combo Learner",
-                phone=None,
-                email="combo@example.com",
-                password_hash="hash",
-                difficulty_band="beginner",
-                fluency_score=10,
-                fluency_summary="Starting out.",
-                assessment={},
-                created_at="2026-05-04T00:00:00+00:00",
-            )
-            now = from_iso("2026-05-04T00:00:00+00:00")
-
-            progress, reward = apply_progress_event(
-                db, user_id=user["id"], now=now, xp_delta=5, activity_correct=True
-            )
-            self.assertEqual(1, reward["combo_streak"])
-
-            progress, reward = apply_progress_event(
-                db, user_id=user["id"], now=now, xp_delta=5, activity_correct=None
-            )
-            self.assertEqual(1, reward["combo_streak"])
-
-            progress, reward = apply_progress_event(
-                db, user_id=user["id"], now=now, xp_delta=0, activity_correct=False
-            )
-            self.assertEqual(0, reward["combo_streak"])
-            self.assertEqual(1, progress["best_combo"])
-
-    def test_combo_x3_bonus_values(self) -> None:
-        with tempfile.TemporaryDirectory() as temp_dir:
-            db = Database(Path(temp_dir) / "app.sqlite3")
-            db.initialize()
-            user = db.create_user(
-                full_name="Bonus Learner",
-                phone=None,
-                email="bonus@example.com",
-                password_hash="hash",
-                difficulty_band="beginner",
-                fluency_score=10,
-                fluency_summary="Starting out.",
-                assessment={},
-                created_at="2026-05-04T00:00:00+00:00",
-            )
-            now = from_iso("2026-05-04T00:00:00+00:00")
-
-            rewards = []
-            for _ in range(5):
-                _, reward = apply_progress_event(
-                    db, user_id=user["id"], now=now, xp_delta=5, activity_correct=True
-                )
-                rewards.append(reward)
-
-        self.assertEqual(10, rewards[2]["combo_bonus"])
-        self.assertEqual(0, rewards[4]["combo_bonus"])
-        self.assertEqual(5, rewards[4]["best_combo"])
-
 
 class AIAnalyzerTests(unittest.TestCase):
     def test_guided_coverage_prompt_requires_distinct_visual_aspects(self) -> None:
@@ -2167,15 +2187,6 @@ class AIAnalyzerTests(unittest.TestCase):
                         "type": "phrase",
                         "meaning": "A very small child, usually younger than a teenager. Use this when the person in the image looks very young.",
                         "example": "A young child is sitting on a soft bed surface.",
-                    }
-                ],
-                "quiz_candidates": [
-                    {
-                        "quiz_type": "recognition",
-                        "prompt": "Who is visible?",
-                        "answer": "young child",
-                        "distractors": ["car", "tree", "road"],
-                        "explanation": "The image shows a child.",
                     }
                 ],
             },
@@ -3137,16 +3148,6 @@ class AIAnalyzerTests(unittest.TestCase):
                     }
                 ],
                 "sentence_patterns": [],
-                "quiz_candidates": [
-                    {
-                        "quiz_type": "recognition",
-                        "prompt": "What is the woman holding?",
-                        "answer": "a book",
-                        "distractors": ["a lamp", "a bag", "a cup"],
-                        "explanation": "The woman seems to hold a book.",
-                        "source_text": "hold a book",
-                    }
-                ],
                 "teaching_notes": [],
             },
             difficulty_band="beginner",
@@ -3263,7 +3264,6 @@ class AIAnalyzerTests(unittest.TestCase):
             "alternatives": [],
             "weak_points": [],
             "reusable_sentence_structures": [],
-            "quiz_focus": [],
         }
         payload = {
             "score": 62,
@@ -3508,16 +3508,6 @@ class AIAnalyzerTests(unittest.TestCase):
                 ],
                 "phrases": [],
                 "sentence_patterns": [],
-                "quiz_candidates": [
-                    {
-                        "quiz_type": "recognition",
-                        "prompt": "What phrase suggests mood?",
-                        "answer": "evoking a sense of",
-                        "distractors": ["peaceful and inviting", "overall mood", "connection with"],
-                        "explanation": "It introduces an interpretation of the atmosphere.",
-                        "source_text": "evoking a sense of",
-                    }
-                ],
                 "teaching_notes": [],
             },
             difficulty_band="beginner",
@@ -3583,16 +3573,6 @@ class AIAnalyzerTests(unittest.TestCase):
                 ],
                 "phrases": [],
                 "sentence_patterns": [],
-                "quiz_candidates": [
-                    {
-                        "quiz_type": "recognition",
-                        "prompt": "Where are the people?",
-                        "answer": "near a market",
-                        "distractors": ["in a room", "on a beach", "by a river"],
-                        "explanation": "The people are walking near a market.",
-                        "source_text": "near a market",
-                    }
-                ],
                 "teaching_notes": [],
             },
             difficulty_band="beginner",
@@ -3670,16 +3650,6 @@ class AIAnalyzerTests(unittest.TestCase):
                         "usage_note": "Use it to introduce what is present in a scene.",
                     }
                 ],
-                "quiz_candidates": [
-                    {
-                        "quiz_type": "recognition",
-                        "prompt": "What is the main visible subject?",
-                        "answer": "cat",
-                        "distractors": ["table", "lamp", "door"],
-                        "explanation": "The cat is the clearest part of the scene.",
-                        "source_text": "cat",
-                    }
-                ],
                 "teaching_notes": [],
             },
             difficulty_band="beginner",
@@ -3706,385 +3676,6 @@ class HighlightTests(unittest.TestCase):
         self.assertGreaterEqual(html.count("<p>"), 2)
         self.assertIn("soft glow", html)
         self.assertIn("faint smile", html)
-
-
-class ReviewTests(unittest.TestCase):
-    def test_correct_answer_pushes_due_date_forward(self) -> None:
-        now = from_iso("2026-04-14T12:00:00+00:00")
-        schedule = calculate_next_review(
-            card={
-                "repetitions": 0,
-                "ease_factor": 2.5,
-                "interval_days": 0.0,
-            },
-            quality=4,
-            now=now,
-            first_review_minutes=5,
-        )
-        due = from_iso(schedule["due_at"]).astimezone(timezone.utc)
-        self.assertGreater(due, now)
-
-    def test_build_study_cards_creates_varied_phrase_cards(self) -> None:
-        now = from_iso("2026-04-14T12:00:00+00:00")
-        cards = build_study_cards(
-            user_id=1,
-            session_id=2,
-            now=now,
-            first_review_minutes=5,
-            analysis={
-                "reusable_language": [
-                    {
-                        "text": "in the foreground",
-                        "definition": "It helps you point to the part of the image closest to the viewer.",
-                        "example": "In the foreground, a bright red mug sits on the table.",
-                        "why_it_matters": "It sounds natural when you guide someone through the scene.",
-                    }
-                ],
-                "micro_quiz": [],
-            },
-        )
-        kinds = {card["card_kind"] for card in cards}
-        self.assertIn("phrase", kinds)
-        self.assertIn("phrase_choice", kinds)
-        self.assertIn("phrase_usage", kinds)
-        self.assertGreaterEqual(len(cards), 3)
-
-    def test_select_quiz_cards_prefers_variety(self) -> None:
-        cards = [
-            {"id": 1, "card_kind": "phrase"},
-            {"id": 2, "card_kind": "phrase"},
-            {"id": 3, "card_kind": "phrase_choice"},
-            {"id": 4, "card_kind": "quiz"},
-        ]
-        selected = select_quiz_cards(cards, limit=3)
-        self.assertEqual([card["id"] for card in selected], [1, 3, 4])
-
-    def test_fast_correct_answer_advances_interval(self) -> None:
-        now = from_iso("2026-04-14T12:00:00+00:00")
-        schedule = calculate_next_review(
-            card={
-                "interval_step": 0,
-                "interval_minutes": 60,
-                "ease_factor": 2.5,
-                "mastery": 0.0,
-                "difficulty": 0.3,
-                "correct_streak": 0,
-                "wrong_streak": 0,
-                "review_count": 0,
-                "repetitions": 0,
-            },
-            quality=5,
-            now=now,
-            first_review_minutes=60,
-            response_ms=5000,
-            confidence=3,
-        )
-        self.assertGreaterEqual(schedule["interval_step"], 1)
-        self.assertGreater(schedule["mastery"], 0.0)
-
-
-class QuizEngineTests(unittest.TestCase):
-    def test_post_improve_quiz_uses_feedback_context_and_required_types(self) -> None:
-        rows = build_post_improve_quiz_rows(
-            user_id=1,
-            session_id=2,
-            learner_level="developing",
-            created_at="2026-05-04T00:00:00+00:00",
-            learner_text="A man is in the street.",
-            improved_text="A cyclist is riding down a busy street with cars in the background.",
-            feedback={
-                "better_version": "A cyclist is riding down a busy street with cars in the background.",
-                "missing_details": ["cars in the background"],
-                "fix_this_to_improve": ["Mention the cyclist and the street action."],
-                "phrase_usage": {
-                    "suggested": ["in the background"],
-                    "message": "Use the full phrase in the background.",
-                },
-            },
-            analysis={
-                "scene_summary_natural": "A cyclist is riding down a busy street with cars in the background.",
-                "scene_summary_simple": "A cyclist is riding on a street.",
-                "objects": [
-                    {"name": "cyclist", "description": "A cyclist is visible."},
-                    {"name": "cars", "description": "Cars are in the background."},
-                ],
-                "actions": [{"phrase": "riding down a busy street"}],
-                "phrases": [
-                    {
-                        "phrase": "in the background",
-                        "meaning_simple": "behind the main subject",
-                        "example": "Cars are in the background.",
-                    },
-                    {
-                        "phrase": "riding down",
-                        "meaning_simple": "moving along a place on a bike",
-                        "example": "A cyclist is riding down a busy street.",
-                    }
-                ],
-                "vocabulary": [{"word": "cyclist"}],
-            },
-        )
-
-        quiz_types = [row["quiz_type"] for row in rows]
-        self.assertEqual(
-            [
-                "multiple_choice_comprehension",
-                "matching_pairs",
-                "fill_blank",
-                "sentence_reconstruction",
-            ],
-            quiz_types,
-        )
-        self.assertEqual(4, len(rows))
-        self.assertEqual(
-            ["multiple_choice", "matching", "typing", "reorder"],
-            [row["answer_mode"] for row in rows],
-        )
-        self.assertTrue(
-            all("_____" in row["prompt"] for row in rows if row["quiz_type"] == "fill_blank")
-        )
-        matching = next(row for row in rows if row["quiz_type"] == "matching_pairs")
-        self.assertGreaterEqual(len(matching["metadata"]["pairs"]), 2)
-        reconstruction = next(row for row in rows if row["quiz_type"] == "sentence_reconstruction")
-        self.assertTrue(reconstruction["metadata"]["tokens"])
-        self.assertTrue(all(row["session_id"] == 2 for row in rows))
-        for row in rows:
-            self.assertIn("prompt", row)
-            self.assertIn("correct_answer", row)
-            self.assertTrue(row["explanation"])
-            self.assertGreater(row["difficulty"], 0)
-            self.assertGreater(row["metadata"]["xp_value"], 0)
-            self.assertTrue(row["metadata"]["post_improve"])
-            if row["metadata"]["related_reusable_phrase"]:
-                self.assertIn(
-                    row["metadata"]["related_reusable_phrase"],
-                    {"in the background", "riding down", "riding down a busy street", "riding"},
-                )
-
-    def test_build_session_assets_generates_multiple_quiz_types(self) -> None:
-        assets = build_session_assets(
-            user_id=1,
-            session_id=2,
-            learner_level="beginner",
-            created_at="2026-04-14T12:00:00+00:00",
-            first_review_minutes=60,
-            analysis={
-                "objects": [
-                    {"name": "road", "description": "A road appears in the scene."},
-                    {"name": "car", "description": "A car is visible nearby."},
-                ],
-                "actions": [
-                    {
-                        "verb": "crossing",
-                        "subject": "A person",
-                        "object": "the road",
-                        "phrase": "crossing the road",
-                        "description": "A person is moving across the road.",
-                    }
-                ],
-                "vocabulary": [
-                    {
-                        "word": "cross",
-                        "part_of_speech": "verb",
-                        "meaning_simple": "to go from one side to the other",
-                        "example": "He wants to cross the road.",
-                        "examples": [
-                            "I cross the road slowly.",
-                            "We cross the road here.",
-                            "They cross the road together.",
-                            "She will cross the road soon.",
-                            "People cross the road daily.",
-                        ],
-                        "frequency_priority": "high",
-                    }
-                ],
-                "phrases": [
-                    {
-                        "phrase": "cross the road",
-                        "meaning_simple": "go from one side of the road to the other",
-                        "example": "People cross the road carefully.",
-                        "examples": [
-                            "I cross the road after lunch.",
-                            "They cross the road at school.",
-                            "We cross the road together.",
-                            "She can cross the road now.",
-                            "Please cross the road here.",
-                        ],
-                        "reusable": True,
-                        "collocation_type": "verb phrase",
-                    }
-                ],
-                "scene_summary_simple": "A person is crossing the road near a car.",
-                "environment": "It looks like a street scene.",
-            },
-        )
-        quiz_types = {item["quiz_type"] for item in assets["quiz_items"]}
-        self.assertIn("recognition", quiz_types)
-        self.assertIn("phrase_completion", quiz_types)
-        self.assertIn("typing", quiz_types)
-        self.assertEqual(5, len(assets["vocabulary"][0]["examples"]))
-        self.assertEqual(5, len(assets["phrases"][0]["examples"]))
-
-    def test_typing_evaluation_accepts_keyword_match(self) -> None:
-        result = evaluate_quiz_response(
-            item={
-                "answer_mode": "typing",
-                "correct_answer": "A man is crossing the road.",
-                "acceptable_answers": ["A man is crossing the road."],
-                "metadata": {
-                    "keywords": ["man", "crossing", "road"],
-                    "reference_answer": "A man is crossing the road.",
-                },
-            },
-            selected_answer="The man is crossing a road.",
-            response_ms=7000,
-            confidence=2,
-        )
-        self.assertTrue(result["correct"])
-        self.assertGreaterEqual(result["score"], 0.55)
-
-    def test_phrase_snap_typing_accepts_close_answer_as_almost_correct(self) -> None:
-        result = evaluate_quiz_response(
-            item={
-                "quiz_type": "phrase_snap",
-                "answer_mode": "typing",
-                "correct_answer": "in the background",
-                "acceptable_answers": ["in the background"],
-                "metadata": {},
-            },
-            selected_answer="in background",
-            response_ms=3000,
-            confidence=2,
-        )
-
-        self.assertFalse(result["correct"])
-        self.assertEqual("Almost Correct", result["result_type"])
-        self.assertGreater(result["score"], 0.5)
-
-    def test_fill_blank_uses_direct_and_close_matching(self) -> None:
-        item = {
-            "quiz_type": "fill_blank",
-            "answer_mode": "typing",
-            "correct_answer": "riding",
-            "acceptable_answers": ["riding", "ride"],
-            "metadata": {},
-        }
-
-        direct = evaluate_quiz_response(
-            item=item,
-            selected_answer="ride",
-            response_ms=2000,
-            confidence=2,
-        )
-        close = evaluate_quiz_response(
-            item=item,
-            selected_answer="ridng",
-            response_ms=2000,
-            confidence=2,
-        )
-
-        self.assertTrue(direct["correct"])
-        self.assertEqual("Correct", direct["result_type"])
-        self.assertFalse(close["correct"])
-        self.assertEqual("Almost Correct", close["result_type"])
-        self.assertTrue(close["feedback"]["corrected_example"])
-
-    def test_fix_the_sentence_accepts_natural_alternative_and_partial(self) -> None:
-        item = {
-            "quiz_type": "fix_the_sentence",
-            "answer_mode": "typing",
-            "correct_answer": "The man is riding a mower on the grass.",
-            "acceptable_answers": ["The man is riding a mower on the grass."],
-            "metadata": {
-                "weak_sentence": "The man on mower grass.",
-                "keywords": ["man", "riding", "mower", "grass"],
-                "reference_answer": "The man is riding a mower on the grass.",
-            },
-        }
-
-        natural = evaluate_quiz_response(
-            item=item,
-            selected_answer="A man is riding the mower across the grass.",
-            response_ms=7000,
-            confidence=2,
-        )
-        partial = evaluate_quiz_response(
-            item=item,
-            selected_answer="The man riding mower grass.",
-            response_ms=7000,
-            confidence=2,
-        )
-
-        self.assertTrue(natural["correct"])
-        self.assertEqual("Correct", natural["result_type"])
-        self.assertFalse(partial["correct"])
-        self.assertEqual("Almost Correct", partial["result_type"])
-        self.assertTrue(partial["feedback"]["corrected_example"])
-
-    def test_sentence_upgrade_validates_meaning_strength_and_phrase_use(self) -> None:
-        result = evaluate_quiz_response(
-            item={
-                "quiz_type": "sentence_upgrade_battle",
-                "answer_mode": "typing",
-                "correct_answer": "A cyclist is riding down a busy street with cars in the background.",
-                "acceptable_answers": ["A cyclist is riding down a busy street with cars in the background."],
-                "metadata": {
-                    "weak_sentence": "A man is in the street.",
-                    "related_reusable_phrase": "in the background",
-                    "keywords": ["cyclist", "riding", "street", "cars", "in the background"],
-                    "reference_answer": "A cyclist is riding down a busy street with cars in the background.",
-                },
-            },
-            selected_answer="A cyclist is riding down the street with cars in the background.",
-            response_ms=8000,
-            confidence=3,
-        )
-
-        self.assertTrue(result["correct"])
-        self.assertEqual("Correct", result["result_type"])
-
-    def test_fix_the_mistake_allows_natural_alternative(self) -> None:
-        result = evaluate_quiz_response(
-            item={
-                "quiz_type": "fix_the_mistake",
-                "answer_mode": "typing",
-                "correct_answer": "A cyclist is riding down a busy street with cars in the background.",
-                "acceptable_answers": ["A cyclist is riding down a busy street with cars in the background."],
-                "metadata": {
-                    "keywords": ["cyclist", "riding", "street", "cars"],
-                    "reference_answer": "A cyclist is riding down a busy street with cars in the background.",
-                },
-            },
-            selected_answer="The cyclist is riding on a busy street near cars.",
-            response_ms=9000,
-            confidence=2,
-        )
-
-        self.assertTrue(result["correct"])
-        self.assertEqual("Correct", result["result_type"])
-
-    def test_use_it_or_lose_it_gives_partial_credit_for_weak_phrase_sentence(self) -> None:
-        result = evaluate_quiz_response(
-            item={
-                "quiz_type": "use_it_or_lose_it",
-                "answer_mode": "typing",
-                "correct_answer": "Cars are in the background while a cyclist rides down the street.",
-                "acceptable_answers": ["Cars are in the background while a cyclist rides down the street."],
-                "metadata": {
-                    "related_reusable_phrase": "in the background",
-                    "keywords": ["in the background", "cyclist", "street"],
-                    "reference_answer": "Cars are in the background while a cyclist rides down the street.",
-                },
-            },
-            selected_answer="in the background cyclist",
-            response_ms=5000,
-            confidence=1,
-        )
-
-        self.assertFalse(result["correct"])
-        self.assertEqual("Almost Correct", result["result_type"])
-        self.assertGreaterEqual(result["score"], 0.5)
-        self.assertTrue(result["feedback"]["corrected_example"])
 
 
 if __name__ == "__main__":

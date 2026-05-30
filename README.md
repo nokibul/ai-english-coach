@@ -5,9 +5,8 @@ An image-to-English learning web app that turns uploaded photos into reusable st
 - image-based lesson generation
 - simple and natural scene explanations
 - saved vocabulary, phrases, and sentence patterns
-- session quizzes plus adaptive mixed review
-- spaced repetition with later review scheduling
-- a daily 5-minute challenge
+- guided coverage practice for important visual details
+- a final evolution reveal that shows the description improving
 - XP, streaks, learner levels, and progress tracking
 - email + password login with email OTP verification
 - learner levels: `Beginner`, `Developing`, and `Advancing`
@@ -117,7 +116,7 @@ sudo journalctl -u ai-english-learner -f
   to `english_learner_app/`.
 - To change app data locations, set `APP_DATA_DIR`, or set `DATABASE_PATH` and
   `UPLOADS_DIR` separately.
-- `DEMO_MODE=true` still lets the full product flow run without a live model. Uploads still create lessons, quiz items, review items, and progress updates, but the lesson content is demo content.
+- `DEMO_MODE=true` still lets the full product flow run without a live model. Uploads still create image lessons, guided coverage focuses, and progress updates, but the lesson content is demo content.
 - To use cloud inference, set `AI_BACKEND=openai`, `DEMO_MODE=false`, and provide `OPENAI_API_KEY`.
 - If SMTP is not configured, OTP codes are printed to the terminal so you can still verify accounts during development.
 - Login and signup use email + password. Signup sends an email OTP before the account can log in.
@@ -125,10 +124,9 @@ sudo journalctl -u ai-english-learner -f
 
 ## Product behavior
 
-- Each uploaded image becomes a saved learning session with structured objects, actions, vocabulary, phrases, and quiz seeds.
-- Review items are scheduled with default intervals of 1 hour, 1 day, 3 days, and 7 days, then adapted based on learner performance.
-- Quiz selection prioritizes due review items, weak areas, and learner level so beginners see more support and strong learners get more production tasks.
-- The daily challenge mixes due items, weak areas, and recent session content into a short 5-question run.
+- Each uploaded image becomes a saved learning session with starter hints, sentence starters, articulation enhancement, and guided coverage focuses.
+- Guided coverage first polishes important details the learner already mentioned, then adds missing visual details with progressive support.
+- A session ends with a final evolution reveal showing the first description, completed focus areas, and final evolved description.
 - Progress tracking includes XP, streaks, learner level, mastered words, mastered phrases, and a weekly accuracy summary.
 
 ## Tests

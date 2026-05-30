@@ -8,21 +8,9 @@ const state = {
   currentSessionId: null,
   currentSession: null,
   settings: {
-    review_prompt_interval_seconds: 90,
-    quiz_retake_minutes: 20,
-    first_review_minutes: 60,
     max_upload_bytes: 25 * 1024 * 1024,
   },
   pendingVerificationEmail: "",
-  quizTimer: null,
-  quizDashboard: null,
-  currentQuizRun: null,
-  currentReviewSession: null,
-  currentQuizLaunch: { mode: "mixed" },
-  lastQuizReminderKey: "",
-  challenge: null,
-  review: null,
-  quizQuestionStartedAt: null,
   uploadPreviewUrl: "",
   starterHintPopover: {
     activeHintId: null,
@@ -46,6 +34,10 @@ const state = {
     articulationUpgrade: null,
     focusSupportLevels: {},
     focusHintVisibility: {},
+    activeCoverageSupportKey: "",
+    plannedCoverageFocusPath: [],
+    plannedCoverageFocusSourceText: "",
+    completedCoverageFocuses: [],
     layerRewards: [],
     allLayersBonusAwarded: false,
   },
@@ -68,7 +60,6 @@ const LEARNING_STAGES = Object.freeze({
   COVERAGE_COMPLETE: "coverage_complete",
   POLISH_STAGE: "polish_stage",
   FINAL_REVEAL: "final_reveal",
-  QUIZ: "quiz",
 });
 let sessionListObserver = null;
 
@@ -90,8 +81,6 @@ function cacheElements() {
     "closeDashboardButton",
     "dashboardModal",
     "dashboardContent",
-    "quizLauncherButton",
-    "quizDueBadge",
     "userBadge",
     "learnIntro",
     "composePanel",
@@ -121,11 +110,6 @@ function cacheElements() {
     "verificationEmailLabel",
     "verificationEmailInput",
     "resendOtpButton",
-    "quizModal",
-    "quizModalLabel",
-    "quizModalTitle",
-    "quizContent",
-    "closeQuizButton",
     "toast",
   ];
 
@@ -157,8 +141,6 @@ function bindEvents() {
   els.dashboardButton.addEventListener("click", openDashboardModal);
   els.themeToggleButton.addEventListener("click", toggleTheme);
   els.closeDashboardButton.addEventListener("click", closeDashboardModal);
-  els.quizLauncherButton.addEventListener("click", () => openQuizModal({ mode: "mixed" }));
-  els.closeQuizButton.addEventListener("click", closeQuizModal);
   document.addEventListener("click", (event) => {
     if (!event.target.closest?.(".starter-hint-chip, .starter-hint-popover")) {
       closeStarterHintPopovers();
@@ -314,17 +296,11 @@ async function bootstrap() {
 
     if (data.user) {
       applyUserState(data.user, data.stats, data.progress);
-      state.quizDashboard = data.quiz || null;
-      state.challenge = data.challenge || null;
-      state.review = data.review || null;
-      renderQuizButton();
       renderDashboardContent();
       await fetchSessions();
       await restoreSessionFromRoute();
-      startQuizPolling();
     } else {
       switchAuthTab("signup");
-      renderQuizButton();
       renderDashboardContent();
       showAuthOverlay(true);
     }
@@ -379,19 +355,12 @@ function clearUserState() {
   state.learnView = "compose";
   state.currentSessionId = null;
   state.currentSession = null;
-  state.quizDashboard = null;
-  state.currentQuizRun = null;
-  state.challenge = null;
-  state.review = null;
-  state.lastQuizReminderKey = "";
-  stopQuizPolling();
   teardownSessionObserver();
   updateHomeUrl({ replace: true });
   resetUploadPreview();
   renderLearnPlaceholder();
   renderSessionLibrary();
   renderProgressHeader();
-  renderQuizButton();
   renderDashboardContent();
   els.userBadge.textContent = "Guest mode";
   els.dashboardButton.disabled = false;
@@ -404,24 +373,6 @@ function renderProgressHeader() {
   const safe = state.progress || { xp_points: 0, streak_days: 0 };
   els.xpValue.textContent = safe.xp_points || 0;
   els.streakValue.textContent = safe.streak_days || 0;
-}
-
-function renderQuizButton() {
-  const dashboard = state.quizDashboard;
-  const activeRun = dashboard?.active_run;
-  const ready = Boolean(activeRun || dashboard?.can_start);
-  const dueCount = dashboard?.due_count || 0;
-
-  els.quizDueBadge.textContent = dueCount;
-  els.quizLauncherButton.disabled = !ready;
-  els.quizLauncherButton.classList.toggle("quiz-ready", ready);
-  els.quizLauncherButton.classList.toggle(
-    "quiz-pulse",
-    Boolean(ready && (activeRun || dueCount > 0))
-  );
-  els.quizLauncherButton.querySelector(".floating-quiz-label").textContent = activeRun
-    ? "Resume Quiz"
-    : "Start Quiz";
 }
 
 function renderLearnPlaceholder() {
@@ -469,14 +420,17 @@ function createInitialSessionFlow(session = {}) {
     coverageLayers: null,
     coverageComplete: false,
     skippedCoverageLayers: [],
+    plannedCoverageFocusPath: [],
+    plannedCoverageFocusSourceText: "",
+    completedCoverageFocuses: [],
     polishUnlocked: false,
     focusSupportLevels: {},
     focusHintVisibility: {},
+    activeCoverageSupportKey: "",
     articulationUpgrade: null,
     finalPolishedText: "",
     layerRewards: [],
     allLayersBonusAwarded: false,
-    quizLaunchStarted: false,
   };
 }
 
@@ -484,7 +438,6 @@ function normalizeLearningStage(stage) {
   const value = String(stage || "").trim();
   const aliases = {
     coverage_feedback: LEARNING_STAGES.FIRST_FEEDBACK,
-    quiz_ready: LEARNING_STAGES.QUIZ,
     learn: LEARNING_STAGES.UPLOAD_IMAGE,
     image: LEARNING_STAGES.UPLOAD_IMAGE,
     guided_write: LEARNING_STAGES.INITIAL_ATTEMPT,
@@ -493,7 +446,7 @@ function normalizeLearningStage(stage) {
     feedback: LEARNING_STAGES.FIRST_FEEDBACK,
     improve: LEARNING_STAGES.COVERAGE_LAYERS,
     upgrade: LEARNING_STAGES.POLISH_STAGE,
-    reward: LEARNING_STAGES.QUIZ,
+    reward: LEARNING_STAGES.FINAL_REVEAL,
   };
   const normalized = aliases[value] || value;
   return Object.values(LEARNING_STAGES).includes(normalized) ? normalized : "";
@@ -562,7 +515,6 @@ function updateAppHeaderForStage(stage) {
     [LEARNING_STAGES.COVERAGE_COMPLETE]: 5,
     [LEARNING_STAGES.POLISH_STAGE]: 5,
     [LEARNING_STAGES.FINAL_REVEAL]: 5,
-    [LEARNING_STAGES.QUIZ]: 5,
   };
   const stepNumber = stepMap[normalized] || 1;
   topbar?.classList.toggle("upload-app-header", true);
@@ -590,9 +542,6 @@ function updateAppHeaderForCoverageFocus(current, total) {
 function inferLearningStage(step, flow, session) {
   const current = normalizeLearningStage(flow?.stage);
   const upgrade = flow?.articulationUpgrade;
-  if (flow?.quizLaunchStarted || current === LEARNING_STAGES.QUIZ) {
-    return LEARNING_STAGES.QUIZ;
-  }
   if (upgrade?.finalized || flow?.finalPolishedText || current === LEARNING_STAGES.FINAL_REVEAL) {
     return LEARNING_STAGES.FINAL_REVEAL;
   }
@@ -636,7 +585,6 @@ function renderStepProgress(activeStep) {
     ["coverage_complete", "Covered"],
     ["polish_stage", "Polish"],
     ["final_reveal", "Final"],
-    ["quiz", "Quiz"],
   ];
   const activeStage = normalizeLearningStage(activeStep) || normalizeLearningStage(state.sessionFlow?.stage) || LEARNING_STAGES.INITIAL_ATTEMPT;
   const stageAliases = {
@@ -648,8 +596,7 @@ function renderStepProgress(activeStep) {
     improve: LEARNING_STAGES.COVERAGE_LAYERS,
     coverage_complete: LEARNING_STAGES.COVERAGE_COMPLETE,
     upgrade: LEARNING_STAGES.POLISH_STAGE,
-    quiz: LEARNING_STAGES.QUIZ,
-    reward: LEARNING_STAGES.QUIZ,
+    reward: LEARNING_STAGES.FINAL_REVEAL,
   };
   const activeKey = stageAliases[activeStage] || activeStage;
   const activeIndex = steps.findIndex(([key]) => key === activeStep);
@@ -726,6 +673,57 @@ function playTapAnimation(element) {
   }, 220);
 }
 
+function applyPreviewAspectRatio(image, frame) {
+  if (!image || !frame) {
+    return;
+  }
+  const width = image.naturalWidth || image.width;
+  const height = image.naturalHeight || image.height;
+  if (!width || !height) {
+    return;
+  }
+  const ratio = width / height;
+  frame.style.setProperty("--preview-aspect", `${width} / ${height}`);
+  frame.style.setProperty("--preview-aspect-number", ratio.toFixed(5));
+  frame.dataset.previewOrientation = ratio > 1.08 ? "landscape" : ratio < 0.92 ? "portrait" : "square";
+  frame.dataset.previewAspectNumber = String(ratio);
+  syncPreviewFrameSize(frame);
+  bindPreviewFrameResize(frame);
+}
+
+function syncPreviewFrameSize(frame) {
+  if (!frame) {
+    return;
+  }
+  const ratio = Number(frame.dataset.previewAspectNumber);
+  const parent = frame.parentElement;
+  if (!Number.isFinite(ratio) || ratio <= 0 || !parent) {
+    return;
+  }
+  const styles = getComputedStyle(frame);
+  const maxHeight = Number.parseFloat(styles.maxHeight);
+  const availableWidth = parent.clientWidth || frame.clientWidth;
+  if (!Number.isFinite(maxHeight) || maxHeight <= 0 || !availableWidth) {
+    return;
+  }
+  frame.style.width = `${Math.min(availableWidth, maxHeight * ratio)}px`;
+}
+
+function bindPreviewFrameResize(frame) {
+  if (!frame || frame.dataset.previewResizeBound === "true") {
+    return;
+  }
+  frame.dataset.previewResizeBound = "true";
+  if ("ResizeObserver" in window) {
+    const observer = new ResizeObserver(() => syncPreviewFrameSize(frame));
+    observer.observe(frame.parentElement || frame);
+    observer.observe(frame);
+    frame.previewResizeObserver = observer;
+    return;
+  }
+  window.addEventListener("resize", () => syncPreviewFrameSize(frame));
+}
+
 function renderWriteStep(session) {
   const starterHints = getStarterIdeaHints(session);
   const draft = prepareInitialAttemptDraft(state.sessionFlow, session);
@@ -733,10 +731,9 @@ function renderWriteStep(session) {
   const starterClass = draft.isStarter ? " starter-prefill" : "";
   els.sessionDetailPanel.innerHTML = `
     <div class="journey-shell focused-step-shell initial-attempt-shell">
-      ${renderStepProgress(LEARNING_STAGES.INITIAL_ATTEMPT)}
       <section class="focused-writing-card initial-attempt-card">
         <div class="focused-copy">
-          <h3>Describe this image in 1-2 sentences.</h3>
+          <h3>Describe this image.</h3>
           <p class="muted initial-attempt-helper">Start simple. You can improve it later.</p>
         </div>
         <div class="focused-image-frame">
@@ -765,10 +762,9 @@ function renderWriteStep(session) {
           id="learnerExplanationInput"
           class="focused-writing-input guided-writing-input${starterClass}"
           rows="4"
-          maxlength="250"
           placeholder="Write your description here..."
         >${escapeHtml(draftText)}</textarea>
-          <div id="initialAttemptCount" class="character-count">${draftText.length}/250</div>
+          <div id="initialAttemptCount" class="character-count">${draftText.length} characters</div>
         </div>
         <button id="submitWritingButton" class="primary-button journey-primary-button" type="button">
           Submit
@@ -780,6 +776,13 @@ function renderWriteStep(session) {
   document.getElementById("submitWritingButton").addEventListener("click", () => {
     submitExplanationFeedback(session, { mode: "first" });
   });
+  const previewImage = els.sessionDetailPanel.querySelector(".focused-image-preview");
+  const previewFrame = previewImage?.closest(".focused-image-frame");
+  if (previewImage?.complete) {
+    applyPreviewAspectRatio(previewImage, previewFrame);
+  } else {
+    previewImage?.addEventListener("load", () => applyPreviewAspectRatio(previewImage, previewFrame), { once: true });
+  }
   els.sessionDetailPanel.querySelectorAll("[data-insert-hint]").forEach((button) => {
     button.addEventListener("click", (event) => {
       event.stopPropagation();
@@ -1356,21 +1359,6 @@ function renderInitialAttemptFeedbackStep(session, feedback, initialFeedback) {
   els.sessionDetailPanel.innerHTML = `
     <div class="ai-enhancement-backdrop ai-enhancement-screen">
       <section class="ai-enhancement-modal coach-reveal" ${coachRevealStyle(0)} aria-labelledby="aiEnhancementTitle">
-        <div class="ai-enhancement-status" aria-label="Learning progress">
-          <button class="ai-enhancement-back-button" type="button" aria-label="Back to writing">
-            <span aria-hidden="true">←</span>
-          </button>
-          <div class="ai-enhancement-progress">
-            <strong>Step 2 of 5</strong>
-            ${renderAiEnhancementDots()}
-          </div>
-          <div class="ai-enhancement-stats">
-            <span aria-label="Streak">🔥 ${escapeHtml(String(state.progress?.streak_days || state.user?.streak_days || 4))}</span>
-            <i aria-hidden="true"></i>
-            <span>XP ${escapeHtml(String(state.progress?.xp_points || 860))}</span>
-          </div>
-        </div>
-
         <div class="ai-enhancement-image-frame">
           <img src="${escapeHtml(session.image_url || "")}" alt="Image being described">
         </div>
@@ -1410,14 +1398,6 @@ function renderInitialAttemptFeedbackStep(session, feedback, initialFeedback) {
     </div>
   `;
 
-  els.sessionDetailPanel.querySelector(".ai-enhancement-back-button")?.addEventListener("click", () => {
-    if ((state.sessionFlow.attempts || []).length > 1) {
-      renderSessionStep("improve", { stage: state.sessionFlow.initialImprovementContinuationStage || enhancementContinuationStage(feedback) });
-    } else {
-      renderSessionStep("write");
-    }
-    window.scrollTo({ top: 0, behavior: "smooth" });
-  });
   document.getElementById("feedbackPrimaryButton").addEventListener("click", () => {
     commitInitialImprovementDraft(
       cleanUiText(document.getElementById("initialImprovementPreview")?.textContent) || draft
@@ -2399,9 +2379,11 @@ function buildProgressiveSuggestions(feedback, session) {
   if (direct.length) {
     return direct;
   }
-  const challenge = cleanUiText(feedback?.specific_guidance?.next_challenge || feedback?.next_challenge);
-  if (challenge) {
-    return [challenge];
+  const focusInstruction = cleanUiText(
+    feedback?.specific_guidance?.next_focus_instruction || feedback?.next_focus_instruction
+  );
+  if (focusInstruction) {
+    return [focusInstruction];
   }
   return buildGuidedNextSteps(feedback, session).slice(0, 2);
 }
@@ -2563,6 +2545,7 @@ function renderImproveStep(session) {
   state.sessionFlow.coverageLayers = coverageLayers;
   state.sessionFlow.coverageComplete = Boolean(coverageLayers.complete);
   state.sessionFlow.polishUnlocked = Boolean(coverageLayers.complete);
+  resetCoverageSupportStateForNewLayer(coverageLayers.currentLayer);
   const upgradeSuggestions = buildArticulationUpgradeSuggestions(session, latestFeedback, latestText);
   const upgradeState = normalizeArticulationUpgradeState(
     state.sessionFlow.articulationUpgrade,
@@ -2649,8 +2632,7 @@ function renderImproveStep(session) {
   const coverageInput = document.getElementById("learnerImproveInput");
   const coverageCount = document.getElementById("coverageInputCount");
   coverageInput?.addEventListener("input", () => {
-    coverageInput.value = coverageInput.value.slice(0, 250);
-    if (coverageCount) coverageCount.textContent = `${coverageInput.value.length}/250`;
+    if (coverageCount) coverageCount.textContent = `${coverageInput.value.length} characters`;
   });
 
   document.getElementById("submitImproveButton")?.addEventListener("click", async () => {
@@ -2660,12 +2642,12 @@ function renderImproveStep(session) {
       return;
     }
     const baseText = cleanUiText(document.getElementById("evolvingParagraph")?.textContent || rewriteDraft);
-    const improvedText = mergeParagraphDetail(baseText, detailText);
+    const improvedText = mergeParagraphFocusDetail(baseText, detailText, coverageLayers.currentLayer);
     resetFocusSupportLevel(coverageLayers.currentLayer);
     hideCoverageLevelHints(coverageLayers.currentLayer);
     showCoverageLayerSuccess(coverageLayers.currentLayer);
     await new Promise((resolve) => window.setTimeout(resolve, 420));
-    requestImprovementFeedback(session, state.sessionFlow.explanation, improvedText);
+    requestImprovementFeedback(session, state.sessionFlow.explanation, improvedText, coverageLayers.currentLayer);
   });
   document.getElementById("coverageHelpButton")?.addEventListener("click", () => {
     advanceCoverageHelp(coverageLayers.currentLayer, escalation.level || 1);
@@ -2704,8 +2686,8 @@ function renderImproveStep(session) {
       upgradeState.justApplied = false;
     }
   });
-  document.getElementById("continueToQuizButton")?.addEventListener("click", () => {
-    startPostImproveQuiz(session);
+  document.getElementById("finishSessionButton")?.addEventListener("click", () => {
+    openNewSessionComposer();
   });
   els.sessionDetailPanel.querySelectorAll("[data-insert-phrase]").forEach((button) => {
     button.addEventListener("click", () => {
@@ -2854,10 +2836,9 @@ function renderImproveEditor({ rewriteDraft, currentFocus, hintGroups, articulat
           id="learnerImproveInput"
           class="continuation-input"
           rows="4"
-          maxlength="250"
           placeholder="Write your sentence..."
         ></textarea>
-        <span id="coverageInputCount" class="coverage-input-count">0/250</span>
+        <span id="coverageInputCount" class="coverage-input-count">0 characters</span>
       </div>
     </section>
 
@@ -2868,7 +2849,7 @@ function renderCoverageFocusTabs(articulation = {}) {
   const layers = (articulation.layers || []).slice(0, 5);
   if (!layers.length) return renderTinyCoverageProgress(articulation);
   return `
-    <nav class="coverage-focus-tabs coach-reveal" ${coachRevealStyle(0)} aria-label="Coverage focus progress">
+    <nav class="coverage-focus-tabs" aria-label="Coverage focus progress">
       ${layers.map((layer, index) => {
         const state = layer.completed ? "done" : layer.current ? "active" : "upcoming";
         const label = coverageTabLabel(layer, index);
@@ -2918,12 +2899,16 @@ function coverageFocusHelpDisplay({ focus = {}, layer = {}, escalation = {}, cur
   const supportPrompt = supportPromptForLevel(layer, level);
   const defaultQuestion = focusQuestionText(focus, layer);
   const fallbackSupport = coverageSupportPrompt(focus, escalation, currentFocus) || "Add one more clear detail.";
+  const sourceText = cleanUiText(layer?.sourceText || "");
+  const sourceNote = isPolishCoverageLayer(layer) && sourceText
+    ? `Your phrase: "${sourceText}"`
+    : "";
 
   if (level >= 3) {
     const frame = sentenceFrameForFocus(layer, session, supportPrompt);
     return {
       heading: frame,
-      support: "Finish the sentence with one clear detail.",
+      support: sourceNote || "Finish the sentence with one clear detail.",
       frame: "",
     };
   }
@@ -2932,14 +2917,14 @@ function coverageFocusHelpDisplay({ focus = {}, layer = {}, escalation = {}, cur
     const prompt = supportPrompt && !isSentenceFrameText(supportPrompt) ? supportPrompt : "";
     return {
       heading: prompt || "Look for one visible clue",
-      support: "Add just one simple detail. Keep your sentence short.",
+      support: sourceNote || "Add just one simple detail. Keep your sentence short.",
       frame: "",
     };
   }
 
   return {
     heading: isSentenceFrameText(supportPrompt) ? defaultQuestion : supportPrompt || defaultQuestion,
-    support: fallbackSupport,
+    support: sourceNote || fallbackSupport,
     frame: "",
   };
 }
@@ -3007,6 +2992,18 @@ function applyManualFocusSupportLevel(escalation = {}, layer = null, session = {
     manualSupportLevel: stored,
     message: layer ? supportiveLayerMessage(layer, level, session) : escalation.message,
   };
+}
+
+function resetCoverageSupportStateForNewLayer(layer = null) {
+  if (!state.sessionFlow) return;
+  const key = focusSupportKey(layer);
+  if (state.sessionFlow.activeCoverageSupportKey === key) {
+    return;
+  }
+  state.sessionFlow.activeCoverageSupportKey = key;
+  state.sessionFlow.focusSupportLevels = {};
+  state.sessionFlow.focusHintVisibility = {};
+  persistCurrentSessionFlow();
 }
 
 function increaseFocusSupportLevel(layer, currentLevel = 1) {
@@ -3225,7 +3222,7 @@ function extractShortVisualPhrase(value) {
 }
 
 function supportLevelPromptText(item = {}) {
-  return cleanUiText(item?.prompt || item?.question || item?.text || item?.hint || "");
+  return cleanUiText(item?.prompt || item?.text || item?.hint || "");
 }
 
 function supportLevelHints(layer = null, level = 1) {
@@ -3266,7 +3263,7 @@ function isBlockedGuidedHint(value) {
   if (!text) return true;
   return /^(what|where|who|which|can you|look|describe|add|mention|choose|name|replace|try writing|finish|use the sentence|keep your answer|help level|current focus|next)\b/.test(text)
     || /^(visible details? in|image|photo|picture|scene|detail|visible detail|visible details|one clear detail|the main subject|this part)\b/i.test(text)
-    || /\b(question|answer|focus|level)\b/.test(text);
+    || /\b(answer|focus|level)\b/.test(text);
 }
 
 function focusHintKeywords(layer = null, currentFocus = "") {
@@ -3311,6 +3308,87 @@ function mergeParagraphDetail(base, detail) {
   if (!cleanDetail) return ensureSentencePunctuation(cleanBase);
   const separator = /[.!?]$/.test(cleanBase) ? " " : ". ";
   return `${cleanBase}${separator}${ensureSentencePunctuation(cleanDetail)}`.trim();
+}
+
+function mergeParagraphFocusDetail(base, detail, layer = null) {
+  if (!isPolishCoverageLayer(layer)) {
+    return mergeParagraphDetail(base, detail);
+  }
+  const cleanBase = cleanUiText(base).replace(/\s+$/g, "");
+  const cleanDetail = cleanUiText(detail);
+  if (!cleanBase) return ensureSentencePunctuation(cleanDetail);
+  if (!cleanDetail) return ensureSentencePunctuation(cleanBase);
+  if (normalizeClientText(cleanBase).includes(normalizeClientText(cleanDetail))) {
+    return ensureSentencePunctuation(cleanBase);
+  }
+  const source = cleanUiText(layer.sourceText || "");
+  const replacement = polishReplacementText(cleanDetail, source, layer);
+  if (source && normalizeClientText(source) && normalizeClientText(cleanBase).includes(normalizeClientText(source))) {
+    return ensureSentencePunctuation(replaceTextIgnoringCase(cleanBase, source, replacement));
+  }
+  const fallbackSource = bestExistingFocusPhrase(cleanBase, layer);
+  if (fallbackSource) {
+    return ensureSentencePunctuation(replaceTextIgnoringCase(cleanBase, fallbackSource, polishReplacementText(cleanDetail, fallbackSource, layer)));
+  }
+  return mergeParagraphDetail(cleanBase, cleanDetail);
+}
+
+function isPolishCoverageLayer(layer = null) {
+  return layer?.mode === "polish_existing_detail" || layer?.alreadyMentioned === true;
+}
+
+function polishReplacementText(detail = "", source = "", layer = {}) {
+  const cleanDetail = cleanUiText(detail).replace(/[.!?]+$/g, "");
+  const cleanSource = cleanUiText(source).replace(/[.!?]+$/g, "");
+  if (!cleanDetail) return cleanSource;
+  if (!cleanSource) return cleanDetail;
+  const sourceKey = normalizeClientText(cleanSource);
+  const detailKey = normalizeClientText(cleanDetail);
+  if (detailKey.includes(sourceKey)) {
+    return cleanDetail;
+  }
+  const sourcePrefix = cleanSource.match(/^(covered with|has|have|with|near|at|in|on|beside|behind|around)\b/i)?.[0] || "";
+  if (sourcePrefix && !new RegExp(`^${escapeRegExp(sourcePrefix)}\\b`, "i").test(cleanDetail)) {
+    return `${sourcePrefix} ${cleanDetail}`.replace(/\s+/g, " ").trim();
+  }
+  const framePrefix = supportFramePrefix(layer);
+  if (framePrefix && !new RegExp(`^${escapeRegExp(framePrefix)}\\b`, "i").test(cleanDetail)) {
+    return `${framePrefix} ${cleanDetail}`.replace(/\s+/g, " ").trim();
+  }
+  return cleanDetail;
+}
+
+function supportFramePrefix(layer = {}) {
+  const levelThree = supportPromptForLevel(layer, 3);
+  const beforeBlank = cleanUiText(levelThree).split(/_{2,}/)[0]?.trim() || "";
+  if (!beforeBlank) return "";
+  const match = beforeBlank.match(/\b(covered with|has|have|with|near|at|in|on|beside|behind|around)\s*$/i);
+  return match ? match[1] : "";
+}
+
+function replaceTextIgnoringCase(base = "", source = "", replacement = "") {
+  const pattern = new RegExp(escapeRegExp(source), "i");
+  return cleanUiText(base).replace(pattern, replacement);
+}
+
+function bestExistingFocusPhrase(base = "", layer = {}) {
+  const text = cleanUiText(base);
+  const normalized = normalizeClientText(text);
+  if (!text || !normalized) return "";
+  const terms = dynamicTargetTerms(layer)
+    .map(normalizeClientText)
+    .filter((term) => term.length >= 4 && normalized.includes(term))
+    .sort((a, b) => b.length - a.length);
+  if (!terms.length) return "";
+  const clauses = text.split(/\s*(?:,|;|\band\b)\s*/i).map((item) => item.trim()).filter(Boolean);
+  const match = clauses
+    .map((clause) => ({
+      clause,
+      score: terms.filter((term) => normalizeClientText(clause).includes(term)).length,
+    }))
+    .filter((item) => item.score > 0)
+    .sort((a, b) => b.score - a.score || a.clause.length - b.clause.length)[0];
+  return match?.clause || "";
 }
 
 function ensureSentencePunctuation(value) {
@@ -3363,19 +3441,6 @@ function nextCoverageLayer(articulation) {
   return layers.find((layer, index) => index > currentIndex && !layer.completed) || null;
 }
 
-function renderTinyCoverageProgress(articulation) {
-  const total = Math.max(1, articulation?.layers?.length || 1);
-  const current = Math.max(1, (articulation?.currentIndex || 0) + 1);
-  return `
-    <div class="tiny-coverage-progress">
-      <span>Focus ${current} of ${total}</span>
-      <div>
-        ${Array.from({ length: Math.min(total, 6) }, (_, index) => `<i class="${index + 1 === current ? "active" : index + 1 < current ? "done" : ""}"></i>`).join("")}
-      </div>
-    </div>
-  `;
-}
-
 function cleanFocusTitle(title) {
   return cleanUiText(title)
     .replace(/^[^\w]+/, "")
@@ -3395,7 +3460,7 @@ function focusVisualIcon(layer, title = "") {
 
 function showCoverageLayerSuccess(layer) {
   const label = cleanFocusTitle(shortFocusPreview(layer) || layer?.label || "Detail");
-  showToast(`✓ ${label} added`);
+  showToast(`✓ ${label} ${isPolishCoverageLayer(layer) ? "polished" : "added"}`);
   awardLocalXp(10);
 }
 
@@ -3793,8 +3858,8 @@ function renderFinalPolishedReveal(upgradeState, suggestions = [], feedback = {}
         </div>
       </section>
 
-      <button id="continueToQuizButton" class="primary-button journey-primary-button final-quiz-cta" type="button">
-        Continue to Quiz <span aria-hidden="true">→</span>
+      <button id="finishSessionButton" class="primary-button journey-primary-button" type="button">
+        Start New Image <span aria-hidden="true">→</span>
       </button>
     </section>
   `;
@@ -4134,11 +4199,11 @@ function buildCoverageLayerState(feedback, session, learnerText = "") {
   const plannedTargetsComplete = plannedCoverageTargetsComplete(feedback, session, learnerText);
   const serverCoverageComplete = feedback?.learning_flow?.coverage_complete === true
     || String(feedback?.coverage_engine?.status || "").toLowerCase() === "complete";
-  const complete = Boolean(
-    gate.complete ||
-    plannedTargetsComplete ||
-    serverCoverageComplete
-  );
+  const hasPlannedFocusPath = hasCoverageFocusPlan(session?.analysis || {});
+  const visualCoverageComplete = gate.complete || serverCoverageComplete;
+  const complete = hasPlannedFocusPath
+    ? Boolean(plannedTargetsComplete)
+    : Boolean(visualCoverageComplete);
   if (complete) {
     layers.forEach((layer) => {
       layer.current = false;
@@ -4157,25 +4222,32 @@ function buildCoverageLayerState(feedback, session, learnerText = "") {
 
 function plannedCoverageTargetsComplete(feedback = {}, session = {}, learnerText = "") {
   const analysis = session?.analysis || {};
-  const hasPlannedFocuses = Array.isArray(analysis.coverageFocuses)
-    ? analysis.coverageFocuses.length > 0
-    : Array.isArray(analysis.coverage_focuses) && analysis.coverage_focuses.length > 0;
-  if (!hasPlannedFocuses) {
+  if (!hasCoverageFocusPlan(analysis)) {
     return false;
   }
-  const normalizedText = normalizeClientText(learnerText);
-  if (!normalizedText) {
-    return false;
-  }
-  const targets = analysisArticulationTargets(analysis);
-  return targets.length > 0 && targets.every((target) => (
-    dynamicTargetCompleted(target, feedback, analysis, normalizedText)
-  ));
+  const path = plannedCoverageFocusPath(feedback, session, learnerText);
+  const completed = completedCoverageFocusSet();
+  return path.length > 0 && path.every((target) => completed.has(target.key || target.id));
 }
 
 function coverageLayerDefinitions(feedback, session, learnerText = "") {
   const normalizedText = normalizeClientText(learnerText);
   const analysis = session?.analysis || {};
+  if (hasCoverageFocusPlan(analysis)) {
+    const skipped = new Set(state?.sessionFlow?.skippedCoverageLayers || []);
+    const completed = completedCoverageFocusSet();
+    return plannedCoverageFocusPath(feedback, session, learnerText)
+      .filter((target) => !skipped.has(target.key || target.id))
+      .map((target) => ({
+        ...target,
+        key: target.key || target.id,
+        id: target.id || target.key,
+        dynamic: true,
+        coverageArea: target.visualFocus || target.label,
+        completed: completed.has(target.key || target.id),
+      }))
+      .slice(0, 6);
+  }
   const allTargets = analysisArticulationTargets(analysis);
   const missingAreas = missingVisualAreaLabels(feedback, session, learnerText);
   if (!missingAreas.length) {
@@ -4200,6 +4272,26 @@ function coverageLayerDefinitions(feedback, session, learnerText = "") {
       completed: false,
     };
   }).slice(0, 6);
+}
+
+function hasCoverageFocusPlan(analysis = {}) {
+  return Array.isArray(analysis.coverageFocuses)
+    ? analysis.coverageFocuses.length > 0
+    : Array.isArray(analysis.coverage_focuses) && analysis.coverage_focuses.length > 0;
+}
+
+function completedCoverageFocusSet() {
+  return new Set(state?.sessionFlow?.completedCoverageFocuses || []);
+}
+
+function markCoverageFocusCompleted(layer = null) {
+  const key = layer?.key || layer?.id;
+  if (!key) return;
+  state.sessionFlow.completedCoverageFocuses = uniqueWritingHints([
+    ...(state.sessionFlow.completedCoverageFocuses || []),
+    key,
+  ]);
+  persistCurrentSessionFlow();
 }
 
 function missingVisualAreaLabels(feedback = {}, session = {}, learnerText = "") {
@@ -4232,6 +4324,140 @@ function missingVisualAreaLabels(feedback = {}, session = {}, learnerText = "") 
     .map((item) => item.replace(/_/g, " "))
     .filter((item) => !/no major visual detail/i.test(item))
     .slice(0, 6);
+}
+
+function plannedCoverageFocusPath(feedback = {}, session = {}, learnerText = "") {
+  const analysis = session?.analysis || {};
+  const targets = analysisArticulationTargets(analysis);
+  if (!targets.length) return [];
+  const sourceText = cleanUiText(learnerText);
+  const storedPath = Array.isArray(state?.sessionFlow?.plannedCoverageFocusPath)
+    ? state.sessionFlow.plannedCoverageFocusPath
+    : [];
+  if (storedPath.length) {
+    return storedPath.map((item, index) => normalizePlannedCoverageFocus(item, index)).filter(Boolean);
+  }
+
+  const normalizedText = normalizeClientText(sourceText);
+  const covered = [];
+  const missing = [];
+  targets.forEach((target, index) => {
+    const alreadyMentioned = target.alreadyMentioned === true
+      || target.mode === "polish_existing_detail"
+      || dynamicTargetCompleted(target, feedback, analysis, normalizedText);
+    const mode = alreadyMentioned ? "polish_existing_detail" : "add_missing_detail";
+    const sourcePhrase = alreadyMentioned
+      ? cleanUiText(target.sourceText || sourcePhraseForCoverageTarget(sourceText, target))
+      : "";
+    const planned = normalizePlannedCoverageFocus({
+      ...target,
+      key: target.key || target.id || `coverage_focus_${index + 1}`,
+      id: target.id || target.key || `coverage_focus_${index + 1}`,
+      mode,
+      alreadyMentioned,
+      sourceText: sourcePhrase,
+      prompt: coverageFocusModePrompt(target, mode, sourcePhrase),
+      expansionPrompt: coverageFocusModeExpansionPrompt(target, mode),
+    }, index);
+    if (!planned) return;
+    if (mode === "polish_existing_detail") {
+      covered.push(planned);
+    } else {
+      missing.push(planned);
+    }
+  });
+  const plannedPath = [...covered, ...missing].slice(0, 6);
+  if (state?.sessionFlow) {
+    state.sessionFlow.plannedCoverageFocusPath = plannedPath;
+    state.sessionFlow.plannedCoverageFocusSourceText = sourceText;
+    state.sessionFlow.completedCoverageFocuses = state.sessionFlow.completedCoverageFocuses || [];
+    persistCurrentSessionFlow();
+  }
+  return plannedPath;
+}
+
+function normalizePlannedCoverageFocus(item = {}, index = 0) {
+  if (!item || typeof item !== "object") return null;
+  const id = cleanTargetId(item.id || item.key || `coverage_focus_${index + 1}_${item.label || item.title || item.visualFocus}`);
+  const title = cleanUiText(item.label || item.title || item.visualFocus || `Focus ${index + 1}`);
+  if (!id || !title) return null;
+  const mode = item.mode === "polish_existing_detail" ? "polish_existing_detail" : "add_missing_detail";
+  const alreadyMentioned = mode === "polish_existing_detail" || item.alreadyMentioned === true;
+  return {
+    ...item,
+    id,
+    key: id,
+    label: title,
+    title,
+    mode,
+    alreadyMentioned,
+    sourceText: cleanUiText(item.sourceText || item.source_text || ""),
+    prompt: cleanUiText(item.prompt || coverageFocusModePrompt(item, mode, item.sourceText)),
+    expansionPrompt: cleanUiText(item.expansionPrompt || coverageFocusModeExpansionPrompt(item, mode)),
+    supportLevels: normalizeCoverageSupportLevels(item.supportLevels || item.support_levels || [], title, mode, item.sourceText || ""),
+  };
+}
+
+function coverageFocusModePrompt(target = {}, mode = "add_missing_detail", sourceText = "") {
+  const title = cleanFocusTitle(target.label || target.title || target.visualFocus || "this part");
+  if (mode === "polish_existing_detail") {
+    const source = cleanUiText(sourceText);
+    if (source) return `You mentioned "${source}". Can you make that part clearer?`;
+    return `You mentioned ${stripLeadingArticle(title)}. Can you make that part clearer?`;
+  }
+  return cleanUiText(target.prompt) || `Add one clear detail about ${stripLeadingArticle(title)}.`;
+}
+
+function coverageFocusModeExpansionPrompt(target = {}, mode = "add_missing_detail") {
+  const title = cleanFocusTitle(target.label || target.title || target.visualFocus || "this part");
+  if (mode === "polish_existing_detail") {
+    return `Improve the part about ${stripLeadingArticle(title)} without repeating the whole sentence.`;
+  }
+  return cleanUiText(target.expansionPrompt) || `Keep your answer and add one clear detail about ${stripLeadingArticle(title)}.`;
+}
+
+function sourcePhraseForCoverageTarget(sourceText = "", target = {}) {
+  const text = cleanUiText(sourceText);
+  if (!text) return "";
+  const terms = dynamicTargetTerms(target)
+    .map(normalizeClientText)
+    .filter((term) => term.length >= 4);
+  if (!terms.length) return "";
+  const clauses = text.split(/\s*(?:,|;|\band\b)\s*/i).map((item) => item.trim()).filter(Boolean);
+  const scored = clauses
+    .map((clause) => {
+      const key = normalizeClientText(clause);
+      return {
+        clause,
+        key,
+        score: terms.filter((term) => key.includes(term) || term.includes(key)).length,
+      };
+    })
+    .filter((item) => item.score > 0)
+    .sort((a, b) => b.score - a.score || a.clause.length - b.clause.length);
+  const best = scored[0];
+  if (!best) return "";
+  return extractCompactSourcePhrase(best.clause, terms) || best.clause;
+}
+
+function extractCompactSourcePhrase(clause = "", terms = []) {
+  const text = cleanUiText(clause).replace(/[.!?]+$/g, "");
+  if (!text) return "";
+  for (const term of terms) {
+    const escaped = escapeRegExp(term).replace(/\s+/g, "\\s+");
+    const patterns = [
+      new RegExp(`\\b(covered with\\s+[^,;.]*${escaped}[^,;.]*)`, "i"),
+      new RegExp(`\\b(with\\s+[^,;.]*${escaped}[^,;.]*)`, "i"),
+      new RegExp(`\\b([^,;.]{0,35}${escaped}[^,;.]{0,35})`, "i"),
+    ];
+    for (const pattern of patterns) {
+      const match = text.match(pattern);
+      if (match?.[1]) {
+        return cleanUiText(match[1]).replace(/^(and|with)\s+with\s+/i, "with ");
+      }
+    }
+  }
+  return "";
 }
 
 function coverageCompletionGate(feedback = {}, session = {}, learnerText = "") {
@@ -4659,32 +4885,37 @@ function normalizeCoverageFocusTarget(focus, index = 0) {
     : Array.isArray(focus.support_levels)
       ? focus.support_levels
       : [];
-  const supportLevels = normalizeCoverageSupportLevels(rawSupportLevels, title);
+  const mode = focus.mode === "polish_existing_detail" ? "polish_existing_detail" : "add_missing_detail";
+  const sourceText = cleanUiText(focus.sourceText || focus.source_text || "");
+  const supportLevels = normalizeCoverageSupportLevels(rawSupportLevels, title, mode, sourceText);
   const firstPrompt = supportLevelPromptText(supportLevels.find((item) => Number(item?.level || 0) === 1));
   return {
     id: cleanTargetId(focus.id || `coverage_focus_${index + 1}_${title}`),
     label: title,
     prompt: firstPrompt || `What do you notice about ${title}?`,
-    expansionPrompt: `Keep your answer and add one clear detail about ${title}.`,
+    expansionPrompt: coverageFocusModeExpansionPrompt({ title }, mode),
     category: normalizeTargetCategory(title),
     visualFocus: title,
     hints: [],
     evidence: [],
     importance: Number(focus.importance || 0.7),
+    mode,
+    alreadyMentioned: focus.alreadyMentioned === true || focus.already_mentioned === true || mode === "polish_existing_detail",
+    sourceText,
     supportLevels,
   };
 }
 
-function normalizeCoverageSupportLevels(rawItems = [], title = "") {
+function normalizeCoverageSupportLevels(rawItems = [], title = "", mode = "add_missing_detail", sourceText = "") {
   const byLevel = new Map();
   (Array.isArray(rawItems) ? rawItems : []).forEach((item) => {
     if (!item || typeof item !== "object") return;
     const level = clampFocusSupportLevel(item.level);
     let prompt = supportLevelPromptText(item);
     if (!isCoverageSupportPrompt(prompt, level)) {
-      prompt = fallbackCoverageSupportPrompt(title, level);
+      prompt = fallbackCoverageSupportPrompt(title, level, mode, sourceText);
     }
-    const legacyHint = item.hint && !item.prompt && !item.question ? [item.hint] : [];
+    const legacyHint = item.hint && !item.prompt ? [item.hint] : [];
     const rawHints = Array.isArray(item.hints) ? item.hints : [];
     const hints = cleanCoverageLevelHintList([...legacyHint, ...rawHints], 3);
     byLevel.set(level, {
@@ -4693,11 +4924,18 @@ function normalizeCoverageSupportLevels(rawItems = [], title = "") {
       hints: hints.length ? hints : fallbackCoverageSupportHints(title, level),
     });
   });
-  return [1, 2, 3].map((level) => byLevel.get(level) || {
+  const levels = [1, 2, 3].map((level) => byLevel.get(level) || {
     level,
-    prompt: fallbackCoverageSupportPrompt(title, level),
+    prompt: fallbackCoverageSupportPrompt(title, level, mode, sourceText),
     hints: fallbackCoverageSupportHints(title, level),
   });
+  if (mode === "polish_existing_detail") {
+    levels[0] = {
+      ...levels[0],
+      prompt: fallbackCoverageSupportPrompt(title, 1, mode, sourceText),
+    };
+  }
+  return levels;
 }
 
 function isCoverageSupportPrompt(value = "", level = 1) {
@@ -4707,8 +4945,15 @@ function isCoverageSupportPrompt(value = "", level = 1) {
   return /\?$/.test(text) && !/^(what|where|who|which|can you|look|describe)\s*$/i.test(text);
 }
 
-function fallbackCoverageSupportPrompt(title = "", level = 1) {
+function fallbackCoverageSupportPrompt(title = "", level = 1, mode = "add_missing_detail", sourceText = "") {
   const lowerFocus = coverageSupportFocusPhrase(title);
+  if (mode === "polish_existing_detail") {
+    const source = cleanUiText(sourceText);
+    if (level <= 1) return source
+      ? `You mentioned "${source}". Can you make that part clearer?`
+      : `You mentioned ${lowerFocus}. Can you make that part clearer?`;
+    if (level === 2) return `Can you describe ${lowerFocus} more vividly?`;
+  }
   if (level <= 1) return `What do you notice about ${lowerFocus}?`;
   if (level === 2) return `Can you describe one specific detail about ${lowerFocus}?`;
   if (/^(how|the way)\b/i.test(lowerFocus)) return "It is ___.";
@@ -4733,7 +4978,7 @@ function fallbackCoverageSupportHints(title = "", level = 1) {
 function normalizeClientArticulationTarget(target, index = 0) {
   if (!target || typeof target !== "object") return null;
   const label = cleanUiText(target.label || target.title || target.visual_focus || target.focus || target.prompt);
-  const prompt = cleanUiText(target.prompt || target.question || "");
+  const prompt = cleanUiText(target.prompt || "");
   const visualFocus = cleanUiText(target.visual_focus || target.visualFocus || target.focus || label);
   const category = normalizeTargetCategory(target.category || label || prompt);
   if (!label && !prompt && !visualFocus) return null;
@@ -5932,8 +6177,8 @@ function buildImproveEscalationContext(session, attempts, issue, currentLayer = 
   const scoreDelta = latest && previous ? latest.score - previous.score : 0;
   const noMeaningfulImprovement = Boolean(previous && latest && scoreDelta < 5);
   let level = 1;
-  if (currentLayer?.dynamic) {
-    level = Math.min(MAX_FOCUS_SUPPORT_LEVEL, Math.max(1, repeatedFocusCount || 1));
+  if (currentLayer) {
+    level = 1;
   } else if (abstractLayer && repeatedFocusCount >= 2) {
     level = 3;
   } else if (abstractLayer && repeatedFocusCount >= 1) {
@@ -6857,29 +7102,19 @@ function onInitialAttemptInput(event) {
     state.sessionFlow.explanation = input.value || "";
     persistCurrentSessionFlow();
   }
-  limitWritingInput(event);
+  updateWritingInputCount(event);
   const value = input.value || "";
   const stillOnlyStarter = starter && normalizeClientText(value) === normalizeClientText(starter);
   input.classList.toggle("starter-prefill", Boolean(stillOnlyStarter));
 }
 
-function limitWritingInput(event) {
+function updateWritingInputCount(event) {
   const input = event.target;
   if (input.id === "learnerExplanationInput") {
-    input.value = String(input.value || "").slice(0, 250);
     const count = document.getElementById("initialAttemptCount");
     if (count) {
-      count.textContent = `${input.value.length}/250`;
+      count.textContent = `${String(input.value || "").length} characters`;
     }
-  }
-  const sentences = String(input.value || "").match(/[^.!?]+[.!?]*/g) || [];
-  if (sentences.length <= 2) {
-    return;
-  }
-  input.value = sentences.slice(0, 2).join("").trimStart();
-  const count = document.getElementById("initialAttemptCount");
-  if (count) {
-    count.textContent = `${input.value.length}/250`;
   }
 }
 
@@ -7351,6 +7586,9 @@ function resetUploadPreview() {
   }
   state.uploadPreviewUrl = "";
   els.imagePreview.src = "";
+  els.imagePreviewShell.removeAttribute("style");
+  delete els.imagePreviewShell.dataset.previewOrientation;
+  delete els.imagePreviewShell.dataset.previewAspectNumber;
   els.imagePreviewShell.classList.add("hidden");
   els.uploadPlaceholder.classList.remove("hidden");
   els.uploadProcessingLabel?.classList.add("hidden");
@@ -7374,10 +7612,11 @@ async function onFileChange() {
     return;
   }
 
+  els.imagePreview.addEventListener("load", () => applyPreviewAspectRatio(els.imagePreview, els.imagePreviewShell), { once: true });
   state.uploadPreviewUrl = URL.createObjectURL(file);
-  els.imagePreview.src = state.uploadPreviewUrl;
   els.imagePreviewShell.classList.remove("hidden");
   els.uploadPlaceholder.classList.add("hidden");
+  els.imagePreview.src = state.uploadPreviewUrl;
   els.fileNameLabel.textContent = `${file.name} (${formatBytes(file.size)})`;
   els.analyzeButton.disabled = !state.user;
   if (!state.user) {
@@ -7442,13 +7681,8 @@ async function onLogin(event) {
       }),
     });
     applyUserState(data.user, data.stats, data.progress);
-    await Promise.all([
-      fetchSessions(),
-      // refreshQuizDashboard(),
-      fetchReviewDashboard(),
-    ]);
+    await fetchSessions();
     await restoreSessionFromRoute();
-    startQuizPolling();
     showToast("Welcome back.");
   } catch (error) {
     showToast(error.message, true);
@@ -7470,13 +7704,8 @@ async function onVerifyOtp(event) {
       }),
     });
     applyUserState(data.user, data.stats, data.progress);
-    await Promise.all([
-      fetchSessions(),
-      // refreshQuizDashboard(),
-      fetchReviewDashboard(),
-    ]);
+    await fetchSessions();
     await restoreSessionFromRoute();
-    startQuizPolling();
     showToast("Your account is verified. You can start learning now.");
   } catch (error) {
     showToast(error.message, true);
@@ -7703,7 +7932,7 @@ async function submitExplanationFeedback(session) {
   }
 }
 
-async function requestImprovementFeedback(session, explanation, improvedText) {
+async function requestImprovementFeedback(session, explanation, improvedText, completedLayer = null) {
   const button = document.getElementById("submitImproveButton");
   setButtonBusy(button, true, "Checking...");
   showSessionThinkingState("Finding ways to improve your wording...", [
@@ -7733,6 +7962,7 @@ async function requestImprovementFeedback(session, explanation, improvedText) {
         ? LEARNING_STAGES.LAYER_SUCCESS
         : serverStage || null;
     feedback.learning_stage = nextStage || serverStage || feedback.learning_stage;
+    markCoverageFocusCompleted(completedLayer);
     const attempts = [
       ...(state.sessionFlow.attempts || []),
       {
@@ -7767,161 +7997,6 @@ function didCoverageImprove(previousFeedback = {}, nextFeedback = {}) {
   return coveredFeedbackTypes(nextFeedback).some((type) => !beforeCovered.has(type));
 }
 
-async function startPostImproveQuiz(session) {
-  if (state.sessionFlow.quizLaunchStarted) {
-    return;
-  }
-  state.sessionFlow.quizLaunchStarted = true;
-  state.sessionFlow.stage = LEARNING_STAGES.QUIZ;
-  if (state.currentSession) {
-    state.currentSession.learning_stage = LEARNING_STAGES.QUIZ;
-  }
-  persistCurrentSessionFlow();
-  const button = document.getElementById("continueToQuizButton");
-  const attempts = state.sessionFlow.attempts || [];
-  const firstAttempt = attempts[0] || {};
-  const latestAttempt = attempts[attempts.length - 1] || {};
-  const finalUpgrade = state.sessionFlow.articulationUpgrade;
-  const finalImprovedText = finalUpgrade?.finalized
-    ? finalUpgrade.answer || latestAttempt.text || ""
-    : latestAttempt.text || "";
-  const scoreImprovement = Math.max(0, (latestAttempt.score || 0) - (firstAttempt.score || 0));
-  setButtonBusy(button, true, "Building quiz...");
-  els.quizModal.classList.remove("hidden");
-  els.quizModalLabel.textContent = "Micro Quiz";
-  els.quizModalTitle.textContent = "Building 3 quick questions";
-  els.quizContent.innerHTML = renderAiThinkingState("Creating your quiz...", [
-    "Using your image explanation",
-    "Checking feedback and hint words",
-    "Making short reinforcement questions",
-  ]);
-  try {
-    const data = await api(`/api/sessions/${session.id}/post-improve-quiz`, {
-      method: "POST",
-      headers: jsonHeaders(),
-      body: JSON.stringify({
-        explanation: state.sessionFlow.explanation || firstAttempt.text || "",
-        learner_text: firstAttempt.text || state.sessionFlow.explanation || "",
-        improved_text: finalImprovedText,
-        feedback: latestAttempt.feedback || state.sessionFlow.feedback || {},
-        score_improvement: scoreImprovement,
-      }),
-    });
-    state.quizDashboard = data.dashboard || state.quizDashboard;
-    state.currentQuizRun = data.run;
-    renderQuizButton();
-    renderQuizRun(data.run);
-  } catch (error) {
-    state.sessionFlow.quizLaunchStarted = false;
-    persistCurrentSessionFlow();
-    showToast(error.message, true);
-    closeQuizModal();
-  } finally {
-    setButtonBusy(button, false, "Continue to Quiz");
-  }
-}
-
-function startQuizPolling() {
-  stopQuizPolling();
-  state.quizTimer = window.setInterval(async () => {
-    if (!state.user || document.hidden || !els.quizModal.classList.contains("hidden")) {
-      return;
-    }
-    await Promise.all([
-      // refreshQuizDashboard({ silent: true, nudge: true }),
-      fetchReviewDashboard({ silent: true }),
-    ]);
-  }, state.settings.review_prompt_interval_seconds * 1000);
-}
-
-function stopQuizPolling() {
-  if (state.quizTimer) {
-    window.clearInterval(state.quizTimer);
-    state.quizTimer = null;
-  }
-}
-
-async function refreshQuizDashboard({ silent = false, nudge = false } = {}) {
-  if (!state.user) {
-    state.quizDashboard = null;
-    renderQuizButton();
-    return null;
-  }
-
-  try {
-    const data = await api("/api/quiz/dashboard");
-    state.quizDashboard = data.dashboard || null;
-    state.challenge = data.challenge || state.challenge;
-    renderQuizButton();
-    renderDashboardContent();
-
-    if (nudge) {
-      maybeShowQuizReminder(data.dashboard);
-    }
-    return data.dashboard;
-  } catch (error) {
-    if (!silent) {
-      showToast(error.message, true);
-    }
-    return null;
-  }
-}
-
-async function fetchReviewDashboard({ silent = false } = {}) {
-  if (!state.user) {
-    state.review = null;
-    renderDashboardContent();
-    return null;
-  }
-
-  try {
-    const data = await api("/api/review/dashboard");
-    state.review = data.review || null;
-    if (data.progress) {
-      state.progress = data.progress;
-      renderProgressHeader();
-    }
-    renderDashboardContent();
-    return data.review;
-  } catch (error) {
-    if (!silent) {
-      showToast(error.message, true);
-    }
-    return null;
-  }
-}
-
-function maybeShowQuizReminder(dashboard) {
-  if (!dashboard) {
-    return;
-  }
-
-  const reminderKey = [
-    dashboard.active_run ? `run:${dashboard.active_run.id}` : "run:none",
-    `due:${dashboard.due_count}`,
-    `cooldown:${dashboard.cooldown_active ? "yes" : "no"}`,
-  ].join("|");
-
-  if (reminderKey === state.lastQuizReminderKey) {
-    return;
-  }
-
-  state.lastQuizReminderKey = reminderKey;
-
-  if (dashboard.active_run) {
-    showToast("Your quiz is waiting for you.");
-    return;
-  }
-
-  if (dashboard.can_start && dashboard.due_count > 0) {
-    showToast(
-      `Quiz ready: ${dashboard.available_question_count} question${pluralize(
-        dashboard.available_question_count
-      )} waiting.`
-    );
-  }
-}
-
 function openDashboardModal() {
   renderDashboardContent();
   els.dashboardModal.classList.remove("hidden");
@@ -7947,8 +8022,6 @@ function renderDashboardContent() {
     learner_level: 1,
     words_learned: 0,
     phrases_mastered: 0,
-    combo_streak: 0,
-    best_combo: 0,
     overall_accuracy_percent: 0,
     overall_mastery_percent: 0,
     recent_runs: [],
@@ -7975,10 +8048,6 @@ function renderDashboardContent() {
             <span class="status-label">Streak</span>
             <strong class="status-value">${progress.streak_days || 0}</strong>
           </article>
-          <article class="status-pill">
-            <span class="status-label">Combo</span>
-            <strong class="status-value">${progress.best_combo || progress.combo_streak || 0}</strong>
-          </article>
         </div>
       </section>
 
@@ -7986,11 +8055,11 @@ function renderDashboardContent() {
         <div class="section-head">
           <div>
             <p class="eyebrow">Quick Loop</p>
-            <h4>One image, one sentence</h4>
+            <h4>Image to evolved description</h4>
           </div>
         </div>
         <div class="empty-copy compact-empty-copy">
-          Upload an image, write one sentence, improve it once, then finish a 2-3 question micro quiz.
+          Upload an image, describe it, improve each part, then see the final evolution.
         </div>
       </section>
 
@@ -8004,11 +8073,11 @@ function renderDashboardContent() {
         ${
           recentSessions.length
             ? `
-            <div class="review-preview-grid">
+            <div class="session-preview-grid">
               ${recentSessions
                 .map(
                   (session) => `
-                    <article class="review-preview-card">
+                    <article class="session-preview-card">
                       <strong>${escapeHtml(session.title)}</strong>
                       <p class="muted">${escapeHtml(formatDate(session.created_at))}</p>
                     </article>
@@ -8042,7 +8111,6 @@ function renderLearnMode() {
   els.composePanel.classList.toggle("hidden", !showCompose);
   els.sessionWorkspace.classList.toggle("hidden", !showSession);
   els.newSessionButton.classList.toggle("hidden", !state.user);
-  els.quizLauncherButton.classList.add("hidden");
 }
 
 function renderSessionLibrary() {
@@ -8134,757 +8202,9 @@ async function onLogout() {
     showToast(error.message, true);
   } finally {
     closeDashboardModal();
-    closeQuizModal();
     clearUserState();
     switchAuthTab("signup");
   }
-}
-
-async function openReviewModal() {
-  state.currentReviewSession = null;
-  els.quizModal.classList.remove("hidden");
-  els.quizModalLabel.textContent = "Today’s Review";
-  els.quizModalTitle.textContent = "Preparing due items";
-  els.quizContent.innerHTML = `<div class="feedback-box">Loading your review cards...</div>`;
-  await startReviewSession();
-}
-
-async function startReviewSession() {
-  try {
-    const data = await api("/api/review/queue?mode=auto&limit=7");
-    state.review = data.review || state.review;
-    state.stats = data.stats || state.stats;
-    renderDashboardContent();
-    renderQuizButton();
-
-    const cards = Array.isArray(data.cards) ? data.cards : [];
-    if (!cards.length) {
-      renderReviewUnavailable("No review items are due right now.");
-      return;
-    }
-
-    state.currentReviewSession = {
-      cards,
-      index: 0,
-      answeredCount: 0,
-      correctCount: 0,
-      wrongCount: 0,
-    };
-    renderReviewCard();
-  } catch (error) {
-    renderReviewUnavailable(error.message || "Unable to load the review queue.");
-  }
-}
-
-async function openQuizModal(options = { mode: "mixed" }) {
-  state.currentReviewSession = null;
-  state.currentQuizLaunch = options;
-  els.quizModal.classList.remove("hidden");
-  els.quizModalLabel.textContent = options.mode === "session" ? "Quick Challenge" : "Quiz Mode";
-  els.quizModalTitle.textContent =
-    options.mode === "session" ? "Preparing your lesson quiz" : "Preparing your next round";
-  els.quizContent.innerHTML = renderAiThinkingState("Building your quiz...", [
-    "Choosing the best practice items",
-    "Balancing review and new language",
-    "Preparing questions",
-  ]);
-  await startOrResumeQuiz();
-}
-
-function closeQuizModal() {
-  state.currentQuizRun = null;
-  state.currentReviewSession = null;
-  state.quizQuestionStartedAt = null;
-  els.quizModal.classList.add("hidden");
-}
-
-async function startOrResumeQuiz() {
-  try {
-    const data = await api("/api/quiz/start", {
-      method: "POST",
-      headers: jsonHeaders(),
-      body: JSON.stringify(state.currentQuizLaunch || { mode: "mixed" }),
-    });
-    state.quizDashboard = data.dashboard || state.quizDashboard;
-    state.challenge = data.challenge || state.challenge;
-    renderQuizButton();
-    renderDashboardContent();
-
-    if (!data.run) {
-      renderQuizUnavailable(data.message || "Quiz is unavailable right now.");
-      return;
-    }
-
-    state.currentQuizRun = data.run;
-    renderQuizRun(data.run);
-  } catch (error) {
-    renderQuizUnavailable(error.message || "Unable to open the quiz right now.");
-  }
-}
-
-function renderQuizUnavailable(message) {
-  els.quizModalLabel.textContent = "Quiz Mode";
-  els.quizModalTitle.textContent = "Not ready yet";
-  els.quizContent.innerHTML = `
-    <div class="feedback-box">
-      <strong>${escapeHtml(message)}</strong>
-    </div>
-  `;
-}
-
-function renderReviewUnavailable(message) {
-  els.quizModalLabel.textContent = "Today’s Review";
-  els.quizModalTitle.textContent = "Not ready yet";
-  els.quizContent.innerHTML = `
-    <div class="feedback-box">
-      <strong>${escapeHtml(message)}</strong>
-    </div>
-  `;
-}
-
-function renderReviewCard() {
-  const reviewSession = state.currentReviewSession;
-  const card = reviewSession?.cards?.[reviewSession.index];
-  if (!reviewSession || !card) {
-    renderReviewSummary();
-    return;
-  }
-
-  state.quizQuestionStartedAt = Date.now();
-
-  const progressPercent = Math.max(
-    8,
-    Math.round((reviewSession.index / reviewSession.cards.length) * 100)
-  );
-
-  els.quizModalLabel.textContent = "Today’s Review";
-  els.quizModalTitle.textContent = `Card ${reviewSession.index + 1} of ${reviewSession.cards.length}`;
-  els.quizContent.innerHTML = `
-    <div class="quiz-flow quiz-question-enter">
-      <div class="quiz-progress-row">
-        <div>
-          <p class="eyebrow">Progress</p>
-          <strong>${reviewSession.answeredCount} answered · ${
-            reviewSession.cards.length - reviewSession.answeredCount
-          } left</strong>
-        </div>
-        <div class="mini-pill">${reviewSession.correctCount} right / ${reviewSession.wrongCount} wrong</div>
-      </div>
-      <div class="quiz-progress-track">
-        <span class="quiz-progress-bar" style="width: ${progressPercent}%"></span>
-      </div>
-      <div class="quiz-type-row">
-        <span class="mini-pill">${card.is_weak ? "Weak item" : "Review"}</span>
-        <span class="mini-pill">Mastery ${card.mastery_percent || 0}%</span>
-      </div>
-      <p class="review-question">${escapeHtml(card.prompt)}</p>
-      ${
-        card.context_note
-          ? `<div class="tip-box">Hint: ${escapeHtml(card.context_note)}</div>`
-          : ""
-      }
-      <div class="answer-options">
-        ${card.options
-          .map(
-            (option, index) => `
-              <button class="answer-button quiz-answer-button" type="button" data-review-option-index="${index}">
-                ${escapeHtml(option)}
-              </button>
-            `
-          )
-          .join("")}
-      </div>
-    </div>
-  `;
-
-  els.quizContent.querySelectorAll("[data-review-option-index]").forEach((button) => {
-    button.addEventListener("click", () => {
-      const option = card.options[Number(button.dataset.reviewOptionIndex)];
-      submitReviewAnswer(option);
-    });
-  });
-}
-
-function renderQuizRun(run) {
-  state.currentQuizRun = run;
-
-  if (!run || run.status === "completed" || !run.question) {
-    renderQuizSummary(run);
-    return;
-  }
-
-  const question = run.question;
-  state.quizQuestionStartedAt = Date.now();
-
-  const progressPercent = Math.max(
-    8,
-    Math.round(((question.question_index - 1) / run.total_questions) * 100)
-  );
-
-  els.quizModalLabel.textContent = run.source_label || (run.answered_count > 0 ? "Resume Quiz" : "Quiz Mode");
-  els.quizModalTitle.textContent = `Question ${question.question_index} of ${question.total_questions}`;
-  els.quizContent.innerHTML = `
-    <div class="quiz-flow quiz-question-enter">
-      <div class="quiz-progress-track">
-        <span class="quiz-progress-bar" style="width: ${progressPercent}%"></span>
-      </div>
-      <div class="quiz-top-stats">
-        <span>Progress <strong>${question.question_index}/${question.total_questions}</strong></span>
-        <span>Earned <strong>+${run.summary?.xp_earned || 0} XP</strong></span>
-        <span>Combo <strong>${state.progress?.combo_streak >= 2 ? "🔥 " : ""}x${state.progress?.combo_streak || 0}</strong></span>
-      </div>
-      <section class="quiz-question-card quiz-type-${escapeHtml(question.quiz_type)}">
-        <div class="quiz-type-row">
-          <span class="mini-pill">${escapeHtml(prettyQuizType(question.quiz_type))}</span>
-          <span class="mini-pill">${escapeHtml(prettyAnswerMode(question.answer_mode))}</span>
-          ${
-            question.related_reusable_phrase
-              ? `<span class="mini-pill">Phrase: ${escapeHtml(question.related_reusable_phrase)}</span>`
-              : ""
-          }
-          ${question.xp_value ? `<span class="mini-pill">${question.xp_value} XP</span>` : ""}
-        </div>
-        ${renderQuizTypeDetail(question)}
-        <p class="review-question">${escapeHtml(question.prompt)}</p>
-        ${
-          question.context_note
-            ? `<div class="tip-box">Hint: ${escapeHtml(question.context_note)}</div>`
-            : ""
-        }
-        <div id="quizAnswerZone"></div>
-      </section>
-    </div>
-  `;
-
-  const answerZone = document.getElementById("quizAnswerZone");
-  if (question.answer_mode === "typing") {
-    renderTypingAnswer(question, answerZone);
-    return;
-  }
-  if (question.answer_mode === "reorder") {
-    renderReorderAnswer(question, answerZone);
-    return;
-  }
-  if (question.answer_mode === "matching") {
-    renderMatchingPairsAnswer(question, answerZone);
-    return;
-  }
-  renderMultipleChoiceAnswer(question, answerZone);
-}
-
-function renderMultipleChoiceAnswer(question, container) {
-  let selectedOption = "";
-  const duel = question.quiz_type === "phrase_duel";
-  const chooseBetter = question.quiz_type === "choose_better";
-  const snap = question.quiz_type === "phrase_snap";
-  container.innerHTML = `
-    <div class="answer-options ${duel || chooseBetter ? "phrase-duel-options" : snap ? "phrase-snap-options" : ""}">
-      ${question.options
-        .map(
-          (option, index) => `
-            <button class="answer-button quiz-answer-button ${
-              duel || chooseBetter ? "phrase-duel-card" : snap ? "phrase-snap-option" : ""
-            }" type="button" data-option-index="${index}">
-              ${escapeHtml(option)}
-            </button>
-          `
-        )
-        .join("")}
-    </div>
-    <div class="quiz-submit-bar">
-      <button id="submitChoiceAnswer" class="primary-button quiz-submit-button" type="button" disabled>Submit answer</button>
-    </div>
-  `;
-
-  container.querySelectorAll("[data-option-index]").forEach((button) => {
-    button.addEventListener("click", () => {
-      selectedOption = question.options[Number(button.dataset.optionIndex)];
-      playTapAnimation(button);
-      container.querySelectorAll("[data-option-index]").forEach((item) => {
-        item.classList.toggle("selected", item === button);
-      });
-      document.getElementById("submitChoiceAnswer").disabled = false;
-    });
-  });
-  document.getElementById("submitChoiceAnswer").addEventListener("click", () => {
-    if (!selectedOption) {
-      showToast("Choose an answer first.", true);
-      return;
-    }
-    submitQuizAnswer(selectedOption);
-  });
-}
-
-function renderTypingAnswer(question, container) {
-  const relatedPhrase = question.related_reusable_phrase || question.metadata?.related_reusable_phrase || "";
-  const starterText = ["fix_the_mistake", "fix_the_sentence"].includes(question.quiz_type)
-    ? extractBrokenSentence(question.prompt)
-    : "";
-  container.innerHTML = `
-    <div class="typing-answer-shell">
-      ${
-        question.quiz_type === "use_it_or_lose_it" && relatedPhrase
-          ? `<div class="phrase-focus-chip">${escapeHtml(relatedPhrase)}</div>`
-          : ""
-      }
-      <textarea id="typingAnswerInput" class="quiz-text-input" rows="4" placeholder="${escapeHtml(
-        ["fix_the_mistake", "fix_the_sentence"].includes(question.quiz_type) ? "Edit the sentence here..." : "Type your answer here..."
-      )}">${escapeHtml(starterText)}</textarea>
-      ${
-        question.metadata?.keywords?.length
-          ? `<p class="muted">Key ideas to aim for: ${escapeHtml(question.metadata.keywords.join(", "))}</p>`
-          : ""
-      }
-      <div class="quiz-submit-bar">
-        <button id="submitTypingAnswer" class="primary-button quiz-submit-button" type="button">Submit answer</button>
-      </div>
-    </div>
-  `;
-  document.getElementById("submitTypingAnswer").addEventListener("click", () => {
-    const value = document.getElementById("typingAnswerInput").value.trim();
-    if (!value) {
-      showToast("Type an answer first.", true);
-      return;
-    }
-    submitQuizAnswer(value);
-  });
-}
-
-function renderReorderAnswer(question, container) {
-  const metadata = question.metadata || {};
-  let availableTokens = [...(metadata.tokens || [])];
-  let builtTokens = [];
-
-  const draw = () => {
-    container.innerHTML = `
-      <div class="reorder-shell">
-        <div class="reorder-answer-line">
-          ${
-            builtTokens.length
-              ? builtTokens
-                  .map(
-                    (token, index) => `
-                      <button class="token-chip token-chip-filled" type="button" data-built-index="${index}">
-                        ${escapeHtml(token)}
-                      </button>
-                    `
-                  )
-                  .join("")
-              : `<span class="muted">Tap the words in order to build the sentence.</span>`
-          }
-        </div>
-        <div class="reorder-token-bank">
-          ${availableTokens
-            .map(
-              (token, index) => `
-                <button class="token-chip" type="button" data-available-index="${index}">
-                  ${escapeHtml(token)}
-                </button>
-              `
-            )
-            .join("")}
-        </div>
-        <div class="utility-meta-row">
-          <button id="clearReorderAnswer" class="ghost-button inline-button" type="button">Clear</button>
-          <button id="submitReorderAnswer" class="primary-button inline-button quiz-submit-button" type="button" ${
-            builtTokens.length ? "" : "disabled"
-          }>Submit answer</button>
-        </div>
-      </div>
-    `;
-
-    container.querySelectorAll("[data-available-index]").forEach((button) => {
-      button.addEventListener("click", () => {
-        const index = Number(button.dataset.availableIndex);
-        builtTokens.push(availableTokens[index]);
-        availableTokens = availableTokens.filter((_, tokenIndex) => tokenIndex !== index);
-        draw();
-      });
-    });
-
-    container.querySelectorAll("[data-built-index]").forEach((button) => {
-      button.addEventListener("click", () => {
-        const index = Number(button.dataset.builtIndex);
-        availableTokens.push(builtTokens[index]);
-        builtTokens = builtTokens.filter((_, tokenIndex) => tokenIndex !== index);
-        draw();
-      });
-    });
-
-    document.getElementById("clearReorderAnswer").addEventListener("click", () => {
-      availableTokens = [...(metadata.tokens || [])];
-      builtTokens = [];
-      draw();
-    });
-
-    document.getElementById("submitReorderAnswer").addEventListener("click", () => {
-      if (!builtTokens.length) {
-        showToast("Build the sentence first.", true);
-        return;
-      }
-      submitQuizAnswer(builtTokens.join(" "));
-    });
-  };
-
-  draw();
-}
-
-function renderMatchingPairsAnswer(question, container) {
-  const pairs = Array.isArray(question.metadata?.pairs) ? question.metadata.pairs : [];
-  const leftItems = pairs.map((pair) => String(pair.left || "").trim()).filter(Boolean);
-  const rightItems = pairs
-    .map((pair) => String(pair.right || "").trim())
-    .filter(Boolean)
-    .sort((a, b) => normalizeClientText(a).localeCompare(normalizeClientText(b)));
-  const selected = {};
-  let activeLeft = "";
-
-  const draw = () => {
-    const complete = leftItems.length > 0 && leftItems.every((item) => selected[item]);
-    container.innerHTML = `
-      <div class="matching-shell">
-        <div class="matching-column">
-          ${leftItems
-            .map(
-              (item) => `
-                <button class="answer-button matching-card ${activeLeft === item ? "selected" : ""} ${selected[item] ? "matched" : ""}" type="button" data-match-left="${escapeHtml(item)}">
-                  <span>${escapeHtml(item)}</span>
-                  ${selected[item] ? `<strong>${escapeHtml(selected[item])}</strong>` : ""}
-                </button>
-              `
-            )
-            .join("")}
-        </div>
-        <div class="matching-column">
-          ${rightItems
-            .map(
-              (item) => `
-                <button class="answer-button matching-card ${Object.values(selected).includes(item) ? "matched" : ""}" type="button" data-match-right="${escapeHtml(item)}">
-                  ${escapeHtml(item)}
-                </button>
-              `
-            )
-            .join("")}
-        </div>
-        <div class="quiz-submit-bar">
-          <button id="submitMatchingAnswer" class="primary-button quiz-submit-button" type="button" ${complete ? "" : "disabled"}>Submit answer</button>
-        </div>
-      </div>
-    `;
-
-    container.querySelectorAll("[data-match-left]").forEach((button) => {
-      button.addEventListener("click", () => {
-        activeLeft = button.dataset.matchLeft || "";
-        playTapAnimation(button);
-        draw();
-      });
-    });
-    container.querySelectorAll("[data-match-right]").forEach((button) => {
-      button.addEventListener("click", () => {
-        if (!activeLeft) {
-          showToast("Choose a word or phrase first.", true);
-          return;
-        }
-        selected[activeLeft] = button.dataset.matchRight || "";
-        activeLeft = "";
-        playTapAnimation(button);
-        draw();
-      });
-    });
-    document.getElementById("submitMatchingAnswer")?.addEventListener("click", () => {
-      const answer = leftItems.map((left) => `${left}=>${selected[left] || ""}`).join("||");
-      submitQuizAnswer(answer);
-    });
-  };
-
-  draw();
-}
-
-async function submitQuizAnswer(selectedAnswer) {
-    if (!state.currentQuizRun || !state.currentQuizRun.question) {
-      return;
-    }
-
-  const buttons = els.quizContent.querySelectorAll("button");
-  buttons.forEach((button) => {
-    button.disabled = true;
-  });
-
-  const responseMs = state.quizQuestionStartedAt ? Date.now() - state.quizQuestionStartedAt : null;
-  try {
-    const data = await api("/api/quiz/answer", {
-      method: "POST",
-      headers: jsonHeaders(),
-      body: JSON.stringify({
-        run_id: state.currentQuizRun.id,
-        item_id: state.currentQuizRun.question.id,
-        selected_answer: selectedAnswer,
-        response_ms: responseMs,
-        confidence: 2,
-      }),
-    });
-
-    state.stats = data.stats || state.stats;
-    state.progress = data.progress || state.progress;
-    state.quizDashboard = data.dashboard || state.quizDashboard;
-    state.challenge = data.challenge || state.challenge;
-    const answeredQuestion = state.currentQuizRun.question;
-    state.currentQuizRun = data.run;
-    if (data.result?.phrase_mastery) {
-      applyPhraseMasteryUpdate(data.result.phrase_mastery);
-    }
-    renderProgressHeader();
-    renderQuizButton();
-    renderDashboardContent();
-
-    if (data.run && data.run.status === "completed") {
-      renderQuizSummary(data.run, data.result);
-      await fetchReviewDashboard({ silent: true });
-      return;
-    }
-
-    const feedback = data.result?.feedback || {};
-    const resultType = data.result.result_type || (data.result.correct ? "Correct" : "Incorrect");
-    const resultLabel = resultType === "Almost Correct" ? "Almost" : resultType === "Incorrect" ? "Wrong" : resultType;
-    els.quizModalLabel.textContent = resultLabel;
-    els.quizModalTitle.textContent = `Answer ${data.result.question_index} checked`;
-    const comboBonus = data.result.combo_bonus || 0;
-    const shortExplanation = quizShortExplanation(data.result, feedback);
-    const comboStreak = data.result.combo_streak || 0;
-    const xpBreakdown = data.result.xp_breakdown || {};
-    els.quizContent.innerHTML = `
-      <div class="quiz-feedback-card">
-        <div class="quiz-result-card clean-result-card ${resultClassForType(resultType)} ${resultMotionClassForType(resultType)}">
-          <span class="quiz-result-label">${escapeHtml(resultLabel)}</span>
-          <div class="answer-reward-row">
-            <span class="xp-pop">+<strong id="quizXpGainedValue">0</strong> XP</span>
-            ${comboStreak >= 2 ? `<span class="combo-pop">🔥 Combo <strong>x${comboStreak}</strong></span>` : ""}
-            ${comboBonus ? `<span class="combo-bonus-pop">Combo bonus +${comboBonus}</span>` : ""}
-            ${xpBreakdown.fast_bonus ? `<span>Fast +${xpBreakdown.fast_bonus}</span>` : ""}
-            ${xpBreakdown.perfect_quiz_bonus ? `<span>Perfect streak +${xpBreakdown.perfect_quiz_bonus}</span>` : ""}
-          </div>
-          ${renderAnsweredSnapshot(data.result, answeredQuestion)}
-          <p class="result-explanation">${escapeHtml(shortExplanation)}</p>
-        </div>
-        <div class="quiz-submit-bar">
-          <button id="nextQuizButton" class="primary-button quiz-submit-button" type="button">Next question</button>
-        </div>
-      </div>
-    `;
-    document.getElementById("nextQuizButton").addEventListener("click", () => {
-      renderQuizRun(data.run);
-    });
-    animateNumber("quizXpGainedValue", data.result.xp_awarded || 0);
-    await fetchReviewDashboard({ silent: true });
-  } catch (error) {
-    showToast(error.message, true);
-    renderQuizRun(state.currentQuizRun);
-  }
-}
-
-function renderAnsweredSnapshot(result, question) {
-  const selected = cleanUiText(result?.selected_answer);
-  const correct = cleanUiText(result?.correct_answer);
-  if (!selected && !correct) {
-    return "";
-  }
-  const isCorrect = Boolean(result?.correct);
-  const label = question?.answer_mode === "matching"
-    ? "Pairs"
-    : question?.answer_mode === "reorder"
-      ? "Sentence"
-      : question?.answer_mode === "typing"
-        ? "Answer"
-        : "Choice";
-  return `
-    <div class="answered-snapshot ${isCorrect ? "is-correct" : "is-wrong"}">
-      <div>
-        <span class="field-label">Your ${escapeHtml(label)}</span>
-        <p>${escapeHtml(formatSnapshotAnswer(selected))}</p>
-      </div>
-      ${
-        !isCorrect && correct
-          ? `
-            <div>
-              <span class="field-label">Correct</span>
-              <p>${escapeHtml(formatSnapshotAnswer(correct))}</p>
-            </div>
-          `
-          : ""
-      }
-    </div>
-  `;
-}
-
-function formatSnapshotAnswer(value) {
-  return cleanUiText(value).replaceAll("||", " · ").replaceAll("=>", " → ");
-}
-
-async function submitReviewAnswer(selectedAnswer) {
-  const reviewSession = state.currentReviewSession;
-  const card = reviewSession?.cards?.[reviewSession.index];
-  if (!reviewSession || !card) {
-    return;
-  }
-
-  const buttons = els.quizContent.querySelectorAll("button");
-  buttons.forEach((button) => {
-    button.disabled = true;
-  });
-
-  const responseMs = state.quizQuestionStartedAt ? Date.now() - state.quizQuestionStartedAt : null;
-  try {
-    const data = await api("/api/review/answer", {
-      method: "POST",
-      headers: jsonHeaders(),
-      body: JSON.stringify({
-        card_id: card.id,
-        selected_answer: selectedAnswer,
-        response_ms: responseMs,
-        confidence: 2,
-      }),
-    });
-
-    const correct = Boolean(data.result?.correct);
-    reviewSession.answeredCount += 1;
-    reviewSession.correctCount += correct ? 1 : 0;
-    reviewSession.wrongCount += correct ? 0 : 1;
-    reviewSession.index += 1;
-    state.review = data.review || state.review;
-    state.progress = data.progress || state.progress;
-    state.stats = data.stats || state.stats;
-    renderProgressHeader();
-    renderDashboardContent();
-
-    const feedback = data.result?.feedback || {};
-    els.quizModalLabel.textContent = correct ? "Correct" : "Checked";
-    els.quizModalTitle.textContent = data.result?.session_title || "Today’s Review";
-    els.quizContent.innerHTML = `
-      <div class="quiz-feedback-card">
-        <div class="feedback-box ${correct ? "feedback-success" : ""}">
-          <strong>${correct ? "Correct." : "Checked."}</strong>
-          <p>The answer is: ${escapeHtml(data.result.correct_answer)}</p>
-          ${
-            feedback.good
-              ? `<p class="muted">${escapeHtml(feedback.good)}</p>`
-              : ""
-          }
-          ${
-            feedback.improve
-              ? `<p class="muted">${escapeHtml(feedback.improve)}</p>`
-              : ""
-          }
-          ${
-            data.result.next_due_at
-              ? `<p class="muted">Next review: ${escapeHtml(formatDate(data.result.next_due_at))}</p>`
-              : ""
-          }
-          <p class="muted">XP earned: ${data.result.xp_awarded || 0}${
-            data.result.combo_bonus ? ` · Combo +${data.result.combo_bonus}` : ""
-          }</p>
-        </div>
-        <button id="nextReviewButton" class="primary-button" type="button">${
-          reviewSession.index >= reviewSession.cards.length ? "Finish review" : "Next card"
-        }</button>
-      </div>
-    `;
-    document.getElementById("nextReviewButton").addEventListener("click", () => {
-      renderReviewCard();
-    });
-  } catch (error) {
-    showToast(error.message, true);
-    renderReviewCard();
-  }
-}
-
-function renderReviewSummary() {
-  const reviewSession = state.currentReviewSession;
-  if (!reviewSession) {
-    renderReviewUnavailable("Your review session is no longer available.");
-    return;
-  }
-
-  els.quizModalLabel.textContent = "Today’s Review";
-  els.quizModalTitle.textContent = "Review complete";
-  els.quizContent.innerHTML = `
-    <div class="quiz-summary-shell">
-      <div class="quiz-summary-grid">
-        <article class="status-pill">
-          <span class="status-label">Correct</span>
-          <strong class="status-value">${reviewSession.correctCount}</strong>
-        </article>
-        <article class="status-pill">
-          <span class="status-label">Wrong</span>
-          <strong class="status-value">${reviewSession.wrongCount}</strong>
-        </article>
-        <article class="status-pill">
-          <span class="status-label">Reviewed</span>
-          <strong class="status-value">${reviewSession.answeredCount}</strong>
-        </article>
-      </div>
-      <button id="closeReviewSummaryButton" class="primary-button" type="button">Back to learn</button>
-    </div>
-  `;
-
-  document.getElementById("closeReviewSummaryButton").addEventListener("click", closeQuizModal);
-}
-
-function renderQuizSummary(run, lastResult = null) {
-  if (!run) {
-    renderQuizUnavailable("This quiz run is no longer available.");
-    return;
-  }
-
-  const summary = run.summary || {};
-  const totalXp = summary.xp_earned || 0;
-  const maxCombo = summary.max_combo || 0;
-  const correctAnswers = summary.correct_answers ?? summary.correct_count ?? 0;
-  const answeredCount = summary.answered_count ?? run.total_questions ?? 0;
-  const phrasesPracticed = uniqueWritingHints([
-    ...(summary.phrases_practiced || []),
-    summary.phrase_practiced,
-    lastResult?.phrase_mastery?.phrase,
-    lastResult?.metadata?.related_reusable_phrase,
-  ]).slice(0, 3);
-  const scoreImprovement = summary.score_improvement || lastResult?.metadata?.score_improvement || 0;
-  const finalExplanation = lastResult
-    ? quizShortExplanation(lastResult, lastResult.feedback || {})
-    : "";
-  const streakDays = state.progress?.streak_days || 0;
-  els.quizModalLabel.textContent =
-    run.run_mode === "daily_challenge"
-      ? "Challenge Complete"
-      : run.run_mode === "post_improve"
-      ? "Reward"
-      : run.run_mode === "session"
-      ? "Quick Challenge Complete"
-      : "Quiz Complete";
-  els.quizModalTitle.textContent = "Nice work";
-  els.quizContent.innerHTML = `
-    <div class="quiz-summary-shell reward-screen">
-      <div class="reward-hero-card">
-        <span class="field-label">Total earned</span>
-        <strong class="reward-xp-total">+<span id="rewardXpValue">0</span> XP</strong>
-      </div>
-      <div class="reward-stat-row reward-stat-grid">
-        <span>Correct <strong>${correctAnswers}/${answeredCount}</strong></span>
-        <span>🔥 Max Combo <strong id="rewardComboValue">x0</strong></span>
-        ${phrasesPracticed.length ? `<span>🧠 Phrases <strong>${escapeHtml(phrasesPracticed.join(", "))}</strong></span>` : ""}
-        ${summary.perfect_quiz ? `<span>Perfect streak <strong>+20 XP</strong></span>` : ""}
-        ${scoreImprovement ? `<span>Score <strong>+${escapeHtml(scoreImprovement)} points</strong></span>` : ""}
-        <span>Streak <strong>${streakDays ? `Day ${streakDays}` : "Started"}</strong></span>
-      </div>
-      ${finalExplanation ? `<p class="result-explanation">${escapeHtml(finalExplanation)}</p>` : ""}
-      <button id="closeQuizSummaryButton" class="primary-button reward-next-button" type="button">Next Image</button>
-    </div>
-  `;
-
-  document.getElementById("closeQuizSummaryButton").addEventListener("click", () => {
-    closeQuizModal();
-    openNewSessionComposer();
-  });
-  animateNumber("rewardXpValue", totalXp);
-  animateNumber("rewardComboValue", maxCombo, { prefix: "x" });
 }
 
 function setButtonBusy(button, busy, label) {
@@ -8939,204 +8259,6 @@ function formatDate(value) {
 
 function pluralize(count) {
   return Number(count) === 1 ? "" : "s";
-}
-
-function prettyQuizType(value) {
-  const mapping = {
-    multiple_choice_comprehension: "Multiple Choice",
-    matching_pairs: "Matching Pairs",
-    sentence_reconstruction: "Sentence Reconstruction",
-    recognition: "Recognition",
-    phrase_completion: "Phrase Completion",
-    expression_training: "Expression Training",
-    situation_understanding: "Situation",
-    sentence_building: "Sentence Building",
-    fill_blank: "Fill in the Blank",
-    typing: "Typing",
-    memory_recall: "Memory Recall",
-    error_focus: "Error Focus",
-    sentence_upgrade_battle: "Sentence Upgrade Battle",
-    phrase_snap: "Phrase Snap",
-    choose_better: "Choose Better",
-    phrase_duel: "Phrase Duel",
-    fix_the_mistake: "Fix the Mistake",
-    fix_the_sentence: "Fix the Sentence",
-    use_it_or_lose_it: "Use the Word/Phrase",
-  };
-  return mapping[value] || formatBand(String(value || "").replaceAll("_", " "));
-}
-
-function prettyAnswerMode(value) {
-  const mapping = {
-    multiple_choice: "Multiple choice",
-    matching: "Matching",
-    typing: "Typing",
-    reorder: "Sentence order",
-  };
-  return mapping[value] || formatBand(value);
-}
-
-function formatXpBreakdown(breakdown) {
-  const base = Number(breakdown?.base_xp || 0);
-  const firstTry = Number(breakdown?.first_try_bonus || 0);
-  const fast = Number(breakdown?.fast_bonus || 0);
-  const perfect = Number(breakdown?.perfect_quiz_bonus || 0);
-  const combo = Number(breakdown?.combo_bonus || 0);
-  if (!base && !firstTry && !fast && !perfect && !combo) return "No XP gained this time.";
-  return [
-    base ? `Answer +${base}` : "",
-    firstTry ? `First try +${firstTry}` : "",
-    fast ? `Fast +${fast}` : "",
-    perfect ? `Perfect +${perfect}` : "",
-    combo ? `Combo +${combo}` : "",
-  ].filter(Boolean).join(" · ");
-}
-
-function quizShortExplanation(result, feedback) {
-  if (feedback?.good) return feedback.good;
-  if (feedback?.improve) return feedback.improve;
-  if (result?.result_type === "Correct") return "That reinforces the image phrase.";
-  if (result?.result_type === "Almost Correct") return "Close. Keep the meaning and make it smoother.";
-  return "Review the image phrase, then try the next one.";
-}
-
-function resultClassForType(resultType) {
-  if (resultType === "Correct") return "result-correct";
-  if (resultType === "Almost Correct") return "result-almost";
-  return "result-incorrect";
-}
-
-function resultMotionClassForType(resultType) {
-  if (prefersReducedMotion()) return "";
-  if (resultType === "Correct") return "result-glow";
-  if (resultType === "Incorrect") return "result-shake";
-  return "result-soft-pop";
-}
-
-function renderQuizTypeDetail(question) {
-  const phrase = question.related_reusable_phrase || question.metadata?.related_reusable_phrase || "";
-  if (question.quiz_type === "sentence_upgrade_battle") {
-    const weak = question.metadata?.weak_sentence || extractBrokenSentence(question.prompt);
-    return weak
-      ? `<div class="quote-card"><span class="field-label">Weak sentence</span><p>${escapeHtml(weak)}</p></div>`
-      : "";
-  }
-  if (["fix_the_mistake", "fix_the_sentence"].includes(question.quiz_type)) {
-    const broken = extractBrokenSentence(question.prompt);
-    return broken
-      ? `<div class="broken-sentence-card"><span class="field-label">Broken sentence</span><p>${escapeHtml(broken)}</p></div>`
-      : "";
-  }
-  if (question.quiz_type === "use_it_or_lose_it" && phrase) {
-    return `<div class="phrase-focus-chip">${escapeHtml(phrase)}</div>`;
-  }
-  if (["phrase_snap", "fill_blank"].includes(question.quiz_type)) {
-    return `<div class="quick-action-note">Fill the blank with the missing word.</div>`;
-  }
-  if (question.quiz_type === "multiple_choice_comprehension") {
-    return `<div class="quick-action-note">Choose the answer from this image session.</div>`;
-  }
-  if (question.quiz_type === "matching_pairs") {
-    return `<div class="quick-action-note">Tap a word, then tap its matching meaning.</div>`;
-  }
-  if (question.quiz_type === "sentence_reconstruction") {
-    return `<div class="quick-action-note">Tap the words to rebuild the sentence.</div>`;
-  }
-  if (question.quiz_type === "choose_better") {
-    return `<div class="quick-action-note">Pick the sentence that sounds clearer for this image.</div>`;
-  }
-  return "";
-}
-
-function renderQuizResultDetail(result, question) {
-  const quizType = result.quiz_type || question?.quiz_type || "";
-  const selected = result.selected_answer || "";
-  const correct = result.correct_answer || "";
-  const metadata = result.metadata || question?.metadata || {};
-  const phrase = result.phrase_mastery?.phrase || metadata.related_reusable_phrase || question?.related_reusable_phrase || "";
-
-  if (quizType === "choose_better") {
-    return `
-      <div class="before-after-grid">
-        <div><span class="field-label">Your choice</span><p>${escapeHtml(selected)}</p></div>
-        <div><span class="field-label">Better version</span><p>${escapeHtml(correct)}</p></div>
-      </div>
-    `;
-  }
-  if (quizType === "sentence_upgrade_battle") {
-    const weak = metadata.weak_sentence || question?.metadata?.weak_sentence || "";
-    return `
-      <div class="before-after-grid">
-        ${weak ? `<div><span class="field-label">Before</span><p>${escapeHtml(weak)}</p></div>` : ""}
-        <div><span class="field-label">Your answer</span><p>${escapeHtml(selected)}</p></div>
-        <div><span class="field-label">Stronger version</span><p>${escapeHtml(correct)}</p></div>
-      </div>
-    `;
-  }
-  if (["fix_the_mistake", "fix_the_sentence"].includes(quizType)) {
-    return `
-      <div class="before-after-grid">
-        <div><span class="field-label">Your fix</span><p>${highlightChangedWords(selected, correct)}</p></div>
-        <div><span class="field-label">Corrected version</span><p>${highlightChangedWords(correct, selected)}</p></div>
-      </div>
-    `;
-  }
-  if (quizType === "use_it_or_lose_it") {
-    return `
-      <div class="before-after-grid">
-        <div><span class="field-label">Your sentence</span><p>${highlightPhraseInText(selected, phrase)}</p></div>
-        <div><span class="field-label">Model answer</span><p>${highlightPhraseInText(correct, phrase)}</p></div>
-      </div>
-    `;
-  }
-  if (quizType === "phrase_duel") {
-    return `<p>Stronger phrase use: ${escapeHtml(correct)}</p>`;
-  }
-  return `<p>The answer is: ${escapeHtml(correct)}</p>`;
-}
-
-function extractBrokenSentence(prompt) {
-  return String(prompt || "")
-    .replace(/^Fix the Mistake:\s*/i, "")
-    .replace(/^Fix the Sentence:\s*/i, "")
-    .replace(/^Sentence Upgrade Battle:\s*Rewrite this sentence stronger:\s*/i, "")
-    .trim();
-}
-
-function highlightPhraseInText(text, phrase) {
-  const raw = String(text || "");
-  if (!phrase) return escapeHtml(raw);
-  const index = raw.toLowerCase().indexOf(String(phrase).toLowerCase());
-  if (index === -1) return escapeHtml(raw);
-  return `${escapeHtml(raw.slice(0, index))}<mark class="inline-phrase-highlight">${escapeHtml(
-    raw.slice(index, index + phrase.length)
-  )}</mark>${escapeHtml(raw.slice(index + phrase.length))}`;
-}
-
-function highlightChangedWords(text, compareText) {
-  const compareWords = new Set(normalizeClientText(compareText).split(" ").filter(Boolean));
-  return String(text || "")
-    .split(/(\s+)/)
-    .map((part) => {
-      if (/^\s+$/.test(part)) return escapeHtml(part);
-      const key = normalizeClientText(part);
-      if (key && !compareWords.has(key)) {
-        return `<mark class="correction-highlight">${escapeHtml(part)}</mark>`;
-      }
-      return escapeHtml(part);
-    })
-    .join("");
-}
-
-function applyPhraseMasteryUpdate(phraseMastery) {
-  const phrases = state.currentSession?.analysis?.phrases || [];
-  const key = normalizeClientText(phraseMastery.phrase);
-  phrases.forEach((item) => {
-    if (normalizeClientText(item.phrase) === key) {
-      item.mastery = phraseMastery.mastery;
-      item.mastery_state = phraseMastery.state;
-    }
-  });
 }
 
 function showToast(message, isError = false) {

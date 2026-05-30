@@ -146,7 +146,7 @@ class AIAnalyzer:
         return (
             "You are the Scene Guidance Engine for an articulation-coaching app.\n"
             "The learner, not the AI, writes the image description.\n"
-            "Your role is to support articulation, not replace the learner.\n"
+            "Your role is to help the learner build reusable English from real images.\n"
             "Do not fully explain the image.\n"
             "Do not generate a lesson.\n"
             "Do not write a final paragraph.\n"
@@ -154,9 +154,6 @@ class AIAnalyzer:
             "Return ONLY valid JSON.\n"
             "No markdown.\n"
             "No text outside JSON.\n\n"
-
-            # f"Learner level: {level_label(learner_level)}. \n\n"
-            # f"{level_guidance(learner_level)}\n\n"
 
             "Return exactly this JSON structure:\n"
             "{\n"
@@ -166,6 +163,10 @@ class AIAnalyzer:
             "    {\n"
             '      "id":"",\n'
             '      "title":"",\n'
+            '      "mode":"add_missing_detail|polish_existing_detail",\n'
+            '      "alreadyMentioned":false,\n'
+            '      "sourceText":"",\n'
+            '      "reusableLanguageGoal":[""],\n'
             '      "importance":0.8,\n'
             '      "supportLevels":[\n'
             '        {"level":1,"prompt":"","hints":[""]},\n'
@@ -177,135 +178,114 @@ class AIAnalyzer:
             "}\n\n"
 
             "GENERAL RULES:\n"
-
             "- Keep all outputs short, practical, natural, and beginner-friendly.\n"
+            "- The primary goal is to teach reusable language: useful nouns, verbs, adjectives, phrases, collocations, and sentence structures.\n"
+            "- Every focus should help the learner learn language they can reuse in future images.\n"
             "- The learner should remain the main describer of the image.\n"
-            "- The AI should only help the learner notice and express ideas more clearly.\n"
-            "- Avoid overexplaining.\n"
             "- Avoid scene summaries.\n"
-            "- Avoid decomposing the entire image too early.\n"
-            "- Guidance should feel incremental and supportive.\n\n"
+            "- Avoid overexplaining.\n"
+            "- Avoid decomposing the entire image too early.\n\n"
 
             "STARTER HINT RULES:\n"
-
             "- starterHints must contain exactly 1 tiny visually obvious hint.\n"
-            "- starterHints may be:\n"
-            "  - object\n"
-            "  - phrase\n"
-            "  - sentence_structure\n"
-
-            "- Prefer reusable articulation phrases over isolated nouns.\n"
-            "- Keep hints visually grounded and beginner-friendly.\n"
-
-            "Good starter hint styles:\n"
-            "- digital stopwatch\n"
-            "- close-up view\n"
-            "- firmly holding\n"
-            "- visible buttons\n"
-            "- bright daylight\n\n"
+            "- Prefer one high-value reusable phrase or main visual subject.\n"
+            "- Good starter hint styles:\n"
+            "  - digital stopwatch\n"
+            "  - climbing vines\n"
+            "  - covered with\n"
+            "  - bright daylight\n\n"
 
             "SENTENCE STARTER RULES:\n"
-
             "- sentenceStarters must stay generic.\n"
             "- Do not mention image-specific objects.\n"
             "- Keep them reusable across many images.\n\n"
 
+            "TWO-PATH GUIDED COVERAGE RULE:\n"
+            "- If the learner missed an important visual aspect, create mode add_missing_detail.\n"
+            "- If the learner already mentioned an aspect but wrote it simply, create mode polish_existing_detail.\n"
+            "- Do not force missing coverage if the learner already covered most important parts.\n"
+            "- If coverage is already good, use polish_existing_detail focuses to help them make existing ideas more articulate.\n\n"
+
+            "MODE: add_missing_detail\n"
+            "- Use this when the learner did not mention an important visible aspect.\n"
+            "- The prompt should help the learner add one missing visual detail.\n"
+            "- Example: user mentioned building but missed greenery.\n"
+            "- Focus: Greenery around the building.\n"
+            "- reusableLanguageGoal: ['surrounded by', 'climbing vines', 'green shrubs']\n\n"
+
+            "MODE: polish_existing_detail\n"
+            "- Use this when the learner already mentioned the aspect but it can be expressed better.\n"
+            "- The prompt should help the learner add richer wording to an existing idea.\n"
+            "- sourceText must contain the learner's exact/simple wording if available.\n"
+            "- Example: user wrote 'building with vines'.\n"
+            "- Focus: Improve the vine description.\n"
+            "- reusableLanguageGoal: ['covered with', 'dense climbing vines', 'attached to']\n\n"
+
             "COVERAGE FOCUS RULES:\n"
+            "- coverageFocuses must contain 3-5 important focuses.\n"
+            "- Each focus must teach reusable language, not just make the user mention objects.\n"
+            "- Every focus must describe a different visual/language aspect.\n"
+            "- Avoid duplicate focuses.\n"
+            "- Keep focuses beginner-friendly, visually important, and conversational.\n"
+            "- Never use generic wording like object, thing, or main object if the visible subject can be named.\n\n"
 
-            "- coverageFocuses must contain 3-5 important visual areas the learner may later describe.\n"
-            "- coverageFocuses are ONLY for gradual guided coverage.\n"
-            "- Do NOT fully reveal or decompose the image.\n"
-            "- Keep focuses beginner-friendly, visually important, and conversational.\n\n"
-            "- Every coverage focus must describe a different visual aspect of the image.\n"
-            "- Do not create two focuses that point to the same area, feature type, or learner task.\n"
-            "- Avoid near-duplicate focus titles such as 'Structure' and 'Building structure', 'Screen' and 'Visible buttons', or 'Atmosphere' and 'Lighting mood'.\n"
-            "- Treat screen, display, buttons, controls, shape, architecture, and structure as one structure-related aspect; choose only the strongest one.\n"
-            "- Prefer a varied set of aspects, such as subject/action, setting, position, appearance/detail, people, lighting, or atmosphere.\n"
-            "- Before returning JSON, compare all coverageFocuses and merge or replace any pair that would lead the learner to describe the same aspect twice.\n\n"
-            "- Never use generic wording like 'object', 'the object', 'main object', or 'thing' in coverage focus titles, prompts, sentence frames, or hints.\n"
-            "- If you know the visible subject, name it directly: 'stopwatch', 'digital stopwatch', 'building', 'child', 'bicycle'.\n"
-            "- If you are uncertain, phrase around the visible area instead of saying object: 'the item being held', 'the device', 'the main subject', 'the foreground detail'.\n"
-            "- Bad: The object is being held ___.\n"
-            "- Good: The digital stopwatch is being held ___.\n"
-            "- Good: The device is being held ___.\n\n"
-
+            "SUPPORT LEVEL RULES:\n"
             "- Each coverage focus must contain exactly 3 supportLevels.\n"
-            "- Each supportLevels item must contain level, prompt, and hints fields only.\n"
-            "- supportLevels must become progressively easier from open observation to sentence frame.\n"
-            "- The learner should feel gradually more guided at each level.\n"
-            "- The final level should be easy enough for the learner to complete with hints.\n\n"
+            "- Each supportLevels item must contain only level, prompt, and hints.\n"
+            "- Level 1: open observation.\n"
+            "- Level 2: more focused guidance.\n"
+            "- Level 3: sentence frame with ___.\n"
+            "- Hints are hidden until the learner asks for help.\n"
+            "- Hints must be generated separately for each support level.\n"
+            "- Hints should become easier as levels increase.\n"
+            "- Level 3 hints must fit naturally into the sentence-frame blank.\n\n"
 
-            "- supportLevels must sound human, supportive, and natural.\n"
-            "- Avoid robotic wording.\n"
-            "- Avoid academic wording.\n"
-            "- Avoid metadata-style descriptions.\n\n"
+            "ADD_MISSING_DETAIL EXAMPLE:\n"
+            "{\n"
+            '  "id":"building_greenery",\n'
+            '  "title":"Greenery around the building",\n'
+            '  "mode":"add_missing_detail",\n'
+            '  "alreadyMentioned":false,\n'
+            '  "sourceText":"",\n'
+            '  "reusableLanguageGoal":["surrounded by","climbing vines","green shrubs"],\n'
+            '  "importance":0.9,\n'
+            '  "supportLevels":[\n'
+            '    {"level":1,"prompt":"What do you notice about the greenery around the building?","hints":["greenery","plants"]},\n'
+            '    {"level":2,"prompt":"Can you describe the vines or plants near the building?","hints":["climbing vines","green shrubs"]},\n'
+            '    {"level":3,"prompt":"The building is surrounded by ___.","hints":["green shrubs","climbing vines","dense greenery"]}\n'
+            "  ]\n"
+            "}\n\n"
 
-            "- Level 1 should guide independent observation.\n"
-            "- Level 1 should feel open-ended but still focused.\n"
-            "- Level 1 prompt should be an open observation question.\n"
-            "- Example styles:\n"
-            "  - What do you notice about the way the stopwatch is being held?\n"
-            "  - What do you notice about the greenery around the building?\n"
-            "  - What do you notice about the lighting in the scene?\n\n"
+            "POLISH_EXISTING_DETAIL EXAMPLE:\n"
+            "{\n"
+            '  "id":"polish_vines",\n'
+            '  "title":"Make the vine description richer",\n'
+            '  "mode":"polish_existing_detail",\n'
+            '  "alreadyMentioned":true,\n'
+            '  "sourceText":"building with vines",\n'
+            '  "reusableLanguageGoal":["covered with","dense climbing vines","attached to the wall"],\n'
+            '  "importance":0.9,\n'
+            '  "supportLevels":[\n'
+            '    {"level":1,"prompt":"How can you describe the vines more clearly?","hints":["vines","wall plants"]},\n'
+            '    {"level":2,"prompt":"Can you describe how the vines cover the building?","hints":["covered with","climbing vines"]},\n'
+            '    {"level":3,"prompt":"The building is covered with ___.","hints":["dense climbing vines","green leaves","wall plants"]}\n'
+            "  ]\n"
+            "}\n\n"
 
-            "- Level 2 should narrow the learner's attention toward a more specific detail.\n"
-            "- Level 2 prompt should give more focused guidance.\n"
-            "- Example styles:\n"
-            "  - Can you describe the grip or hand position?\n"
-            "  - Can you describe the plants attached to the wall?\n"
-            "  - Can you describe the bright daylight in the background?\n\n"
-
-            "- Level 3 should provide one short sentence frame.\n"
-            "- The learner should only need to complete the sentence.\n"
-            "- Level 3 prompt must contain a blank using ___.\n"
-            "- Example styles:\n"
-            "  - The stopwatch is being held ___.\n"
-            "  - The building is covered with ___.\n"
-            "  - The scene is filled with ___.\n\n"
-
-            "- Hints should NOT appear automatically.\n"
-            "- Hints are shown ONLY when the learner taps 'Need Hint?'.\n"
-            "- Generate hints separately for each support level.\n"
-            "- Do NOT use one shared hint list for a focus.\n"
-            "- Each support level should have 1-3 optional hints.\n"
-            "- Hints must match only that level's prompt.\n"
-            "- Hints must become easier as support levels increase.\n"
-            "- Level 1 hints should support broad observation.\n"
-            "- Level 2 hints should support articulation of a specific visual detail.\n"
-            "- Level 3 hints must fit directly into the sentence-frame blank.\n"
-            "- Hints must be short articulation chunks.\n\n"
-
-            "Good hint styles:\n"
-            "- firmly\n"
-            "- in one hand\n"
-            "- tightly\n"
-            "- climbing vines\n"
-            "- dense greenery\n"
-            "- bright daylight\n\n"
-
-            "Bad hint styles:\n"
-            "- What do you notice\n"
-            "- Look closely\n"
-            "- Can you mention\n"
-            "- Describe the image\n\n"
-
-            "- The support progression should gradually reduce:\n"
-            "  - visual search difficulty\n"
-            "  - idea generation difficulty\n"
-            "  - articulation difficulty\n"
-            "  - sentence construction difficulty\n\n"
-
-            "- Keep every level lightweight and beginner-friendly.\n"
-            "- Avoid long explanations.\n"
-            "- Avoid overwhelming the learner.\n\n"
+            "REUSABLE LANGUAGE QUALITY RULES:\n"
+            "- Prefer high-value chunks like covered with, surrounded by, attached to, standing near, in the background, filled with, lined with.\n"
+            "- Prefer useful descriptive nouns and phrases like climbing vines, concrete columns, bright daylight, calm atmosphere, green shrubs.\n"
+            "- Do not teach only basic object names if a better reusable phrase is visible.\n"
+            "- Do not create abstract or advanced phrases that beginners cannot reuse.\n\n"
 
             "OUTPUT VALIDATION:\n"
             "- Do not include supportLevels beyond levels 1, 2, and 3.\n"
-            "- Do not use the old support level shape with hint-only objects.\n"
+            "- Level 3 prompt must contain ___.\n"
+            "- Level 3 hints must fit the blank.\n"
             "- Do not put hints directly on the coverage focus.\n"
             "- Do not include technical labels or UI instructions in prompts.\n"
-            "- Do not use question fragments as hints.\n"
-            "- Prompts must be human, focused, and learner-friendly.\n\n"
+            "- Prompts must sound human, focused, and learner-friendly.\n"
+            "- Every focus must have a clear reusableLanguageGoal.\n\n"
 
             f"{notes_block}"
         )
@@ -564,6 +544,11 @@ class AIAnalyzer:
 
             "GUIDED COVERAGE RULE:\n"
             "- Use coverageFocuses only to decide the next small area to ask the learner to add.\n"
+            "- Coverage status and guided practice progress are separate.\n"
+            "- Do not end guided coverage just because the learner already mentioned important visual aspects.\n"
+            "- If the learner already mentioned an important coverage focus, treat it as polish_existing_detail practice.\n"
+            "- If the learner did not mention an important coverage focus, treat it as add_missing_detail practice.\n"
+            "- Finish guided coverage only after important aspects are covered or practiced and the planned focus path is complete.\n"
             "- If this is the first attempt, enhance only covered ideas and put missing areas in missingDetails/nextStepInstructions.\n"
             "- If this is a later attempt, enhance the evolving description and guide the next missing focus.\n\n"
 
@@ -810,11 +795,6 @@ class AIAnalyzer:
                 limit=5,
             )
             or fallback["reusable_sentence_structures"],
-            "quiz_focus": self._clean_string_list(
-                payload.get("quiz_focus") or fallback["quiz_focus"],
-                limit=4,
-            )
-            or fallback["quiz_focus"],
         }
         if not normalized["next_step_instructions"]:
             normalized["next_step_instructions"] = self._build_next_step_instructions(
@@ -1625,9 +1605,9 @@ class AIAnalyzer:
         reusable = {
             "nouns": self._clean_string_list(payload.get("nouns"), limit=5) or self._nounish_terms_from_text(enhancement, covered_areas),
             "verbs": self._clean_string_list(payload.get("verbs"), limit=4) or self._verbish_terms_from_text(enhancement),
-            "phrases": self._clean_string_list(payload.get("phrases"), limit=5) or self._matching_terms(text, phrase_candidates, limit=3),
+            "phrases": self._clean_string_list(payload.get("phrases"), limit=5) or self._terms_present_in_text(text, phrase_candidates, limit=3),
             "collocations": self._clean_string_list(payload.get("collocations"), limit=5) or self._collocations_from_enhancement(enhancement),
-            "sentence_structures": self._clean_string_list(payload.get("sentenceStructures") or payload.get("sentence_structures"), limit=3) or self._matching_terms(text, structure_candidates, limit=2) or ["The image shows ..."],
+            "sentence_structures": self._clean_string_list(payload.get("sentenceStructures") or payload.get("sentence_structures"), limit=3) or self._terms_present_in_text(text, structure_candidates, limit=2) or ["The image shows ..."],
             "positioning_language": self._clean_string_list(payload.get("positioningLanguage") or payload.get("positioning_language"), limit=4) or self._positioning_language_from_text(enhancement),
             "atmosphere_language": self._clean_string_list(payload.get("atmosphereLanguage") or payload.get("atmosphere_language"), limit=4) or self._atmosphere_language_from_text(enhancement),
         }
@@ -1668,7 +1648,7 @@ class AIAnalyzer:
         terms = re.findall(r"\b(?:quiet|busy|calm|crowded|shaded|sunny|bright|peaceful|urban|natural)\b", text, flags=re.I)
         return self._clean_string_list(terms, limit=4)
 
-    def _matching_terms(self, text_key: str, candidates: list[str], *, limit: int) -> list[str]:
+    def _terms_present_in_text(self, text_key: str, candidates: list[str], *, limit: int) -> list[str]:
         return self._clean_string_list(
             [item for item in candidates if normalize_answer(item) in text_key],
             limit=limit,
@@ -1741,7 +1721,7 @@ class AIAnalyzer:
             or (
                 "The explanation covers the image well enough."
                 if ready
-                else "Keep adding the missing image coverage before the quiz."
+                else "Keep adding the missing image coverage before the final reveal."
             ),
             "criteria": criteria,
         }
@@ -1778,7 +1758,7 @@ class AIAnalyzer:
         coached["actionable_suggestions"] = suggestions
         coached["specific_guidance"] = specific_guidance
         coached["dimension_tracker"] = self._dimension_tracker(state)
-        coached["next_challenge"] = specific_guidance["next_challenge"]
+        coached["next_focus_instruction"] = specific_guidance["next_focus_instruction"]
         coached["coaching_message"] = self._progressive_coaching_message(
             score=score,
             state=state,
@@ -1792,7 +1772,7 @@ class AIAnalyzer:
             state=state,
         )
 
-        ready = self._progressive_ready_for_quiz(
+        ready = self._progressive_ready_for_final_reveal(
             state=state,
             score=score,
             attempt_index=attempt_index,
@@ -1803,7 +1783,7 @@ class AIAnalyzer:
         readiness["reason"] = (
             "The explanation is complete, natural, and ready for reinforcement."
             if ready
-            else "Keep refining the current focus areas before the quiz."
+            else "Keep refining the current focus areas before the final reveal."
         )
         coached["readiness"] = readiness
         coached["is_ready"] = ready
@@ -1911,12 +1891,12 @@ class AIAnalyzer:
             verbs=verbs,
             details=details,
         )
-        next_challenge = self._specific_next_challenge(
+        next_focus_instruction = self._specific_next_focus_instruction(
             focus_areas=focus_areas,
             sentence_starter=sentence_starter,
         )
         if not suggestions:
-            suggestions = [next_challenge]
+            suggestions = [next_focus_instruction]
         return {
             "focus_areas": focus_areas[:2],
             "nouns": nouns,
@@ -1924,7 +1904,7 @@ class AIAnalyzer:
             "details": details,
             "words": words,
             "sentence_starter": sentence_starter,
-            "next_challenge": next_challenge,
+            "next_focus_instruction": next_focus_instruction,
             "actionable_suggestions": self._unique_short_hints(suggestions, limit=2),
         }
 
@@ -2108,7 +2088,7 @@ class AIAnalyzer:
             return text[0].upper() + text[1:]
         return f"The {text}"
 
-    def _specific_next_challenge(self, *, focus_areas: list[str], sentence_starter: str) -> str:
+    def _specific_next_focus_instruction(self, *, focus_areas: list[str], sentence_starter: str) -> str:
         focus_set = set(focus_areas[:2])
         if "main action" in focus_set and "background/setting" in focus_set:
             return "Add one sentence saying what the main subject is doing, then one short background detail."
@@ -2291,7 +2271,7 @@ class AIAnalyzer:
             for key, label in display
         ]
 
-    def _progressive_ready_for_quiz(
+    def _progressive_ready_for_final_reveal(
         self,
         *,
         state: dict[str, bool],
@@ -2317,7 +2297,7 @@ class AIAnalyzer:
         focus_areas: list[str],
         attempt_index: int,
     ) -> str:
-        if self._progressive_ready_for_quiz(state=state, score=score, attempt_index=attempt_index):
+        if self._progressive_ready_for_final_reveal(state=state, score=score, attempt_index=attempt_index):
             return "Excellent articulation. Your explanation now feels complete and natural."
         if attempt_index == 1:
             return "Good start. Let’s build the description one layer at a time."
@@ -2867,7 +2847,6 @@ class AIAnalyzer:
             "alternatives": [],
             "weak_points": fixes[:3],
             "reusable_sentence_structures": [],
-            "quiz_focus": ["Image description"],
             "retry_required": True,
             "retry_message": "Try again with a clear sentence about what you can see.",
             "cta_label": "Try Again",
@@ -3222,7 +3201,6 @@ class AIAnalyzer:
             ],
             "weak_points": weak_points[:4],
             "reusable_sentence_structures": patterns[:5],
-            "quiz_focus": ["Reusable phrases", "Vocabulary", "Weak points", "Sentence improvement"],
         }
 
     def _extract_required_image_parts(self, analysis: dict[str, Any]) -> list[dict[str, Any]]:
@@ -4403,10 +4381,19 @@ class AIAnalyzer:
                 seen_aspects.add(aspect_key)
             focus_id = self._safe_target_id(item.get("id") or key or f"focus-{index + 1}")
             support_levels = self._normalize_support_levels(item.get("supportLevels") or item.get("support_levels"), title)
+            mode = self._clean_text_value(item.get("mode"))
+            if mode not in {"add_missing_detail", "polish_existing_detail"}:
+                mode = "add_missing_detail"
+            already_mentioned = bool(item.get("alreadyMentioned") or item.get("already_mentioned"))
+            if already_mentioned:
+                mode = "polish_existing_detail"
             focuses.append(
                 {
                     "id": focus_id,
                     "title": title[:80],
+                    "mode": mode,
+                    "alreadyMentioned": already_mentioned,
+                    "sourceText": self._clean_text_value(item.get("sourceText") or item.get("source_text"))[:160],
                     "importance": self._normalize_importance(item.get("importance"), default=0.7),
                     "supportLevels": support_levels,
                 }
@@ -4460,8 +4447,8 @@ class AIAnalyzer:
                 level = 0
             if not 1 <= level <= 3:
                 continue
-            prompt = self._support_prompt_text(item.get("prompt") or item.get("question") or item.get("text"), title, level)
-            legacy_hint = item.get("hint") if item.get("prompt") is None and item.get("question") is None else None
+            prompt = self._support_prompt_text(item.get("prompt") or item.get("text"), title, level)
+            legacy_hint = item.get("hint") if item.get("prompt") is None else None
             hints = self._normalize_support_level_hints(item.get("hints") or item.get("hint_options") or [], title, level, legacy_hint)
             by_level[level] = {"prompt": prompt, "hints": hints}
         return [
@@ -4884,7 +4871,7 @@ class AIAnalyzer:
         for item in raw_items if isinstance(raw_items, list) else []:
             if not isinstance(item, dict):
                 continue
-            prompt = self._clean_text_value(item.get("prompt") or item.get("question") or "")
+            prompt = self._clean_text_value(item.get("prompt") or "")
             label = self._clean_text_value(item.get("label") or item.get("title") or prompt)
             focus = self._clean_text_value(item.get("visual_focus") or item.get("focus") or label)
             category = self._normalize_target_category(item.get("category") or label or prompt)
@@ -5238,23 +5225,6 @@ class AIAnalyzer:
         for pattern, replacement in replacements.items():
             updated = re.sub(pattern, replacement, updated, flags=re.I)
         return updated
-
-    def _downgrade_uncertain_quiz_language(
-        self,
-        quiz_candidates: list[dict[str, Any]],
-        objects: list[dict[str, Any]],
-    ) -> list[dict[str, Any]]:
-        for item in quiz_candidates:
-            for key in ("prompt", "answer", "explanation", "source_text"):
-                if key in item:
-                    item[key] = self._downgrade_uncertain_object_language(str(item.get(key) or ""), objects)
-            distractors = item.get("distractors")
-            if isinstance(distractors, list):
-                item["distractors"] = [
-                    self._downgrade_uncertain_object_language(str(value or ""), objects)
-                    for value in distractors
-                ]
-        return quiz_candidates
 
     def _normalize_actions(self, raw_items: list[Any]) -> list[dict[str, Any]]:
         actions: list[dict[str, Any]] = []
@@ -6566,113 +6536,6 @@ class AIAnalyzer:
             if len(notes) >= 3:
                 break
         return notes[:6]
-
-    def _normalize_quiz_candidates(
-        self,
-        raw_items: list[Any],
-        *,
-        objects: list[dict[str, Any]],
-        actions: list[dict[str, Any]],
-        vocabulary: list[dict[str, Any]],
-        phrases: list[dict[str, Any]],
-        simple_explanation: str,
-        environment_text: str,
-    ) -> list[dict[str, Any]]:
-        items: list[dict[str, Any]] = []
-        seen: set[str] = set()
-
-        def push(candidate: dict[str, Any]) -> None:
-            prompt = str(candidate.get("prompt") or "").strip()
-            answer = str(candidate.get("answer") or "").strip()
-            key = f"{candidate.get('quiz_type', '')}:{prompt.casefold()}"
-            if not prompt or not answer or key in seen:
-                return
-            seen.add(key)
-            items.append(
-                {
-                    "quiz_type": str(candidate.get("quiz_type") or "recognition").strip(),
-                    "prompt": prompt,
-                    "answer": answer,
-                    "distractors": [
-                        str(item).strip()
-                        for item in candidate.get("distractors", [])
-                        if str(item).strip()
-                    ][:3],
-                    "explanation": str(candidate.get("explanation") or "").strip(),
-                    "source_text": str(candidate.get("source_text") or answer).strip(),
-                }
-            )
-
-        for item in raw_items[:8]:
-            if isinstance(item, dict):
-                push(
-                    {
-                        "quiz_type": item.get("quiz_type") or "recognition",
-                        "prompt": item.get("prompt") or item.get("question") or "",
-                        "answer": item.get("answer") or item.get("correct_answer") or "",
-                        "distractors": item.get("distractors") or [],
-                        "explanation": item.get("explanation") or item.get("hint") or "",
-                        "source_text": item.get("source_text") or item.get("answer") or "",
-                    }
-                )
-
-        if not items and objects:
-            object_names = [obj["name"] for obj in objects]
-            for obj in objects[:2]:
-                push(
-                    {
-                        "quiz_type": "recognition",
-                        "prompt": "What is one key object in this image?",
-                        "answer": obj["name"],
-                        "distractors": [name for name in object_names if name != obj["name"]][:3],
-                        "explanation": obj["description"],
-                        "source_text": obj["name"],
-                    }
-                )
-
-        if len(items) < 4 and phrases:
-            for phrase in phrases[:3]:
-                push(
-                    {
-                        "quiz_type": "phrase_completion",
-                        "prompt": f'Which phrase means "{phrase["meaning_simple"]}"?',
-                        "answer": phrase["phrase"],
-                        "distractors": [item["phrase"] for item in phrases if item["phrase"] != phrase["phrase"]][:3],
-                        "explanation": phrase.get("example", ""),
-                        "source_text": phrase["phrase"],
-                    }
-                )
-
-        if len(items) < 4 and simple_explanation:
-            push(
-                {
-                    "quiz_type": "situation_understanding",
-                    "prompt": "What is happening in this image?",
-                    "answer": simple_explanation,
-                    "distractors": [
-                        "A person is sleeping in a private room.",
-                        "The image mainly shows a close-up object with no action.",
-                        "There is no clear scene to describe.",
-                    ],
-                    "explanation": environment_text,
-                    "source_text": simple_explanation,
-                }
-            )
-
-        if len(items) < 4 and vocabulary:
-            for vocab in vocabulary[:2]:
-                push(
-                    {
-                        "quiz_type": "recognition",
-                        "prompt": f'Which word means "{vocab["meaning_simple"]}"?',
-                        "answer": vocab["word"],
-                        "distractors": [item["word"] for item in vocabulary if item["word"] != vocab["word"]][:3],
-                        "explanation": vocab.get("example", ""),
-                        "source_text": vocab["word"],
-                    }
-                )
-
-        return items[:8]
 
     def _dedupe_reusable_language(self, items: list[dict[str, str]]) -> list[dict[str, str]]:
         unique: list[dict[str, str]] = []

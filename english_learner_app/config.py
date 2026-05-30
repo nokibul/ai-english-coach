@@ -50,9 +50,6 @@ class AppConfig:
     session_cookie_name: str
     session_ttl_hours: int
     otp_ttl_minutes: int
-    first_review_minutes: int
-    review_prompt_interval_seconds: int
-    quiz_retake_minutes: int
     max_upload_bytes: int
     ai_backend: str
     openai_api_key: str | None
@@ -110,11 +107,6 @@ class AppConfig:
             session_cookie_name=os.getenv("SESSION_COOKIE_NAME", "english_session"),
             session_ttl_hours=int(os.getenv("SESSION_TTL_HOURS", "168")),
             otp_ttl_minutes=int(os.getenv("OTP_TTL_MINUTES", "10")),
-            first_review_minutes=int(os.getenv("FIRST_REVIEW_MINUTES", "60")),
-            review_prompt_interval_seconds=int(
-                os.getenv("REVIEW_PROMPT_INTERVAL_SECONDS", "90")
-            ),
-            quiz_retake_minutes=int(os.getenv("QUIZ_RETAKE_MINUTES", "20")),
             max_upload_bytes=int(os.getenv("MAX_UPLOAD_BYTES", str(25 * 1024 * 1024))),
             ai_backend=ai_backend,
             openai_api_key=openai_api_key,

@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 
-ONBOARDING_QUESTIONS = [
+ONBOARDING_PROMPTS = [
     {
         "id": "listening_confidence",
         "prompt": "How easily do you understand short everyday English conversations?",
@@ -36,10 +36,10 @@ def evaluate_assessment(responses: dict[str, Any]) -> dict[str, Any]:
         raise ValueError("Assessment responses must be an object.")
 
     cleaned: dict[str, int] = {}
-    for question in ONBOARDING_QUESTIONS:
-        raw_value = responses.get(question["id"])
+    for prompt in ONBOARDING_PROMPTS:
+        raw_value = responses.get(prompt["id"])
         if raw_value in (None, ""):
-            raise ValueError("Please answer all fluency questions.")
+            raise ValueError("Please complete all fluency prompts.")
 
         try:
             value = int(raw_value)
@@ -48,7 +48,7 @@ def evaluate_assessment(responses: dict[str, Any]) -> dict[str, Any]:
 
         if value < 1 or value > 5:
             raise ValueError("Assessment answers must stay between 1 and 5.")
-        cleaned[question["id"]] = value
+        cleaned[prompt["id"]] = value
 
     score = sum(cleaned.values())
     if score <= 8:
