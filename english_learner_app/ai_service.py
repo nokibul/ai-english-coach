@@ -362,6 +362,7 @@ class AIAnalyzer:
         learner_level: str,
         attempt_index: int,
     ) -> str:
+        print('_build_articulation_enhancement_prompt taking feedback and enhancing')
         scene_guidance = {
             "starterHints": analysis.get("starterHints") or [],
             "sentenceStarters": analysis.get("sentenceStarters") or [],
