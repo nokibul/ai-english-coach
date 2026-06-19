@@ -10,9 +10,14 @@ import unittest
 from unittest.mock import patch
 
 from english_learner_app.assessment import evaluate_assessment
-from english_learner_app.ai_service import AIAnalyzer
+from english_learner_app.ai_service import AIAnalyzer, buildSessionQuizGenerationPrompt
 from english_learner_app.config import AppConfig
 from english_learner_app.database import Database, phrase_mastery_state
+from english_learner_app.describe_again import startDescribeAgain, submitDescribeAgain
+from english_learner_app.past_sessions import getPastSessions
+from english_learner_app.post_session_quiz import PostSessionQuizService
+from english_learner_app.roadmap import mapLanguageAssetToRoadmapSkill
+from english_learner_app.weak_part_retry import getWeakPartRetry, submitWeakPartRetry
 from english_learner_app.server import (
     apply_progress_event,
     build_learning_engines_payload,
@@ -2096,6 +2101,1168 @@ class ProgressRewardTests(unittest.TestCase):
         self.assertEqual("Practiced", practiced["mastery_state"])
         self.assertEqual("Used Correctly", used["mastery_state"])
         self.assertEqual(2, used["correct_count"])
+
+
+class PostSessionQuizAssetTests(unittest.TestCase):
+    def test_maps_language_assets_to_dynamic_roadmap_skills(self) -> None:
+        examples = [
+            ({"value": "covered with", "type": "phrase"}, "positioning", "Positioning"),
+            ({"value": "firmly holding", "type": "phrase"}, "actions", "Actions"),
+            ({"value": "climbing vines", "type": "phrase"}, "descriptive_language", "Descriptive Language"),
+            ({"value": "calm atmosphere", "type": "phrase"}, "atmosphere", "Atmosphere"),
+            ({"value": "The image shows...", "type": "sentence_pattern"}, "sentence_patterns", "Sentence Patterns"),
+            ({"value": "It appears to be...", "type": "phrase"}, "natural_english", "Natural English"),
+        ]
+
+        for asset, skill_key, skill_name in examples:
+            with self.subTest(asset=asset):
+                result = mapLanguageAssetToRoadmapSkill(asset)
+                self.assertEqual(skill_key, result["skillKey"])
+                self.assertEqual(skill_name, result["skillName"])
+
+        fallback = mapLanguageAssetToRoadmapSkill({"value": "unlisted useful phrase", "type": "phrase"})
+        self.assertEqual("descriptive_language", fallback["skillKey"])
+
+    def test_extracts_reusable_assets_from_completed_session(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db = Database(Path(temp_dir) / "app.sqlite3")
+            db.initialize()
+            user = db.create_user(
+                full_name="Quiz Learner",
+                phone=None,
+                email="quiz@example.com",
+                password_hash="hash",
+                difficulty_band="beginner",
+                fluency_score=10,
+                fluency_summary="Starting out.",
+                assessment={},
+                created_at="2026-06-07T00:00:00+00:00",
+            )
+            session_id = db.create_analysis_session(
+                user_id=user["id"],
+                image_name="image.jpg",
+                image_path="uploads/image.jpg",
+                title="Image articulation",
+                difficulty_band="beginner",
+                simple_explanation="A building with vines.",
+                natural_explanation=(
+                    "The image shows a modern building covered with dense greenery. "
+                    "In the background, climbing vines create a calm atmosphere."
+                ),
+                highlighted_html="",
+                summary={
+                    "sentenceStarters": ["The image shows...", "In the background, ..."],
+                    "coverageFocuses": [
+                        {
+                            "id": "greenery",
+                            "title": "Greenery around the building",
+                            "sourceText": "building with vines",
+                            "reusableLanguageGoal": [
+                                "Covered with",
+                                "covered with",
+                                "climbing vines",
+                                "visible in the background",
+                            ],
+                            "supportLevels": [
+                                {
+                                    "level": 3,
+                                    "prompt": "The building is surrounded by ___.",
+                                    "hints": ["leafy branches"],
+                                }
+                            ],
+                        }
+                    ],
+                },
+                raw_analysis={},
+                source_mode="demo",
+                created_at="2026-06-07T00:00:00+00:00",
+            )
+            db.bulk_create_session_phrase_items(
+                [
+                    {
+                        "user_id": user["id"],
+                        "session_id": session_id,
+                        "phrase": "covered with",
+                        "meaning_simple": "has something over its surface",
+                        "example": "The wall is covered with vines.",
+                        "examples": [],
+                        "reusable": 1,
+                        "collocation_type": "phrase",
+                        "created_at": "2026-06-07T00:00:00+00:00",
+                    }
+                ]
+            )
+
+            service = PostSessionQuizService(db)
+            learning_input = service.getCompletedSessionLearningInput(session_id)
+            assets = service.extractReusableLanguageAssetsFromSession(session_id)
+            repeated_assets = service.extractReusableLanguageAssetsFromSession(session_id)
+
+            self.assertEqual(user["id"], learning_input["userId"])
+            self.assertEqual(session_id, learning_input["sessionId"])
+            self.assertEqual(1, len(learning_input["coverageFocuses"]))
+
+            by_value = {item["value"].casefold(): item for item in assets}
+            self.assertIn("covered with", by_value)
+            self.assertIn("the image shows...", by_value)
+            self.assertIn("climbing vines", by_value)
+            self.assertEqual("phrase", by_value["covered with"]["type"])
+            self.assertEqual("positioning", by_value["covered with"]["roadmapSkillKey"])
+            self.assertEqual("positioning", by_value["visible in the background"]["roadmapSkillKey"])
+            self.assertEqual("descriptive_language", by_value["climbing vines"]["roadmapSkillKey"])
+            self.assertEqual("weak", by_value["leafy branches"]["status"])
+            self.assertEqual(15, by_value["leafy branches"]["masteryScore"])
+            self.assertGreaterEqual(by_value["covered with"]["usefulnessScore"], 80)
+            self.assertGreaterEqual(by_value["the image shows..."]["transferabilityScore"], 80)
+            self.assertEqual(1, sum(1 for item in assets if item["value"].casefold() == "covered with"))
+            self.assertEqual(len(assets), len(repeated_assets))
+            self.assertEqual(
+                len(assets),
+                len(db.list_session_reusable_language_assets(user_id=user["id"], session_id=session_id)),
+            )
+            progress = {item["skill_key"]: item for item in db.list_roadmap_skill_progress(user_id=user["id"])}
+            self.assertIn("positioning", progress)
+            self.assertGreaterEqual(progress["positioning"]["total_asset_count"], 1)
+            self.assertGreater(progress["positioning"]["average_mastery_score"], 0.0)
+
+    def test_gets_past_sessions_with_asset_counts_and_fallback_title(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db = Database(Path(temp_dir) / "app.sqlite3")
+            db.initialize()
+            user = db.create_user(
+                full_name="Past Session Learner",
+                phone=None,
+                email="past-sessions@example.com",
+                password_hash="hash",
+                difficulty_band="beginner",
+                fluency_score=10,
+                fluency_summary="Starting out.",
+                assessment={},
+                created_at="2026-06-07T00:00:00+00:00",
+            )
+            session_id = db.create_analysis_session(
+                user_id=user["id"],
+                image_name="building.jpg",
+                image_path="uploads/building.jpg",
+                title="",
+                difficulty_band="beginner",
+                simple_explanation="A building with vines.",
+                natural_explanation=(
+                    "The image shows a modern building covered with dense greenery. "
+                    "In the background, climbing vines create a calm atmosphere."
+                ),
+                highlighted_html="",
+                summary={
+                    "coverageFocuses": [
+                        {
+                            "id": "greenery",
+                            "title": "Greenery around the building",
+                            "sourceText": "building with vines",
+                            "reusableLanguageGoal": [
+                                "covered with",
+                                "visible in the background",
+                                "climbing vines",
+                            ],
+                        }
+                    ],
+                },
+                raw_analysis={},
+                source_mode="demo",
+                created_at="2026-06-18T00:00:00+00:00",
+            )
+
+            PostSessionQuizService(db).updateRoadmapFromSession(session_id, userId=user["id"])
+            with db._connect() as conn:
+                conn.execute(
+                    """
+                    UPDATE reusable_language_assets
+                    SET status = 'weak'
+                    WHERE user_id = ? AND normalized_value = ?
+                    """,
+                    (user["id"], "visible in the background"),
+                )
+
+            result = getPastSessions(db, user["id"])
+            session = result["sessions"][0]
+
+            self.assertEqual(str(session_id), session["sessionId"])
+            self.assertEqual("Session from Jun 18", session["title"])
+            self.assertEqual(f"/api/sessions/{session_id}/image", session["imageUrl"])
+            self.assertGreaterEqual(session["phrasesLearnedCount"], 3)
+            self.assertGreaterEqual(session["newAssetCount"], 1)
+            self.assertEqual(1, session["weakAssetCount"])
+            self.assertIsInstance(session["masteryScore"], int)
+
+    def test_generates_quiz_bank_from_high_value_assets(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db = Database(Path(temp_dir) / "app.sqlite3")
+            db.initialize()
+            user = db.create_user(
+                full_name="Quiz Bank Learner",
+                phone=None,
+                email="quiz-bank@example.com",
+                password_hash="hash",
+                difficulty_band="beginner",
+                fluency_score=10,
+                fluency_summary="Starting out.",
+                assessment={},
+                created_at="2026-06-07T00:00:00+00:00",
+            )
+            session_id = db.create_analysis_session(
+                user_id=user["id"],
+                image_name="image.jpg",
+                image_path="uploads/image.jpg",
+                title="Image articulation",
+                difficulty_band="beginner",
+                simple_explanation="A building with vines.",
+                natural_explanation=(
+                    "The image shows a modern building covered with dense greenery. "
+                    "In the background, climbing vines create a calm atmosphere."
+                ),
+                highlighted_html="",
+                summary={
+                    "sentenceStarters": ["The image shows...", "In the background, ..."],
+                    "coverageFocuses": [
+                        {
+                            "id": "greenery",
+                            "title": "Greenery around the building",
+                            "sourceText": "building with vines",
+                            "reusableLanguageGoal": [
+                                "covered with",
+                                "climbing vines",
+                                "visible in the background",
+                            ],
+                            "supportLevels": [
+                                {
+                                    "level": 3,
+                                    "prompt": "The building is surrounded by ___.",
+                                    "hints": ["dense greenery"],
+                                }
+                            ],
+                        }
+                    ],
+                },
+                raw_analysis={},
+                source_mode="demo",
+                created_at="2026-06-07T00:00:00+00:00",
+            )
+
+            service = PostSessionQuizService(db)
+            summary = service.generateQuizBankForSession(session_id)
+            repeated_summary = service.generateQuizBankForSession(session_id)
+            questions = db.list_session_quiz_questions(user_id=user["id"], session_id=session_id)
+            assets = db.list_session_reusable_language_assets(user_id=user["id"], session_id=session_id)
+            covered_asset = next(item for item in assets if item["value"].casefold() == "covered with")
+            covered_questions = [
+                question
+                for question in questions
+                if str(covered_asset["id"]) in question["language_asset_ids"]
+            ]
+            flexible_questions = [
+                question
+                for question in covered_questions
+                if question["type"] in {"production_challenge", "rewrite_challenge"}
+            ]
+
+            self.assertGreaterEqual(summary["selectedAssetCount"], 1)
+            self.assertEqual(summary["generatedQuestionCount"], len(questions))
+            self.assertEqual(repeated_summary["generatedQuestionCount"], len(questions))
+            self.assertGreaterEqual(len(covered_questions), 5)
+            self.assertIn("meaning_match", {question["type"] for question in covered_questions})
+            self.assertIn("fill_blank", {question["type"] for question in covered_questions})
+            self.assertIn("covered with", covered_questions[0]["expected_keywords"])
+            self.assertTrue(flexible_questions)
+            self.assertTrue(
+                all("covered with" in question["expected_keywords"] for question in flexible_questions)
+            )
+            self.assertTrue(any(question["options"] for question in covered_questions))
+            self.assertTrue(any(question["word_bank"] for question in covered_questions))
+
+    def test_updates_roadmap_from_completed_session_with_summary(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db = Database(Path(temp_dir) / "app.sqlite3")
+            db.initialize()
+            user = db.create_user(
+                full_name="Roadmap Summary Learner",
+                phone=None,
+                email="roadmap-summary@example.com",
+                password_hash="hash",
+                difficulty_band="beginner",
+                fluency_score=10,
+                fluency_summary="Starting out.",
+                assessment={},
+                created_at="2026-06-07T00:00:00+00:00",
+            )
+            session_id = db.create_analysis_session(
+                user_id=user["id"],
+                image_name="image.jpg",
+                image_path="uploads/image.jpg",
+                title="Image articulation",
+                difficulty_band="beginner",
+                simple_explanation="A building with vines.",
+                natural_explanation=(
+                    "The image shows a modern building covered with dense greenery. "
+                    "In the background, climbing vines create a calm atmosphere."
+                ),
+                highlighted_html="",
+                summary={
+                    "sentenceStarters": ["The image shows...", "In the background, ..."],
+                    "coverageFocuses": [
+                        {
+                            "id": "greenery",
+                            "title": "Greenery around the building",
+                            "sourceText": "building with vines",
+                            "reusableLanguageGoal": [
+                                "covered with",
+                                "surrounded by",
+                                "visible in the background",
+                                "climbing vines",
+                                "calm atmosphere",
+                            ],
+                            "supportLevels": [
+                                {
+                                    "level": 3,
+                                    "prompt": "The building is surrounded by ___.",
+                                    "hints": ["leafy branches"],
+                                }
+                            ],
+                        }
+                    ],
+                },
+                raw_analysis={},
+                source_mode="demo",
+                created_at="2026-06-07T00:00:00+00:00",
+            )
+
+            service = PostSessionQuizService(db)
+            summary = service.updateRoadmapFromSession(session_id, userId=user["id"])
+            repeated_summary = service.updateRoadmapFromSession(session_id, userId=user["id"])
+            by_skill = {item["skillKey"]: item for item in summary["updatedSkills"]}
+            repeated_by_skill = {item["skillKey"]: item for item in repeated_summary["updatedSkills"]}
+            assets = db.list_session_reusable_language_assets(user_id=user["id"], session_id=session_id)
+            by_value = {item["value"].casefold(): item for item in assets}
+
+            self.assertIn("New content", summary["message"])
+            self.assertIn("positioning", by_skill)
+            self.assertIn("descriptive_language", by_skill)
+            self.assertIn("atmosphere", by_skill)
+            self.assertGreaterEqual(by_skill["positioning"]["newAssetsAdded"], 3)
+            self.assertIn("covered with", by_skill["positioning"]["assets"])
+            self.assertIn("surrounded by", by_skill["positioning"]["assets"])
+            self.assertIn("visible in the background", by_skill["positioning"]["assets"])
+            self.assertEqual("positioning", by_value["covered with"]["roadmap_skill_key"])
+            self.assertEqual("descriptive_language", by_value["climbing vines"]["roadmap_skill_key"])
+            self.assertEqual("atmosphere", by_value["calm atmosphere"]["roadmap_skill_key"])
+            self.assertEqual("weak", by_value["leafy branches"]["status"])
+            self.assertTrue(all(item.get("roadmap_applied_at") for item in assets))
+            self.assertEqual(0, repeated_by_skill["positioning"]["newAssetsAdded"])
+            self.assertEqual("Your roadmap is up to date", repeated_summary["message"])
+
+    def test_gets_roadmap_skill_detail_with_grouped_assets(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db = Database(Path(temp_dir) / "app.sqlite3")
+            db.initialize()
+            user = db.create_user(
+                full_name="Roadmap Detail Learner",
+                phone=None,
+                email="roadmap-detail@example.com",
+                password_hash="hash",
+                difficulty_band="beginner",
+                fluency_score=10,
+                fluency_summary="Starting out.",
+                assessment={},
+                created_at="2026-06-07T00:00:00+00:00",
+            )
+            session_id = db.create_analysis_session(
+                user_id=user["id"],
+                image_name="image.jpg",
+                image_path="uploads/image.jpg",
+                title="Image articulation",
+                difficulty_band="beginner",
+                simple_explanation="A building with vines.",
+                natural_explanation=(
+                    "The building is covered with vines. "
+                    "A tree is standing near the building and a car is in front of it."
+                ),
+                highlighted_html="",
+                summary={
+                    "coverageFocuses": [
+                        {
+                            "id": "positioning",
+                            "title": "Positioning around the building",
+                            "sourceText": "building with vines",
+                            "reusableLanguageGoal": [
+                                "covered with",
+                                "surrounded by",
+                                "visible in the background",
+                                "standing near",
+                                "in front of",
+                            ],
+                        }
+                    ],
+                },
+                raw_analysis={},
+                source_mode="demo",
+                created_at="2026-06-07T00:00:00+00:00",
+            )
+
+            service = PostSessionQuizService(db)
+            service.updateRoadmapFromSession(session_id, userId=user["id"])
+            with db._connect() as conn:
+                conn.execute(
+                    """
+                    UPDATE reusable_language_assets
+                    SET status = 'weak', mastery_score = 0.35, wrong_count = 3
+                    WHERE user_id = ? AND normalized_value = ?
+                    """,
+                    (user["id"], "visible in the background"),
+                )
+                conn.execute(
+                    """
+                    UPDATE reusable_language_assets
+                    SET status = 'learning', mastery_score = 0.40, next_review_at = '2020-01-01T00:00:00+00:00'
+                    WHERE user_id = ? AND normalized_value = ?
+                    """,
+                    (user["id"], "standing near"),
+                )
+                conn.execute(
+                    """
+                    UPDATE reusable_language_assets
+                    SET status = 'mastered', mastery_score = 0.95
+                    WHERE user_id = ? AND normalized_value = ?
+                    """,
+                    (user["id"], "in front of"),
+                )
+
+            detail = service.getRoadmapSkillDetail(userId=user["id"], skillKey="positioning")
+            empty = service.getRoadmapSkillDetail(userId=user["id"], skillKey="actions")
+
+            self.assertEqual("positioning", detail["skillKey"])
+            self.assertEqual("Positioning", detail["skillName"])
+            self.assertEqual("Practice phrases that describe where things are.", detail["description"])
+            self.assertGreaterEqual(detail["totalAssetCount"], 5)
+            self.assertIn("covered with", [item["value"] for item in detail["newAssets"]])
+            self.assertIn("surrounded by", [item["value"] for item in detail["newAssets"]])
+            self.assertEqual(["visible in the background"], [item["value"] for item in detail["weakAssets"]])
+            self.assertEqual(["standing near"], [item["value"] for item in detail["dueReviewAssets"]])
+            self.assertEqual(["in front of"], [item["value"] for item in detail["masteredAssets"]])
+            self.assertTrue(all(item["sourceSessionId"] == str(session_id) for item in detail["newAssets"]))
+            self.assertEqual("actions", empty["skillKey"])
+            self.assertEqual(0, empty["totalAssetCount"])
+            self.assertEqual("Upload more images to unlock practice for this skill.", empty["emptyMessage"])
+
+    def test_starts_roadmap_practice_mission_from_skill_assets(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db = Database(Path(temp_dir) / "app.sqlite3")
+            db.initialize()
+            user = db.create_user(
+                full_name="Roadmap Mission Learner",
+                phone=None,
+                email="roadmap-mission@example.com",
+                password_hash="hash",
+                difficulty_band="beginner",
+                fluency_score=10,
+                fluency_summary="Starting out.",
+                assessment={},
+                created_at="2026-06-07T00:00:00+00:00",
+            )
+            session_id = db.create_analysis_session(
+                user_id=user["id"],
+                image_name="image.jpg",
+                image_path="uploads/image.jpg",
+                title="Image articulation",
+                difficulty_band="beginner",
+                simple_explanation="A building with vines.",
+                natural_explanation=(
+                    "The building is covered with vines and surrounded by dense greenery. "
+                    "A sign is visible in the background."
+                ),
+                highlighted_html="",
+                summary={
+                    "coverageFocuses": [
+                        {
+                            "id": "positioning",
+                            "title": "Positioning around the building",
+                            "sourceText": "building with vines",
+                            "reusableLanguageGoal": [
+                                "covered with",
+                                "surrounded by",
+                                "visible in the background",
+                                "standing near",
+                            ],
+                        }
+                    ],
+                },
+                raw_analysis={},
+                source_mode="demo",
+                created_at="2026-06-07T00:00:00+00:00",
+            )
+
+            service = PostSessionQuizService(db)
+            service.updateRoadmapFromSession(session_id, userId=user["id"])
+            mission = service.startRoadmapPracticeMission(userId=user["id"], skillKey="positioning")
+            question_types = {question["type"] for question in mission["questions"]}
+            question_asset_ids = {
+                str(asset_id)
+                for question in mission["questions"]
+                for asset_id in question["languageAssetIds"]
+            }
+            positioning_asset_ids = {
+                str(asset["id"])
+                for asset in db.list_roadmap_skill_assets(user_id=user["id"], skill_key="positioning")
+            }
+            with db._connect() as conn:
+                attempt = conn.execute(
+                    "SELECT * FROM roadmap_mission_attempts WHERE id = ?",
+                    (int(mission["missionId"]),),
+                ).fetchone()
+
+            self.assertEqual("roadmap_practice", mission["mode"])
+            self.assertEqual("positioning", mission["skillKey"])
+            self.assertEqual("Positioning", mission["skillName"])
+            self.assertGreaterEqual(len(mission["questions"]), 5)
+            self.assertLessEqual(len(mission["questions"]), 7)
+            self.assertNotIn("image_recall", question_types)
+            self.assertTrue({"rewrite_challenge", "production_challenge"} & question_types)
+            self.assertTrue(question_asset_ids <= positioning_asset_ids)
+            self.assertIsNotNone(attempt)
+            self.assertEqual("started", attempt["status"])
+            self.assertEqual(len(mission["questions"]), attempt["total_questions"])
+
+    def test_submit_roadmap_practice_answer_updates_mastery_progress_and_mission(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db = Database(Path(temp_dir) / "app.sqlite3")
+            db.initialize()
+            user = db.create_user(
+                full_name="Roadmap Answer Learner",
+                phone=None,
+                email="roadmap-answer@example.com",
+                password_hash="hash",
+                difficulty_band="beginner",
+                fluency_score=10,
+                fluency_summary="Starting out.",
+                assessment={},
+                created_at="2026-06-07T00:00:00+00:00",
+            )
+            session_id = db.create_analysis_session(
+                user_id=user["id"],
+                image_name="image.jpg",
+                image_path="uploads/image.jpg",
+                title="Image articulation",
+                difficulty_band="beginner",
+                simple_explanation="A building with vines.",
+                natural_explanation=(
+                    "The building is covered with vines and surrounded by dense greenery. "
+                    "A sign is visible in the background."
+                ),
+                highlighted_html="",
+                summary={
+                    "coverageFocuses": [
+                        {
+                            "id": "positioning",
+                            "title": "Positioning around the building",
+                            "sourceText": "building with vines",
+                            "reusableLanguageGoal": [
+                                "covered with",
+                                "surrounded by",
+                                "visible in the background",
+                                "standing near",
+                            ],
+                        }
+                    ],
+                },
+                raw_analysis={},
+                source_mode="demo",
+                created_at="2026-06-07T00:00:00+00:00",
+            )
+
+            service = PostSessionQuizService(db)
+            service.updateRoadmapFromSession(session_id, userId=user["id"])
+            mission = service.startRoadmapPracticeMission(userId=user["id"], skillKey="positioning")
+            fill_blank = next(question for question in mission["questions"] if question["type"] == "fill_blank")
+            first_result = service.submitQuizAnswer(
+                {
+                    "userId": user["id"],
+                    "missionId": mission["missionId"],
+                    "quizQuestionId": fill_blank["id"],
+                    "answer": fill_blank["correctAnswer"],
+                    "mode": "roadmap_practice",
+                }
+            )
+            remaining = [question for question in mission["questions"] if question["id"] != fill_blank["id"]]
+            final_result = first_result
+            for question in remaining:
+                answer = question["correctAnswer"]
+                if question["type"] == "production_challenge":
+                    answer = question["expectedKeywords"][0]
+                final_result = service.submitQuizAnswer(
+                    {
+                        "userId": user["id"],
+                        "missionId": mission["missionId"],
+                        "quizQuestionId": question["id"],
+                        "answer": answer,
+                        "mode": "roadmap_practice",
+                    }
+                )
+
+            updated = first_result["updatedAssets"][0]
+            progress = {
+                item["skill_key"]: item
+                for item in db.list_roadmap_skill_progress(user_id=user["id"])
+            }
+            with db._connect() as conn:
+                attempt = conn.execute(
+                    "SELECT * FROM roadmap_mission_attempts WHERE id = ?",
+                    (int(mission["missionId"]),),
+                ).fetchone()
+                asset = conn.execute(
+                    "SELECT * FROM reusable_language_assets WHERE id = ?",
+                    (int(updated["assetId"]),),
+                ).fetchone()
+
+            self.assertTrue(first_result["isCorrect"])
+            self.assertEqual(5, first_result["xpEarned"])
+            self.assertEqual(20, updated["oldMastery"])
+            self.assertEqual(27, updated["newMastery"])
+            self.assertGreaterEqual(asset["exposure_count"], 1)
+            self.assertGreaterEqual(asset["correct_count"], 1)
+            self.assertEqual("completed", final_result["missionStatus"])
+            self.assertEqual("completed", attempt["status"])
+            self.assertEqual(len(mission["questions"]), attempt["correct_count"])
+            self.assertEqual(0, attempt["wrong_count"])
+            self.assertGreaterEqual(attempt["xp_earned"], 25)
+            self.assertIn("positioning", progress)
+
+    def test_daily_review_returns_due_questions_and_updates_spaced_repetition(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db = Database(Path(temp_dir) / "app.sqlite3")
+            db.initialize()
+            user = db.create_user(
+                full_name="Daily Review Learner",
+                phone=None,
+                email="daily-review@example.com",
+                password_hash="hash",
+                difficulty_band="beginner",
+                fluency_score=10,
+                fluency_summary="Starting out.",
+                assessment={},
+                created_at="2026-06-07T00:00:00+00:00",
+            )
+            session_id = db.create_analysis_session(
+                user_id=user["id"],
+                image_name="image.jpg",
+                image_path="uploads/image.jpg",
+                title="Image articulation",
+                difficulty_band="beginner",
+                simple_explanation="A building with vines.",
+                natural_explanation=(
+                    "The building is covered with vines and surrounded by dense greenery. "
+                    "A sign is visible in the background."
+                ),
+                highlighted_html="",
+                summary={
+                    "coverageFocuses": [
+                        {
+                            "id": "positioning",
+                            "title": "Positioning around the building",
+                            "sourceText": "building with vines",
+                            "reusableLanguageGoal": [
+                                "covered with",
+                                "surrounded by",
+                                "visible in the background",
+                                "standing near",
+                            ],
+                        }
+                    ],
+                },
+                raw_analysis={},
+                source_mode="demo",
+                created_at="2026-06-07T00:00:00+00:00",
+            )
+
+            service = PostSessionQuizService(db)
+            no_review = service.getDailyReview(userId=user["id"])
+            service.updateRoadmapFromSession(session_id, userId=user["id"])
+            with db._connect() as conn:
+                conn.execute(
+                    """
+                    UPDATE reusable_language_assets
+                    SET next_review_at = '2020-01-01T00:00:00+00:00', status = 'weak'
+                    WHERE user_id = ?
+                    """,
+                    (user["id"],),
+                )
+            review = service.getDailyReview(userId=user["id"])
+            question = next(item for item in review["questions"] if item["type"] == "fill_blank")
+            result = service.submitQuizAnswer(
+                {
+                    "userId": user["id"],
+                    "quizQuestionId": question["id"],
+                    "answer": question["correctAnswer"],
+                    "mode": "daily_review",
+                }
+            )
+            updated = result["updatedAssets"][0]
+            progress = {
+                item["skill_key"]: item
+                for item in db.list_roadmap_skill_progress(user_id=user["id"])
+            }
+
+            self.assertEqual("daily_review", no_review["mode"])
+            self.assertEqual(0, no_review["dueAssetCount"])
+            self.assertEqual("No review due right now.", no_review["message"])
+            self.assertEqual("daily_review", review["mode"])
+            self.assertGreaterEqual(review["dueAssetCount"], 4)
+            self.assertGreaterEqual(len(review["questions"]), 5)
+            self.assertLessEqual(len(review["questions"]), 8)
+            self.assertGreater(review["xpAvailable"], 0)
+            self.assertNotIn("image_recall", {item["type"] for item in review["questions"]})
+            self.assertTrue(result["isCorrect"])
+            self.assertEqual(5, result["xpEarned"])
+            self.assertGreater(updated["newMastery"], updated["oldMastery"])
+            self.assertIn("positioning", progress)
+
+    def test_weak_part_retry_selects_focus_and_updates_target_mastery(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db = Database(Path(temp_dir) / "app.sqlite3")
+            db.initialize()
+            user = db.create_user(
+                full_name="Weak Part Learner",
+                phone=None,
+                email="weak-part@example.com",
+                password_hash="hash",
+                difficulty_band="beginner",
+                fluency_score=10,
+                fluency_summary="Starting out.",
+                assessment={},
+                created_at="2026-06-07T00:00:00+00:00",
+            )
+            session_id = db.create_analysis_session(
+                user_id=user["id"],
+                image_name="image.jpg",
+                image_path="uploads/image.jpg",
+                title="Old Building",
+                difficulty_band="beginner",
+                simple_explanation="A building with vines.",
+                natural_explanation="The building is covered with vines and has a calm atmosphere.",
+                highlighted_html="",
+                summary={
+                    "coverageFocuses": [
+                        {
+                            "id": "positioning",
+                            "title": "Positioning",
+                            "sourceText": "building with vines",
+                            "reusableLanguageGoal": ["covered with"],
+                            "supportLevels": [
+                                {"level": 1, "prompt": "Where are the vines?", "hints": ["vines"]},
+                                {
+                                    "level": 2,
+                                    "prompt": "Are the vines on one side or all over the building?",
+                                    "hints": ["all over"],
+                                },
+                                {
+                                    "level": 3,
+                                    "prompt": "The building is ______ with vines.",
+                                    "hints": ["covered"],
+                                },
+                            ],
+                        },
+                        {
+                            "id": "atmosphere",
+                            "title": "Atmosphere",
+                            "sourceText": "calm scene",
+                            "reusableLanguageGoal": ["calm atmosphere"],
+                            "supportLevels": [
+                                {"level": 1, "prompt": "How does the scene feel?", "hints": ["calm"]},
+                            ],
+                        },
+                    ],
+                },
+                raw_analysis={},
+                source_mode="demo",
+                created_at="2026-06-07T00:00:00+00:00",
+            )
+
+            PostSessionQuizService(db).updateRoadmapFromSession(session_id, userId=user["id"])
+            retry = getWeakPartRetry(db, user["id"], session_id)
+            target = next(asset for asset in retry["targetAssets"] if asset["value"] == "covered with")
+            before = db.get_reusable_language_asset(user_id=user["id"], asset_id=int(target["id"]))
+            result = submitWeakPartRetry(
+                db,
+                {
+                    "userId": user["id"],
+                    "sessionId": session_id,
+                    "focusName": retry["focusName"],
+                    "answer": "The building is covered with vines.",
+                    "usedSupportLevel": 1,
+                    "targetAssetIds": [target["id"]],
+                },
+            )
+            after = db.get_reusable_language_asset(user_id=user["id"], asset_id=int(target["id"]))
+
+            self.assertTrue(retry["hasWeakPart"])
+            self.assertEqual(str(session_id), retry["sessionId"])
+            self.assertEqual("Positioning", retry["focusName"])
+            self.assertEqual("Where are the vines?", retry["questionText"])
+            self.assertEqual(3, retry["previousHelpLevelUsed"])
+            self.assertEqual(3, len(retry["supportLevels"]))
+            self.assertTrue(result["success"])
+            self.assertEqual([{"id": target["id"], "value": "covered with"}], result["usedAssets"])
+            self.assertEqual(15, result["xpEarned"])
+            self.assertGreater(float(after["mastery_score"]), float(before["mastery_score"]))
+
+    def test_describe_again_selects_phrases_evaluates_and_stores_attempt(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db = Database(Path(temp_dir) / "app.sqlite3")
+            db.initialize()
+            user = db.create_user(
+                full_name="Describe Again Learner",
+                phone=None,
+                email="describe-again@example.com",
+                password_hash="hash",
+                difficulty_band="beginner",
+                fluency_score=10,
+                fluency_summary="Starting out.",
+                assessment={},
+                created_at="2026-06-07T00:00:00+00:00",
+            )
+            session_id = db.create_analysis_session(
+                user_id=user["id"],
+                image_name="image.jpg",
+                image_path="uploads/image.jpg",
+                title="Old Building",
+                difficulty_band="beginner",
+                simple_explanation="A building with vines.",
+                natural_explanation="The building is covered with vines and surrounded by greenery.",
+                highlighted_html="",
+                summary={
+                    "reusableLanguageAssets": [
+                        {
+                            "value": "building",
+                            "type": "noun",
+                            "meaning": "a structure",
+                            "exampleSentence": "The building is old.",
+                            "difficultyLevel": 1,
+                            "usefulnessScore": 1,
+                            "transferabilityScore": 1,
+                        },
+                        {
+                            "value": "covered with",
+                            "type": "phrase",
+                            "meaning": "has something over the surface",
+                            "exampleSentence": "The building is covered with climbing vines.",
+                            "difficultyLevel": 1,
+                            "usefulnessScore": 5,
+                            "transferabilityScore": 5,
+                        },
+                        {
+                            "value": "surrounded by",
+                            "type": "phrase",
+                            "meaning": "has things around it",
+                            "exampleSentence": "The building is surrounded by dense greenery.",
+                            "difficultyLevel": 1,
+                            "usefulnessScore": 5,
+                            "transferabilityScore": 5,
+                        },
+                        {
+                            "value": "calm atmosphere",
+                            "type": "phrase",
+                            "meaning": "a peaceful feeling",
+                            "exampleSentence": "The image has a calm atmosphere.",
+                            "difficultyLevel": 1,
+                            "usefulnessScore": 4,
+                            "transferabilityScore": 5,
+                        },
+                    ]
+                },
+                raw_analysis={},
+                source_mode="demo",
+                created_at="2026-06-07T00:00:00+00:00",
+            )
+
+            PostSessionQuizService(db).updateRoadmapFromSession(session_id, userId=user["id"])
+            start = startDescribeAgain(db, user["id"], session_id)
+            values = [item["value"] for item in start["selectedPhrases"]]
+            selected_ids = [item["assetId"] for item in start["selectedPhrases"]]
+            before = {
+                int(item["assetId"]): db.get_reusable_language_asset(user_id=user["id"], asset_id=int(item["assetId"]))
+                for item in start["selectedPhrases"]
+            }
+            result = submitDescribeAgain(
+                db,
+                {
+                    "userId": user["id"],
+                    "sessionId": session_id,
+                    "description": (
+                        "The building is covered with climbing vines. "
+                        "It is surrounded by dense greenery."
+                    ),
+                    "selectedAssetIds": selected_ids,
+                },
+            )
+
+            with db._connect() as conn:
+                attempt = conn.execute(
+                    "SELECT * FROM describe_again_attempts WHERE user_id = ? AND session_id = ?",
+                    (user["id"], session_id),
+                ).fetchone()
+
+            self.assertEqual(["covered with", "surrounded by", "calm atmosphere"], values)
+            self.assertFalse(result["usedAllPhrases"])
+            self.assertEqual(["covered with", "surrounded by"], result["usedPhrases"])
+            self.assertEqual(["calm atmosphere"], result["missingPhrases"])
+            self.assertGreater(result["score"], 50)
+            self.assertIsNotNone(attempt)
+            for selected_id in selected_ids[:2]:
+                after = db.get_reusable_language_asset(user_id=user["id"], asset_id=int(selected_id))
+                self.assertGreater(float(after["mastery_score"]), float(before[int(selected_id)]["mastery_score"]))
+            missing = db.get_reusable_language_asset(user_id=user["id"], asset_id=int(selected_ids[2]))
+            self.assertEqual("weak", missing["status"])
+
+    def test_quiz_generation_prompt_is_strict_and_session_scoped(self) -> None:
+        prompt = buildSessionQuizGenerationPrompt(
+            {
+                "sessionId": 12,
+                "imageUrl": "/api/sessions/12/image",
+                "originalDescription": "A building with vines.",
+                "finalDescription": "The building is covered with climbing vines.",
+                "coverageFocuses": [{"title": "Greenery around the building"}],
+            },
+            [
+                {
+                    "id": 4,
+                    "value": "covered with",
+                    "type": "phrase",
+                    "meaning": "full of something on its surface",
+                    "exampleSentence": "The building is covered with climbing vines.",
+                    "difficultyLevel": 1,
+                }
+            ],
+        )
+
+        self.assertIn("Return strict JSON only", prompt)
+        self.assertIn('"quizQuestions"', prompt)
+        self.assertIn("Do not introduce unrelated topics", prompt)
+        self.assertIn("covered with", prompt)
+        self.assertIn("The building is covered with climbing vines.", prompt)
+
+    def test_immediate_quiz_selects_subset_and_marks_questions_shown(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db = Database(Path(temp_dir) / "app.sqlite3")
+            db.initialize()
+            user = db.create_user(
+                full_name="Immediate Quiz Learner",
+                phone=None,
+                email="immediate-quiz@example.com",
+                password_hash="hash",
+                difficulty_band="beginner",
+                fluency_score=10,
+                fluency_summary="Starting out.",
+                assessment={},
+                created_at="2026-06-07T00:00:00+00:00",
+            )
+            session_id = db.create_analysis_session(
+                user_id=user["id"],
+                image_name="image.jpg",
+                image_path="uploads/image.jpg",
+                title="Image articulation",
+                difficulty_band="beginner",
+                simple_explanation="A building with vines.",
+                natural_explanation=(
+                    "The image shows a modern building covered with dense greenery. "
+                    "In the background, climbing vines create a calm atmosphere."
+                ),
+                highlighted_html="",
+                summary={
+                    "sentenceStarters": ["The image shows...", "In the background, ..."],
+                    "coverageFocuses": [
+                        {
+                            "id": "greenery",
+                            "title": "Greenery around the building",
+                            "sourceText": "building with vines",
+                            "reusableLanguageGoal": [
+                                "covered with",
+                                "climbing vines",
+                                "visible in the background",
+                            ],
+                            "supportLevels": [
+                                {
+                                    "level": 3,
+                                    "prompt": "The building is surrounded by ___.",
+                                    "hints": ["dense greenery"],
+                                }
+                            ],
+                        }
+                    ],
+                },
+                raw_analysis={},
+                source_mode="demo",
+                created_at="2026-06-07T00:00:00+00:00",
+            )
+
+            immediate = PostSessionQuizService(db).getImmediateQuizForSession(session_id, userId=user["id"])
+            question_types = [question["type"] for question in immediate["questions"]]
+            stored_questions = db.list_session_quiz_questions(user_id=user["id"], session_id=session_id)
+            shown_questions = [question for question in stored_questions if question["used_in_immediate_quiz"]]
+
+            self.assertEqual(session_id, immediate["sessionId"])
+            self.assertGreaterEqual(len(immediate["questions"]), 5)
+            self.assertLessEqual(len(immediate["questions"]), 7)
+            self.assertIn("fill_blank", question_types)
+            self.assertIn("better_sentence", question_types)
+            self.assertIn("sentence_builder", question_types)
+            self.assertTrue({"meaning_match", "multiple_choice"} & set(question_types))
+            if "production_challenge" in question_types:
+                self.assertEqual("production_challenge", question_types[-1])
+            self.assertTrue(all(question["usedInImmediateQuiz"] for question in immediate["questions"]))
+            self.assertTrue(all(question["timesShown"] == 1 for question in immediate["questions"]))
+            self.assertEqual(len(immediate["questions"]), len(shown_questions))
+
+    def test_past_session_practice_prefers_non_immediate_questions(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db = Database(Path(temp_dir) / "app.sqlite3")
+            db.initialize()
+            user = db.create_user(
+                full_name="Past Quiz Learner",
+                phone=None,
+                email="past-quiz@example.com",
+                password_hash="hash",
+                difficulty_band="beginner",
+                fluency_score=10,
+                fluency_summary="Starting out.",
+                assessment={},
+                created_at="2026-06-07T00:00:00+00:00",
+            )
+            session_id = db.create_analysis_session(
+                user_id=user["id"],
+                image_name="image.jpg",
+                image_path="uploads/image.jpg",
+                title="Image articulation",
+                difficulty_band="beginner",
+                simple_explanation="A building with vines.",
+                natural_explanation=(
+                    "The image shows a modern building covered with dense greenery. "
+                    "In the background, climbing vines create a calm atmosphere."
+                ),
+                highlighted_html="",
+                summary={
+                    "sentenceStarters": ["The image shows...", "In the background, ..."],
+                    "coverageFocuses": [
+                        {
+                            "id": "greenery",
+                            "title": "Greenery around the building",
+                            "sourceText": "building with vines",
+                            "reusableLanguageGoal": [
+                                "covered with",
+                                "climbing vines",
+                                "visible in the background",
+                            ],
+                            "supportLevels": [
+                                {
+                                    "level": 3,
+                                    "prompt": "The building is surrounded by ___.",
+                                    "hints": ["dense greenery"],
+                                }
+                            ],
+                        }
+                    ],
+                },
+                raw_analysis={},
+                source_mode="demo",
+                created_at="2026-06-07T00:00:00+00:00",
+            )
+
+            service = PostSessionQuizService(db)
+            immediate = service.getImmediateQuizForSession(session_id, userId=user["id"])
+            practice = service.getPracticeQuizForPastSession(session_id, userId=user["id"])
+            immediate_ids = {question["id"] for question in immediate["questions"]}
+            practice_ids = {question["id"] for question in practice["questions"]}
+
+            self.assertEqual("past_session_practice", practice["mode"])
+            self.assertGreaterEqual(len(practice["questions"]), 5)
+            self.assertLessEqual(len(practice["questions"]), 10)
+            self.assertLess(len(immediate_ids & practice_ids), len(practice_ids))
+            self.assertTrue(any(question["timesShown"] == 1 for question in practice["questions"]))
+
+    def test_submit_quiz_answer_updates_counts_attempts_and_mastery(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db = Database(Path(temp_dir) / "app.sqlite3")
+            db.initialize()
+            user = db.create_user(
+                full_name="Submit Quiz Learner",
+                phone=None,
+                email="submit-quiz@example.com",
+                password_hash="hash",
+                difficulty_band="beginner",
+                fluency_score=10,
+                fluency_summary="Starting out.",
+                assessment={},
+                created_at="2026-06-07T00:00:00+00:00",
+            )
+            session_id = db.create_analysis_session(
+                user_id=user["id"],
+                image_name="image.jpg",
+                image_path="uploads/image.jpg",
+                title="Image articulation",
+                difficulty_band="beginner",
+                simple_explanation="A building with vines.",
+                natural_explanation=(
+                    "The image shows a modern building covered with dense greenery. "
+                    "In the background, climbing vines create a calm atmosphere."
+                ),
+                highlighted_html="",
+                summary={
+                    "sentenceStarters": ["The image shows...", "In the background, ..."],
+                    "coverageFocuses": [
+                        {
+                            "id": "greenery",
+                            "title": "Greenery around the building",
+                            "sourceText": "building with vines",
+                            "reusableLanguageGoal": ["covered with"],
+                            "supportLevels": [
+                                {
+                                    "level": 3,
+                                    "prompt": "The building is covered with ___.",
+                                    "hints": ["climbing vines"],
+                                }
+                            ],
+                        }
+                    ],
+                },
+                raw_analysis={},
+                source_mode="demo",
+                created_at="2026-06-07T00:00:00+00:00",
+            )
+
+            service = PostSessionQuizService(db)
+            immediate = service.getImmediateQuizForSession(session_id, userId=user["id"])
+            fill_blank = next(question for question in immediate["questions"] if question["type"] == "fill_blank")
+            result = service.submitQuizAnswer(
+                {
+                    "userId": user["id"],
+                    "sessionId": session_id,
+                    "quizQuestionId": fill_blank["id"],
+                    "answer": fill_blank["correctAnswer"],
+                    "mode": "immediate_session_quiz",
+                }
+            )
+            stored_question = db.get_quiz_question(
+                user_id=user["id"],
+                session_id=session_id,
+                quiz_question_id=fill_blank["id"],
+            )
+            attempts = db.list_quiz_attempts_for_question(
+                user_id=user["id"],
+                session_id=session_id,
+                quiz_question_id=fill_blank["id"],
+            )
+
+            self.assertTrue(result["isCorrect"])
+            self.assertEqual(5, result["xpEarned"])
+            self.assertTrue(result["updatedMastery"])
+            self.assertEqual(1, stored_question["correct_count"])
+            self.assertEqual(0, stored_question["wrong_count"])
+            self.assertEqual(1, len(attempts))
 
 
 class AIAnalyzerTests(unittest.TestCase):

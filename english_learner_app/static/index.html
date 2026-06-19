@@ -61,6 +61,7 @@
           <button id="newSessionButton" class="new-session-button hidden" type="button" aria-label="Start a new session">
             <span class="new-session-icon">+</span>
           </button>
+          <button id="sessionsButton" class="ghost-button" type="button">Sessions</button>
           <button id="dashboardButton" class="ghost-button" type="button">Dashboard</button>
           <button id="themeToggleButton" class="theme-toggle-button" type="button" aria-label="Switch to dark mode" aria-pressed="false">
             <span class="theme-toggle-icon" aria-hidden="true">☾</span>
@@ -71,6 +72,8 @@
 
     <main class="learn-page">
       <div class="learn-shell">
+        <section id="homeScreen" class="home-screen hidden"></section>
+
         <section id="learnIntro" class="learn-intro">
           <h2 class="learn-title">Let’s get started!</h2>
           <p class="learn-copy">
@@ -171,6 +174,29 @@
         </section>
       </div>
     </main>
+
+    <nav id="homeBottomNav" class="home-bottom-nav hidden" aria-label="Primary">
+      <button class="home-nav-button active" type="button" data-home-nav="home">
+        <span aria-hidden="true">⌂</span>
+        <strong>Home</strong>
+      </button>
+      <button class="home-nav-button" type="button" data-home-nav="roadmap">
+        <span aria-hidden="true">◇</span>
+        <strong>Roadmap</strong>
+      </button>
+      <button class="home-nav-button" type="button" data-home-nav="review">
+        <span aria-hidden="true">▣</span>
+        <strong>Review</strong>
+      </button>
+      <button class="home-nav-button" type="button" data-home-nav="sessions">
+        <span aria-hidden="true">▧</span>
+        <strong>Sessions</strong>
+      </button>
+      <button class="home-nav-button" type="button" data-home-nav="profile">
+        <span aria-hidden="true">♙</span>
+        <strong>Profile</strong>
+      </button>
+    </nav>
 
     <div id="dashboardModal" class="modal hidden">
       <div class="modal-card dashboard-modal-card">

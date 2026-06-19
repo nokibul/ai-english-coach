@@ -19,6 +19,306 @@ from .utils import (
 )
 
 
+QUIZ_GENERATION_TYPES = {
+    "meaning_match",
+    "fill_blank",
+    "multiple_choice",
+    "better_sentence",
+    "sentence_builder",
+    "rewrite_challenge",
+    "production_challenge",
+    "image_recall",
+}
+
+def buildSessionQuizGenerationPrompt(
+    sessionInput: dict[str, Any],
+    languageAssets: list[dict[str, Any]],
+) -> str:
+    prompt_payload = {
+        "sessionInput": {
+            "sessionId": sessionInput.get("sessionId"),
+            "imageUrl": sessionInput.get("imageUrl"),
+            "originalDescription": sessionInput.get("originalDescription") or "",
+            "finalDescription": sessionInput.get("finalDescription") or "",
+            "enhancementHistory": sessionInput.get("enhancementHistory") or [],
+            "guidedCoverageResponses": sessionInput.get("guidedCoverageResponses") or [],
+            "coverageFocuses": sessionInput.get("coverageFocuses") or [],
+        },
+        "languageAssets": [
+            {
+                "id": asset.get("id"),
+                "value": asset.get("value") or "",
+                "type": asset.get("type") or "",
+                "meaning": asset.get("meaning") or asset.get("meaning_simple") or "",
+                "exampleSentence": asset.get("exampleSentence") or asset.get("example_sentence") or "",
+                "difficultyLevel": asset.get("difficultyLevel") or asset.get("difficulty_level") or 1,
+                "usefulnessScore": asset.get("usefulnessScore") or asset.get("usefulness_score") or 0,
+                "transferabilityScore": asset.get("transferabilityScore") or asset.get("transferability_score") or 0,
+            }
+            for asset in languageAssets
+        ],
+    }
+
+    return (
+        "You are the Post-Session Quiz Generation Engine for an AI English articulation app.\n"
+        "Your job is to help the learner practice REUSABLE ENGLISH from one completed image session.\n"
+        "The quiz must teach transferable phrases, sentence patterns, collocations, and descriptive language.\n"
+        "The quiz must NOT feel like a memory test about the image.\n\n"
+
+        "Return strict JSON only.\n"
+        "No markdown.\n"
+        "No explanations outside JSON.\n\n"
+
+        "CORE PRINCIPLE:\n"
+        "Quiz the LANGUAGE, not the IMAGE.\n"
+        "The image is only context. The learning target is reusable English.\n\n"
+
+        "GOOD QUIZ TARGETS:\n"
+        "- reusable phrases: covered with, surrounded by, visible in the background\n"
+        "- descriptive chunks: dense greenery, compact digital stopwatch\n"
+        "- sentence patterns: The image shows..., A ___ is visible..., The scene feels...\n"
+        "- positioning language: in the foreground, in the background, next to, attached to\n"
+        "- atmosphere language: calm atmosphere, peaceful surroundings, lively environment\n"
+        "- action language: firmly holding, walking through, gathered together\n\n"
+
+        "BAD QUIZ TARGETS:\n"
+        "- questions that ask the learner to remember image facts\n"
+        "- questions where the answer is only useful for this one image\n"
+        "- questions like: What was in the image?\n"
+        "- questions like: What color was the object?\n"
+        "- questions like: Where were the vines?\n"
+        "- questions like: What did the user upload?\n"
+        "- questions like: What object was shown?\n\n"
+
+        "A quiz may mention the image context, but the answer must be reusable English.\n\n"
+
+        "BAD EXAMPLE:\n"
+        "{\n"
+        '  "type": "image_recall",\n'
+        '  "questionText": "What was around the building?",\n'
+        '  "correctAnswer": "trees"\n'
+        "}\n\n"
+
+        "GOOD EXAMPLE:\n"
+        "{\n"
+        '  "type": "fill_blank",\n'
+        '  "languageAssetValues": ["surrounded by"],\n'
+        '  "questionText": "The building is ______ greenery.",\n'
+        '  "correctAnswer": "surrounded by",\n'
+        '  "options": ["surrounded by", "under", "between", "behind"],\n'
+        '  "explanation": "\\"Surrounded by\\" means something is all around the subject.",\n'
+        '  "difficultyLevel": 1\n'
+        "}\n\n"
+
+        "EXPECTED JSON SHAPE:\n"
+        "{\n"
+        '  "quizQuestions": [\n'
+        "    {\n"
+        '      "type": "fill_blank",\n'
+        '      "languageAssetValues": ["covered with"],\n'
+        '      "questionText": "The building is ______ climbing vines.",\n'
+        '      "prompt": null,\n'
+        '      "correctAnswer": "covered with",\n'
+        '      "options": ["covered with", "under", "behind", "between"],\n'
+        '      "wordBank": null,\n'
+        '      "explanation": "\\"Covered with\\" means something has another thing over its surface.",\n'
+        '      "difficultyLevel": 1\n'
+        "    }\n"
+        "  ]\n"
+        "}\n\n"
+
+        "ALLOWED TYPES:\n"
+        "- meaning_match\n"
+        "- fill_blank\n"
+        "- multiple_choice\n"
+        "- better_sentence\n"
+        "- sentence_builder\n"
+        "- rewrite_challenge\n"
+        "- production_challenge\n"
+        "- image_recall\n\n"
+
+        "QUIZ TYPE RULES:\n\n"
+
+        "meaning_match:\n"
+        "- Ask what a reusable phrase means.\n"
+        "- The correct answer should explain the phrase simply.\n"
+        "- Do not ask what happened in the image.\n\n"
+
+        "fill_blank:\n"
+        "- Blank should be the reusable phrase or language chunk.\n"
+        "- Example: The building is ______ climbing vines.\n"
+        "- Correct answer: covered with\n\n"
+
+        "multiple_choice:\n"
+        "- Ask which reusable phrase best completes a sentence.\n"
+        "- Options should be language choices, not image facts.\n\n"
+
+        "better_sentence:\n"
+        "- Compare a weak/simple sentence with a more natural reusable version.\n"
+        "- This is very important for articulation growth.\n"
+        "- Example weak: The building has vines.\n"
+        "- Example better: The building is covered with climbing vines.\n\n"
+
+        "sentence_builder:\n"
+        "- Use the target phrase inside the word bank.\n"
+        "- The answer should be a reusable sentence pattern.\n\n"
+
+        "rewrite_challenge:\n"
+        "- Ask the learner to improve a weak sentence using the target asset.\n"
+        "- The target asset must be listed in languageAssetValues.\n\n"
+
+        "production_challenge:\n"
+        "- Ask the learner to use a reusable phrase in a sentence.\n"
+        "- It may use this image context, but should train future use.\n"
+        "- Example: Write a sentence using 'surrounded by'.\n\n"
+
+        "image_recall:\n"
+        "- Use sparingly.\n"
+        "- It must still ask for reusable language, not image facts.\n"
+        "- Good: What phrase did you learn for saying something is all around the subject?\n"
+        "- Bad: What was around the building?\n\n"
+
+        "GENERATION RULES:\n"
+        "- Generate quizzes only from the provided session content and language assets.\n"
+        "- Do not introduce unrelated topics, objects, scenes, names, or places.\n"
+        "- Prefer reusable language over simple object names.\n"
+        "- Do not generate quizzes whose answer is a simple object noun unless it is part of a useful phrase.\n"
+        "- Make questions beginner-friendly.\n"
+        "- Use i+1 difficulty: slightly above the learner's current production, but still achievable.\n"
+        "- Questions should feel connected to the user's image, but the answer should teach reusable English.\n"
+        "- Generate varied question types.\n"
+        "- Avoid duplicate questions and repeated wording.\n"
+        "- For each high-value asset, generate 5-8 quiz questions when possible.\n"
+        "- Prioritize phrases, sentence patterns, positioning language, atmosphere language, action language, and descriptive collocations.\n"
+        "- Avoid over-generating for simple nouns.\n"
+        "- For rewrite_challenge and production_challenge, do not require exact string matching; include the target asset in languageAssetValues.\n"
+        "- prompt, options, and wordBank may be null when not needed.\n"
+        "- difficultyLevel must be 1, 2, or 3.\n\n"
+
+        "QUALITY CHECK BEFORE RETURNING JSON:\n"
+        "- Every question must have at least one languageAssetValues item.\n"
+        "- The correctAnswer should usually be a reusable phrase, sentence pattern, or improved sentence.\n"
+        "- Remove questions that mainly test image memory.\n"
+        "- Remove questions where the answer is only useful for this one image.\n"
+        "- Remove questions about colors, counts, objects, or locations unless they directly teach a reusable phrase.\n\n"
+
+        "SESSION AND LANGUAGE ASSETS JSON:\n"
+        f"{json.dumps(prompt_payload, ensure_ascii=True)}"
+    )
+
+
+def _validate_session_quiz_generation_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        raise ValueError("Quiz generation payload must be a JSON object.")
+    raw_questions = payload.get("quizQuestions")
+    if not isinstance(raw_questions, list):
+        raise ValueError('Quiz generation payload must include "quizQuestions" as a list.')
+
+    questions: list[dict[str, Any]] = []
+    seen: set[tuple[str, str, str]] = set()
+    for raw_question in raw_questions:
+        if not isinstance(raw_question, dict):
+            continue
+        question_type = str(raw_question.get("type") or "").strip()
+        if question_type not in QUIZ_GENERATION_TYPES:
+            raise ValueError(f"Unsupported quiz question type: {question_type}")
+        language_asset_values = _clean_quiz_string_list(raw_question.get("languageAssetValues"))
+        question_text = _clean_quiz_text(raw_question.get("questionText"))
+        prompt = _clean_quiz_text(raw_question.get("prompt"))
+        correct_answer = _clean_quiz_text(raw_question.get("correctAnswer"))
+        options = _clean_quiz_nullable_list(raw_question.get("options"))
+        word_bank = _clean_quiz_nullable_list(raw_question.get("wordBank"))
+        explanation = _clean_quiz_text(raw_question.get("explanation"))
+        try:
+            difficulty_level = int(raw_question.get("difficultyLevel") or 1)
+        except (TypeError, ValueError):
+            difficulty_level = 1
+        difficulty_level = max(1, min(3, difficulty_level))
+
+        if not language_asset_values:
+            raise ValueError("Each quiz question must include languageAssetValues.")
+        if not correct_answer:
+            raise ValueError("Each quiz question must include correctAnswer.")
+        if not question_text and not prompt:
+            raise ValueError("Each quiz question must include questionText or prompt.")
+        if question_type in {"meaning_match", "multiple_choice", "better_sentence"} and len(options or []) < 2:
+            raise ValueError(f"{question_type} questions must include at least two options.")
+        if question_type == "sentence_builder" and not word_bank:
+            raise ValueError("sentence_builder questions must include a wordBank.")
+
+        key = (
+            question_type,
+            normalize_answer(question_text or prompt),
+            normalize_answer(correct_answer),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        questions.append(
+            {
+                "type": question_type,
+                "languageAssetValues": language_asset_values,
+                "questionText": question_text,
+                "prompt": prompt or None,
+                "correctAnswer": correct_answer,
+                "options": options,
+                "wordBank": word_bank,
+                "explanation": explanation,
+                "difficultyLevel": difficulty_level,
+            }
+        )
+
+    if not questions:
+        raise ValueError("Quiz generation payload did not include any valid questions.")
+    return {"quizQuestions": questions}
+
+
+def _build_quiz_generation_repair_prompt(
+    *,
+    original_prompt: str,
+    invalid_output: str,
+    error_message: str,
+) -> str:
+    return (
+        "Repair the quiz generation output so it is valid strict JSON only.\n"
+        "No markdown.\n"
+        "No comments.\n"
+        "No text outside JSON.\n"
+        "Return exactly this top-level shape: {\"quizQuestions\": [...]}.\n"
+        "Every question must use one allowed type, include languageAssetValues, questionText or prompt, correctAnswer, explanation, and difficultyLevel 1-3.\n"
+        "Use only the original session content and language assets.\n\n"
+        f"Validation error:\n{error_message}\n\n"
+        f"Original instructions:\n{original_prompt[:6000]}\n\n"
+        f"Invalid output:\n{invalid_output[:6000]}"
+    )
+
+
+def _clean_quiz_text(value: Any) -> str:
+    if value is None:
+        return ""
+    return re.sub(r"\s+", " ", str(value).strip())
+
+
+def _clean_quiz_string_list(value: Any) -> list[str]:
+    values = value if isinstance(value, list) else []
+    cleaned: list[str] = []
+    seen: set[str] = set()
+    for item in values:
+        text = _clean_quiz_text(item)
+        key = text.casefold()
+        if text and key not in seen:
+            seen.add(key)
+            cleaned.append(text)
+    return cleaned
+
+
+def _clean_quiz_nullable_list(value: Any) -> list[str] | None:
+    if value is None:
+        return None
+    cleaned = _clean_quiz_string_list(value)
+    return cleaned or None
+
+
 class AIAnalyzer:
     def __init__(self, config: AppConfig) -> None:
         self.config = config
@@ -352,6 +652,39 @@ class AIAnalyzer:
                 original_text=original_text,
                 attempt_index=attempt_index,
             )
+
+    async def generate_session_quiz_questions(
+        self,
+        *,
+        session_input: dict[str, Any],
+        language_assets: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        prompt = buildSessionQuizGenerationPrompt(session_input, language_assets)
+        try:
+            output_text = await self._request_text_generation(
+                prompt=prompt,
+                max_output_tokens=3600,
+                temperature=0.2,
+            )
+            try:
+                payload = extract_json_payload(output_text)
+                return _validate_session_quiz_generation_payload(payload)
+            except Exception as first_exc:
+                repair_prompt = _build_quiz_generation_repair_prompt(
+                    original_prompt=prompt,
+                    invalid_output=output_text,
+                    error_message=str(first_exc),
+                )
+                repaired_text = await self._request_text_generation(
+                    prompt=repair_prompt,
+                    max_output_tokens=3600,
+                    temperature=0.0,
+                )
+                repaired_payload = extract_json_payload(repaired_text)
+                return _validate_session_quiz_generation_payload(repaired_payload)
+        except Exception as exc:
+            print(f"[quiz-generation-fallback] {type(exc).__name__}: {exc}")
+            return {"quizQuestions": []}
 
     def _build_articulation_enhancement_prompt(
         self,

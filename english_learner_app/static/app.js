@@ -2,8 +2,12 @@ const state = {
   user: null,
   stats: null,
   progress: null,
+  progressSummary: null,
   sessions: [],
   visibleSessionCount: 0,
+  roadmapOverview: null,
+  roadmapSkillDetail: null,
+  dailyReview: null,
   learnView: "compose",
   currentSessionId: null,
   currentSession: null,
@@ -41,6 +45,8 @@ const state = {
     layerRewards: [],
     allLayersBonusAwarded: false,
   },
+  quiz: createEmptyQuizState(),
+  sessionReviewFilter: "all",
 };
 
 const els = {};
@@ -63,6 +69,28 @@ const LEARNING_STAGES = Object.freeze({
 });
 let sessionListObserver = null;
 
+function createEmptyQuizState() {
+  return {
+    mode: "",
+    sessionId: null,
+    missionId: null,
+    skillKey: "",
+    skillName: "",
+    questions: [],
+    currentIndex: 0,
+    selectedAnswer: "",
+    typedAnswer: "",
+    builtSentenceWords: [],
+    results: [],
+    totalXpEarned: 0,
+    isSubmitting: false,
+    feedback: null,
+    started: false,
+    loading: false,
+    error: "",
+  };
+}
+
 document.addEventListener("DOMContentLoaded", () => {
   cacheElements();
   initializeTheme();
@@ -75,12 +103,15 @@ function cacheElements() {
     "xpValue",
     "streakValue",
     "newSessionButton",
+    "sessionsButton",
     "uploadBackButton",
     "dashboardButton",
     "themeToggleButton",
     "closeDashboardButton",
     "dashboardModal",
     "dashboardContent",
+    "homeScreen",
+    "homeBottomNav",
     "userBadge",
     "learnIntro",
     "composePanel",
@@ -138,9 +169,13 @@ function bindEvents() {
   els.chooseGalleryButton.addEventListener("click", () => openImagePicker("gallery"));
   els.uploadBackButton.addEventListener("click", openNewSessionComposer);
   els.newSessionButton.addEventListener("click", openNewSessionComposer);
+  els.sessionsButton.addEventListener("click", openSessionsReviewScreen);
   els.dashboardButton.addEventListener("click", openDashboardModal);
   els.themeToggleButton.addEventListener("click", toggleTheme);
   els.closeDashboardButton.addEventListener("click", closeDashboardModal);
+  els.homeBottomNav?.querySelectorAll("[data-home-nav]").forEach((button) => {
+    button.addEventListener("click", onHomeNavClick);
+  });
   document.addEventListener("click", (event) => {
     if (!event.target.closest?.(".starter-hint-chip, .starter-hint-popover")) {
       closeStarterHintPopovers();
@@ -295,9 +330,10 @@ async function bootstrap() {
     };
 
     if (data.user) {
-      applyUserState(data.user, data.stats, data.progress);
+      applyUserState(data.user, data.stats, data.progress, data.progressSummary);
       renderDashboardContent();
       await fetchSessions();
+      await fetchRoadmapOverview();
       await restoreSessionFromRoute();
     } else {
       switchAuthTab("signup");
@@ -333,10 +369,11 @@ function showAuthOverlay(visible) {
   els.authOverlay.classList.toggle("hidden", !visible);
 }
 
-function applyUserState(user, stats, progress) {
+function applyUserState(user, stats, progress, progressSummary = null) {
   state.user = user;
   state.stats = stats || null;
   state.progress = progress || null;
+  state.progressSummary = progressSummary || null;
   state.learnView = "compose";
   els.userBadge.textContent = `${user.full_name} · ${user.difficulty_label || formatBand(user.difficulty_band)}`;
   els.dashboardButton.disabled = false;
@@ -350,8 +387,12 @@ function clearUserState() {
   state.user = null;
   state.stats = null;
   state.progress = null;
+  state.progressSummary = null;
   state.sessions = [];
   state.visibleSessionCount = 0;
+  state.roadmapOverview = null;
+  state.roadmapSkillDetail = null;
+  state.dailyReview = null;
   state.learnView = "compose";
   state.currentSessionId = null;
   state.currentSession = null;
@@ -383,6 +424,29 @@ function renderLearnPlaceholder() {
   els.sessionDetailPanel.classList.add("hidden");
   els.sessionDetailPanel.innerHTML = "";
   renderLearnMode();
+}
+
+function onHomeNavClick(event) {
+  const target = event.currentTarget?.dataset?.homeNav || "home";
+  if (target === "home") {
+    openNewSessionComposer();
+    return;
+  }
+  if (target === "roadmap") {
+    openRoadmapOverviewScreen();
+    return;
+  }
+  if (target === "sessions") {
+    openSessionsReviewScreen();
+    return;
+  }
+  if (target === "review") {
+    openDailyReviewScreen();
+    return;
+  }
+  if (target === "profile") {
+    openDashboardModal();
+  }
 }
 
 function renderSession(session, options = {}) {
@@ -2689,6 +2753,9 @@ function renderImproveStep(session) {
   document.getElementById("finishSessionButton")?.addEventListener("click", () => {
     openNewSessionComposer();
   });
+  document.getElementById("startImmediateQuizButton")?.addEventListener("click", () => {
+    beginImmediateSessionQuiz(session.id);
+  });
   els.sessionDetailPanel.querySelectorAll("[data-insert-phrase]").forEach((button) => {
     button.addEventListener("click", () => {
       insertPhraseIntoImproveInput(button.dataset.insertPhrase || "");
@@ -3858,9 +3925,12 @@ function renderFinalPolishedReveal(upgradeState, suggestions = [], feedback = {}
         </div>
       </section>
 
-      <button id="finishSessionButton" class="primary-button journey-primary-button" type="button">
-        Start New Image <span aria-hidden="true">→</span>
-      </button>
+      <div class="final-action-row">
+        <button id="startImmediateQuizButton" class="primary-button journey-primary-button" type="button">
+          Practice what you learned <span aria-hidden="true">→</span>
+        </button>
+        <button id="finishSessionButton" class="text-button" type="button">Start New Image</button>
+      </div>
     </section>
   `;
 }
@@ -7528,6 +7598,10 @@ function renderAiThinkingState(title, steps = []) {
 }
 
 function showSessionThinkingState(title, steps) {
+  document.body.classList.remove("home-dashboard-active");
+  els.homeScreen?.classList.add("hidden");
+  els.homeBottomNav?.classList.add("hidden");
+  document.querySelector(".app-topbar")?.classList.remove("upload-app-header");
   els.sessionWorkspace.classList.remove("hidden");
   els.sessionWorkspace.classList.add("focused-session-layout");
   els.sessionWorkspace.classList.remove("has-session-library");
@@ -7551,13 +7625,49 @@ function feedbackTotalScore(feedback) {
 async function fetchSessions() {
   if (!state.user) return;
   try {
-    const data = await api("/api/sessions");
+    const data = await api("/api/sessions/past");
     state.sessions = data.sessions || [];
     state.visibleSessionCount = Math.min(SESSION_CHUNK_SIZE, state.sessions.length);
     renderSessionLibrary();
+    if (state.learnView === "sessions") {
+      renderSessionsReviewList();
+    }
+    if (state.learnView === "compose") {
+      renderHomeScreen();
+    }
     renderDashboardContent();
   } catch (error) {
     showToast(error.message, true);
+  }
+}
+
+async function fetchRoadmapOverview(options = {}) {
+  if (!state.user) return null;
+  try {
+    const data = await api("/api/roadmap");
+    state.roadmapOverview = data || { skills: [] };
+    if (state.learnView === "compose") {
+      renderHomeScreen();
+    }
+    if (state.learnView === "roadmap") {
+      renderRoadmapOverviewScreen();
+    }
+    return state.roadmapOverview;
+  } catch (error) {
+    if (!options.silent) showToast(error.message || "Unable to load roadmap.", true);
+    return null;
+  }
+}
+
+async function fetchProgressSummary(options = {}) {
+  if (!state.user) return null;
+  try {
+    const data = await api("/api/progress/summary");
+    state.progressSummary = data.progressSummary || null;
+    return state.progressSummary;
+  } catch (error) {
+    if (!options.silent) showToast(error.message || "Unable to load profile progress.", true);
+    return null;
   }
 }
 
@@ -7578,6 +7688,64 @@ async function loadSession(sessionId, options = {}) {
       openNewSessionComposer({ updateUrl: false });
     }
   }
+}
+
+async function startImmediateQuiz(sessionId) {
+  return api(`/api/sessions/${sessionId}/immediate-quiz`);
+}
+
+async function startPastSessionPractice(sessionId) {
+  return api(`/api/sessions/${sessionId}/practice-quiz`);
+}
+
+async function getWeakPartRetryData(sessionId) {
+  return api(`/api/sessions/${sessionId}/weak-part`);
+}
+
+async function submitWeakPartRetryAnswer(sessionId, payload) {
+  return api(`/api/sessions/${sessionId}/weak-part`, {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+async function getRoadmapSkillDetailData(skillKey) {
+  return api(`/api/roadmap/${encodeURIComponent(skillKey)}`);
+}
+
+async function startRoadmapPracticeData(skillKey) {
+  return api(`/api/roadmap/${encodeURIComponent(skillKey)}/practice/start`, {
+    method: "POST",
+  });
+}
+
+async function startDailyReviewData() {
+  return api("/api/review/daily");
+}
+
+async function startDescribeAgainData(sessionId, count = 3) {
+  return api(`/api/sessions/${sessionId}/describe-again/start?count=${encodeURIComponent(count)}`);
+}
+
+async function submitDescribeAgainAnswer(sessionId, payload) {
+  return api(`/api/sessions/${sessionId}/describe-again`, {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+async function startSessionAgain(sessionId) {
+  return api(`/api/sessions/${sessionId}/restart`, {
+    method: "POST",
+  });
+}
+
+async function submitQuizAnswerApi(payload) {
+  return api("/api/quiz/answer", {
+    method: "POST",
+    headers: jsonHeaders(),
+    body: JSON.stringify(payload),
+  });
 }
 
 function resetUploadPreview() {
@@ -7630,6 +7798,8 @@ function openNewSessionComposer(options = {}) {
   state.learnView = "compose";
   state.currentSession = null;
   state.currentSessionId = null;
+  state.quiz = createEmptyQuizState();
+  setFocusedSessionLayout(false);
   resetUploadPreview();
   els.analyzeForm.reset();
   els.analyzeButton.disabled = !state.user;
@@ -7638,6 +7808,25 @@ function openNewSessionComposer(options = {}) {
   }
   renderLearnPlaceholder();
   window.scrollTo({ top: 0, behavior: "smooth" });
+}
+
+async function openSessionsReviewScreen() {
+  if (!state.user) {
+    showToast("Please log in first.", true);
+    return;
+  }
+  closeDashboardModal();
+  state.learnView = "sessions";
+  state.currentSession = null;
+  state.currentSessionId = null;
+  state.quiz = createEmptyQuizState();
+  renderSessionsReviewList();
+  try {
+    await fetchSessions();
+    renderSessionsReviewList();
+  } catch (error) {
+    showToast(error.message, true);
+  }
 }
 
 async function onSignup(event) {
@@ -7776,6 +7965,13 @@ async function startImageAnalysis() {
         difficulty_label: session.difficulty_label,
         source_mode: session.source_mode,
         mastery_percent: session.mastery_percent,
+        image_url: session.image_url,
+        phrases_learned: session.phrases_learned || 0,
+        quiz_questions_available: session.quiz_questions_available || 0,
+        practice_due_count: session.practice_due_count || 0,
+        session_mastery_percent: session.session_mastery_percent || 0,
+        accuracy_percent: session.accuracy_percent || 0,
+        status: session.status || "Completed",
         created_at: session.created_at,
       },
       ...state.sessions.filter((item) => item.id !== session.id),
@@ -7997,9 +8193,11 @@ function didCoverageImprove(previousFeedback = {}, nextFeedback = {}) {
   return coveredFeedbackTypes(nextFeedback).some((type) => !beforeCovered.has(type));
 }
 
-function openDashboardModal() {
+async function openDashboardModal() {
   renderDashboardContent();
   els.dashboardModal.classList.remove("hidden");
+  const summary = await fetchProgressSummary({ silent: true });
+  if (summary) renderDashboardContent();
 }
 
 function closeDashboardModal() {
@@ -8016,77 +8214,58 @@ function renderDashboardContent() {
     return;
   }
 
-  const progress = state.progress || {
-    xp_points: 0,
-    streak_days: 0,
-    learner_level: 1,
-    words_learned: 0,
-    phrases_mastered: 0,
-    overall_accuracy_percent: 0,
-    overall_mastery_percent: 0,
-    recent_runs: [],
-    weekly_summary: { accuracy_percent: 0, improvement_percent: 0 },
+  const progress = state.progress || {};
+  const summary = state.progressSummary || {
+    totalXp: Number(progress.xp_points || 0),
+    currentLevel: Number(progress.learner_level || 1),
+    levelName: profileLevelName(Number(progress.learner_level || 1)),
+    streak: Number(progress.streak_days || 0),
+    imagesCompleted: Number(progress.sessions_completed || state.sessions.length || 0),
+    phrasesLearned: Number(progress.phrases_mastered || 0),
+    roadmapCheckpointsCompleted: 0,
+    achievements: [],
   };
-  const recentSessions = state.sessions.slice(0, 3);
+  const achievements = Array.isArray(summary.achievements) ? summary.achievements : [];
 
   els.dashboardContent.innerHTML = `
     <div class="dashboard-stack">
       <section class="dashboard-section">
         <div class="section-head">
           <div>
-            <p class="eyebrow">Progress</p>
+            <p class="eyebrow">Profile</p>
             <h4>${escapeHtml(state.user.full_name)}</h4>
           </div>
           <button id="logoutButton" class="text-button" type="button">Log out</button>
         </div>
-        <div class="dashboard-stat-grid">
-          <article class="status-pill">
-            <span class="status-label">XP</span>
-            <strong class="status-value">${progress.xp_points || 0}</strong>
-          </article>
-          <article class="status-pill">
-            <span class="status-label">Streak</span>
-            <strong class="status-value">${progress.streak_days || 0}</strong>
-          </article>
+        <div class="profile-level-card">
+          <span>Level ${Number(summary.currentLevel || 1)}</span>
+          <strong>${escapeHtml(summary.levelName || "Observer")}</strong>
+          <small>${Number(summary.totalXp || 0)} total XP</small>
+        </div>
+      </section>
+
+      <section class="dashboard-section">
+        <div class="dashboard-stat-grid profile-stat-grid">
+          ${renderProfileStat("XP", summary.totalXp)}
+          ${renderProfileStat("Level", summary.currentLevel)}
+          ${renderProfileStat("Streak", summary.streak)}
+          ${renderProfileStat("Images", summary.imagesCompleted)}
+          ${renderProfileStat("Phrases", summary.phrasesLearned)}
+          ${renderProfileStat("Checkpoints", summary.roadmapCheckpointsCompleted)}
         </div>
       </section>
 
       <section class="dashboard-section">
         <div class="section-head">
           <div>
-            <p class="eyebrow">Quick Loop</p>
-            <h4>Image to evolved description</h4>
-          </div>
-        </div>
-        <div class="empty-copy compact-empty-copy">
-          Upload an image, describe it, improve each part, then see the final evolution.
-        </div>
-      </section>
-
-      <section class="dashboard-section">
-        <div class="section-head">
-          <div>
-            <p class="eyebrow">Recent</p>
-            <h4>Image sessions</h4>
+            <p class="eyebrow">Achievements</p>
+            <h4>Earned badges</h4>
           </div>
         </div>
         ${
-          recentSessions.length
-            ? `
-            <div class="session-preview-grid">
-              ${recentSessions
-                .map(
-                  (session) => `
-                    <article class="session-preview-card">
-                      <strong>${escapeHtml(session.title)}</strong>
-                      <p class="muted">${escapeHtml(formatDate(session.created_at))}</p>
-                    </article>
-                  `
-                )
-                .join("")}
-            </div>
-          `
-            : `<div class="empty-copy">Your latest image sessions will appear here.</div>`
+          achievements.length
+            ? `<div class="profile-achievement-list">${achievements.map(renderProfileAchievement).join("")}</div>`
+            : `<div class="empty-copy">Achievements will appear as you complete sessions and practice.</div>`
         }
       </section>
     </div>
@@ -8098,19 +8277,543 @@ function renderDashboardContent() {
   }
 }
 
+function renderProfileStat(label, value) {
+  return `
+    <article class="status-pill profile-stat-pill">
+      <span class="status-label">${escapeHtml(label)}</span>
+      <strong class="status-value">${escapeHtml(String(Number(value || 0)))}</strong>
+    </article>
+  `;
+}
+
+function renderProfileAchievement(achievement = {}) {
+  return `
+    <article class="profile-achievement-card">
+      <span aria-hidden="true">✓</span>
+      <strong>${escapeHtml(achievement.name || "Achievement")}</strong>
+    </article>
+  `;
+}
+
+function profileLevelName(level) {
+  const value = Number(level || 1);
+  if (value <= 5) return "Observer";
+  if (value <= 10) return "Describer";
+  if (value <= 20) return "Explorer";
+  if (value <= 35) return "Articulator";
+  if (value <= 50) return "Communicator";
+  return "Storyteller";
+}
+
+function renderHomeScreen() {
+  if (!els.homeScreen || !state.user) return;
+  const progress = state.progress || {};
+  const sessions = Array.isArray(state.sessions) ? state.sessions : [];
+  const recentSessions = sessions.slice(0, 3);
+  const firstName = firstUserName(state.user.full_name);
+  const roadmap = state.roadmapOverview || {};
+  const recommendedSkill = roadmap.recommendedSkill || null;
+  const dueCount = Number(roadmap.dueReviewCount || 0);
+  const recommendationText = recommendedSkill
+    ? roadmapSkillPracticeLabel(recommendedSkill)
+    : "Upload an image to unlock your first skill.";
+
+  els.homeScreen.innerHTML = `
+    <header class="home-hero-head">
+      <div>
+        <h1>${escapeHtml(homeGreeting())}, ${escapeHtml(firstName)}</h1>
+        <p>What should you do next?</p>
+      </div>
+      <div class="home-stat-row" aria-label="Learning stats">
+        <article class="home-stat-card">
+          <span class="home-stat-icon flame" aria-hidden="true">◆</span>
+          <strong>${Number(progress.streak_days || 0)}</strong>
+          <small>Day Streak</small>
+        </article>
+        <article class="home-stat-card">
+          <span class="home-stat-icon xp" aria-hidden="true">★</span>
+          <strong>${Number(progress.xp_points || 0)}</strong>
+          <small>Total XP</small>
+        </article>
+        <button class="home-alert-button" type="button" data-home-profile aria-label="Open profile">
+          <span aria-hidden="true">♢</span>
+          <i></i>
+        </button>
+      </div>
+    </header>
+
+    <section class="home-next-grid">
+      <article class="home-action-card primary">
+        <div>
+          <span class="home-action-icon" aria-hidden="true">＋</span>
+          <h2>Start New Session</h2>
+          <p>Upload an image and learn English from your own life.</p>
+        </div>
+        <button class="home-primary-button" type="button" data-home-start-session>Start</button>
+      </article>
+
+      <article class="home-action-card">
+        <div>
+          <span class="home-action-icon purple" aria-hidden="true">◇</span>
+          <h2>Continue Roadmap</h2>
+          <p>${recommendedSkill ? escapeHtml(recommendedSkill.skillName || "Roadmap") : "No skill unlocked yet"}</p>
+          <small>${escapeHtml(recommendationText)}</small>
+        </div>
+        <button class="home-secondary-button" type="button" data-home-roadmap ${recommendedSkill ? "" : "disabled"}>Continue</button>
+      </article>
+
+      <article class="home-action-card">
+        <div>
+          <span class="home-action-icon green" aria-hidden="true">▣</span>
+          <h2>Daily Review</h2>
+          <p>${dueCount ? `${dueCount} phrase${pluralize(dueCount)} due today` : "No review due right now."}</p>
+        </div>
+        <button class="home-secondary-button" type="button" data-home-daily-review ${dueCount ? "" : "disabled"}>Review</button>
+      </article>
+    </section>
+
+    <section class="home-practice-section">
+      <div class="home-section-head">
+        <h2>Recent Sessions</h2>
+        <button class="home-see-all-button" type="button" data-home-see-all>
+          <span>See All</span>
+          <strong aria-hidden="true">›</strong>
+        </button>
+      </div>
+      ${
+        recentSessions.length
+          ? `<div class="home-practice-grid">${recentSessions.map(renderHomePracticeCard).join("")}</div>`
+          : `<div class="home-empty-card">No sessions yet.</div>`
+      }
+    </section>
+  `;
+
+  els.homeScreen.querySelector("[data-home-start-session]")?.addEventListener("click", () => openImagePicker("gallery"));
+  els.homeScreen.querySelector("[data-home-roadmap]")?.addEventListener("click", () => {
+    if (recommendedSkill) openRoadmapSkillDetail(recommendedSkill.skillKey);
+  });
+  els.homeScreen.querySelector("[data-home-daily-review]")?.addEventListener("click", openDailyReviewScreen);
+  els.homeScreen.querySelector("[data-home-see-all]")?.addEventListener("click", openSessionsReviewScreen);
+  els.homeScreen.querySelector("[data-home-profile]")?.addEventListener("click", openDashboardModal);
+  els.homeScreen.querySelectorAll("[data-home-practice-session]").forEach((button) => {
+    button.addEventListener("click", () => beginPastSessionPractice(Number(button.dataset.homePracticeSession)));
+  });
+  els.homeScreen.querySelectorAll("[data-home-open-session]").forEach((button) => {
+    button.addEventListener("click", async () => loadSession(Number(button.dataset.homeOpenSession)));
+  });
+}
+
+function renderHomePracticeCard(session = {}) {
+  const sessionId = sessionIdValue(session);
+  const mastery = sessionMasteryValue(session);
+  const phraseCount = sessionPhraseCount(session);
+  const imageUrl = session.image_url || session.imageUrl || `/api/sessions/${sessionId}/image`;
+  return `
+    <article class="home-practice-card">
+      <button class="home-practice-image-button" type="button" data-home-open-session="${escapeHtml(sessionId)}" aria-label="Open ${escapeHtml(session.title || "session")}">
+        <img src="${escapeHtml(imageUrl)}" alt="${escapeHtml(session.image_name || session.title || "Session image")}">
+        <span class="home-image-chip" aria-hidden="true">▧</span>
+        <span class="home-card-menu" aria-hidden="true">⋮</span>
+      </button>
+      <div class="home-practice-body">
+        <h3>${escapeHtml(session.title || "Image session")}</h3>
+        ${mastery !== null ? `<p><span aria-hidden="true">★</span>${mastery}% Mastery</p>` : ""}
+        ${phraseCount !== null ? `<p>${phraseCount} phrase${pluralize(phraseCount)} learned</p>` : ""}
+        <button class="home-practice-button" type="button" data-home-open-session="${escapeHtml(sessionId)}">
+          <strong>Open Session</strong>
+          <span aria-hidden="true">›</span>
+        </button>
+      </div>
+    </article>
+  `;
+}
+
+function roadmapSkillPracticeLabel(skill = {}) {
+  const parts = [];
+  const newCount = Number(skill.newAssetCount || 0);
+  const weakCount = Number(skill.weakAssetCount || 0);
+  const dueCount = Number(skill.dueReviewCount || 0);
+  if (newCount) parts.push(`${newCount} new phrase${pluralize(newCount)} to practice`);
+  if (weakCount) parts.push(`${weakCount} weak`);
+  if (dueCount) parts.push(`${dueCount} due`);
+  if (parts.length) return parts.join(" · ");
+  const total = Number(skill.totalAssetCount || 0);
+  return total ? `${total} phrase${pluralize(total)} unlocked` : "No practice yet.";
+}
+
+async function openRoadmapOverviewScreen() {
+  if (!state.user) {
+    showToast("Please log in first.", true);
+    return;
+  }
+  closeDashboardModal();
+  state.learnView = "roadmap";
+  state.currentSession = null;
+  state.currentSessionId = null;
+  state.quiz = createEmptyQuizState();
+  renderRoadmapOverviewScreen();
+  await fetchRoadmapOverview({ silent: true });
+  renderRoadmapOverviewScreen();
+}
+
+function renderRoadmapOverviewScreen() {
+  state.learnView = "roadmap";
+  renderLearnMode();
+  setFocusedSessionLayout(true);
+  els.sessionDetailPanel.classList.remove("hidden");
+  els.sessionLibrarySection.classList.add("hidden");
+  const overview = state.roadmapOverview || {};
+  const skills = Array.isArray(overview.skills) ? overview.skills : [];
+  const hasRoadmapContent = skills.some((skill) => Number(skill.totalAssetCount || 0) > 0);
+  els.sessionDetailPanel.innerHTML = `
+    <section class="review-shell roadmap-shell">
+      <header class="review-header roadmap-header">
+        <div>
+          <p class="eyebrow">Roadmap</p>
+          <h2>Your skill map</h2>
+          <p>These skill buckets grow from the reusable English you learn in image sessions.</p>
+        </div>
+        <button id="roadmapNewSessionButton" class="primary-button compact-action-button" type="button">New Session</button>
+      </header>
+      ${
+        hasRoadmapContent
+          ? `<div class="roadmap-skill-grid">${skills.map(renderRoadmapSkillCard).join("")}</div>`
+          : `<div class="empty-copy review-empty">Upload an image to unlock practice.</div>`
+      }
+    </section>
+  `;
+  document.getElementById("roadmapNewSessionButton")?.addEventListener("click", openNewSessionComposer);
+  els.sessionDetailPanel.querySelectorAll("[data-roadmap-skill]").forEach((button) => {
+    button.addEventListener("click", () => openRoadmapSkillDetail(button.dataset.roadmapSkill));
+  });
+  window.scrollTo({ top: 0, behavior: "smooth" });
+}
+
+function renderRoadmapSkillCard(skill = {}) {
+  const total = Number(skill.totalAssetCount || 0);
+  const mastered = Number(skill.masteredAssetCount || 0);
+  const percent = total > 0 ? Math.max(0, Math.min(100, Math.round((mastered / total) * 100))) : 0;
+  const meta = [
+    Number(skill.newAssetCount || 0) ? `${Number(skill.newAssetCount)} new` : "",
+    Number(skill.weakAssetCount || 0) ? `${Number(skill.weakAssetCount)} weak` : "",
+    Number(skill.dueReviewCount || 0) ? `${Number(skill.dueReviewCount)} due` : "",
+  ].filter(Boolean);
+  return `
+    <button class="roadmap-skill-card ${total ? "" : "empty"}" type="button" data-roadmap-skill="${escapeHtml(skill.skillKey || "")}">
+      <span class="roadmap-skill-icon" aria-hidden="true">${roadmapSkillIcon(skill.skillKey)}</span>
+      <strong>${escapeHtml(skill.skillName || "Skill")}</strong>
+      <p>${escapeHtml(skill.description || "")}</p>
+      <div class="roadmap-progress-label">${escapeHtml(skill.progressLabel || "No practice yet")}</div>
+      <div class="roadmap-progress-bar" aria-hidden="true"><span style="width:${percent}%"></span></div>
+      ${
+        meta.length
+          ? `<small>${meta.map(escapeHtml).join(" · ")}</small>`
+          : `<small>${escapeHtml(skill.emptyMessage || "No practice yet. Upload more images to unlock this skill.")}</small>`
+      }
+    </button>
+  `;
+}
+
+async function openRoadmapSkillDetail(skillKey) {
+  if (!skillKey) return;
+  state.learnView = "roadmap";
+  renderRoadmapSkillLoading();
+  try {
+    const detail = await getRoadmapSkillDetailData(skillKey);
+    state.roadmapSkillDetail = detail;
+    renderRoadmapSkillDetail(detail);
+  } catch (error) {
+    showToast(error.message || "Unable to open roadmap skill.", true);
+    renderRoadmapOverviewScreen();
+  }
+}
+
+function renderRoadmapSkillLoading() {
+  renderLearnMode();
+  setFocusedSessionLayout(true);
+  els.sessionDetailPanel.classList.remove("hidden");
+  els.sessionDetailPanel.innerHTML = `
+    <section class="review-shell roadmap-shell">
+      <div class="quiz-loading-card">
+        <p class="eyebrow">Roadmap</p>
+        <h2>Loading skill...</h2>
+      </div>
+    </section>
+  `;
+}
+
+function renderRoadmapSkillDetail(detail = {}) {
+  const groups = [
+    ["New Practice", detail.newAssets || [], false],
+    ["Weak Phrases", detail.weakAssets || [], false],
+    ["Due Review", detail.dueReviewAssets || [], false],
+    ["Mastered", detail.masteredAssets || [], true],
+  ];
+  const total = Number(detail.totalAssetCount || 0);
+  const mastered = Number(detail.masteredAssetCount || 0);
+  const progress = total > 0 ? Math.round((mastered / total) * 100) : 0;
+  els.sessionDetailPanel.innerHTML = `
+    <section class="review-shell roadmap-shell">
+      <header class="past-session-topbar">
+        <button id="roadmapBackButton" class="past-session-back-button" type="button" aria-label="Back to roadmap">←</button>
+        <div>
+          <p class="eyebrow">Roadmap Skill</p>
+          <h2>${escapeHtml(detail.skillName || "Skill")}</h2>
+          <p>${escapeHtml(detail.description || "")}</p>
+        </div>
+      </header>
+      <section class="roadmap-detail-summary">
+        <div><strong>${mastered}/${total}</strong><small>Mastered</small></div>
+        <div><strong>${Number(detail.averageMasteryScore || 0)}%</strong><small>Average</small></div>
+      </section>
+      <div class="roadmap-progress-bar roadmap-detail-progress" aria-hidden="true"><span style="width:${progress}%"></span></div>
+      ${
+        total
+          ? `<button id="startRoadmapPracticeButton" class="primary-button journey-primary-button" type="button">Start Practice</button>`
+          : `<div class="home-empty-card">${escapeHtml(detail.emptyMessage || "Upload more images to unlock practice for this skill.")}</div>`
+      }
+      <section class="roadmap-detail-groups">
+        ${groups.map(([label, assets, collapsed]) => renderRoadmapAssetGroup(label, assets, { collapsed })).join("")}
+      </section>
+    </section>
+  `;
+  document.getElementById("roadmapBackButton")?.addEventListener("click", renderRoadmapOverviewScreen);
+  document.getElementById("startRoadmapPracticeButton")?.addEventListener("click", () => beginRoadmapPractice(detail.skillKey, detail.skillName));
+}
+
+function renderRoadmapAssetGroup(label, assets = [], options = {}) {
+  const content = assets.length
+    ? `<div class="roadmap-asset-list">${assets.map(renderRoadmapAssetRow).join("")}</div>`
+    : `<p>No ${escapeHtml(label.toLowerCase())} phrases right now.</p>`;
+  if (options.collapsed) {
+    return `
+      <details class="roadmap-asset-group roadmap-asset-group-collapsed">
+        <summary><h3>${escapeHtml(label)}</h3><small>${assets.length} phrase${pluralize(assets.length)}</small></summary>
+        ${content}
+      </details>
+    `;
+  }
+  return `
+    <section class="roadmap-asset-group">
+      <h3>${escapeHtml(label)}</h3>
+      ${content}
+    </section>
+  `;
+}
+
+function renderRoadmapAssetRow(asset = {}) {
+  const mastery = Math.round(Number(asset.masteryScore || 0));
+  return `
+    <article class="roadmap-asset-row">
+      <strong>${escapeHtml(asset.value || "Phrase")}</strong>
+      ${asset.meaning ? `<p>${escapeHtml(asset.meaning)}</p>` : ""}
+      ${asset.exampleSentence ? `<p class="roadmap-asset-example">${escapeHtml(asset.exampleSentence)}</p>` : ""}
+      <small>${mastery}% mastery${asset.status ? ` · ${escapeHtml(asset.status)}` : ""}</small>
+    </article>
+  `;
+}
+
+function roadmapSkillIcon(skillKey = "") {
+  const icons = {
+    basic_description: "A",
+    positioning: "↔",
+    actions: "↗",
+    descriptive_language: "✦",
+    atmosphere: "☼",
+    sentence_patterns: "¶",
+    natural_english: "~",
+  };
+  return icons[skillKey] || "◇";
+}
+
+async function openDailyReviewScreen() {
+  if (!state.user) {
+    showToast("Please log in first.", true);
+    return;
+  }
+  state.learnView = "review";
+  state.currentSession = null;
+  state.currentSessionId = null;
+  state.quiz = createEmptyQuizState();
+  renderDailyReviewLoading();
+  try {
+    state.dailyReview = await startDailyReviewData();
+    renderDailyReviewLanding();
+  } catch (error) {
+    state.dailyReview = null;
+    renderDailyReviewError(error.message || "Unable to load daily review.");
+  }
+}
+
+function renderDailyReviewLoading() {
+  renderLearnMode();
+  setFocusedSessionLayout(true);
+  els.sessionDetailPanel.classList.remove("hidden");
+  els.sessionDetailPanel.innerHTML = `
+    <section class="review-shell roadmap-shell">
+      <div class="quiz-loading-card">
+        <p class="eyebrow">Review</p>
+        <h2>Loading daily review...</h2>
+        <p>Checking what is due today.</p>
+      </div>
+    </section>
+  `;
+}
+
+function renderDailyReviewError(message = "Unable to load daily review.") {
+  renderLearnMode();
+  setFocusedSessionLayout(true);
+  els.sessionDetailPanel.classList.remove("hidden");
+  els.sessionDetailPanel.innerHTML = `
+    <section class="review-shell roadmap-shell">
+      <div class="quiz-loading-card error">
+        <p class="eyebrow">Review</p>
+        <h2>Daily Review</h2>
+        <p>${escapeHtml(message)}</p>
+        <button id="dailyReviewRetryButton" class="primary-button" type="button">Try Again</button>
+      </div>
+    </section>
+  `;
+  document.getElementById("dailyReviewRetryButton")?.addEventListener("click", openDailyReviewScreen);
+}
+
+function renderDailyReviewLanding() {
+  renderLearnMode();
+  setFocusedSessionLayout(true);
+  els.sessionDetailPanel.classList.remove("hidden");
+  const review = state.dailyReview || {};
+  const questions = Array.isArray(review.questions) ? review.questions : [];
+  const dueCount = Number(review.dueAssetCount || 0);
+  const xpAvailable = Number(review.xpAvailable || 0);
+  const hasReview = questions.length > 0;
+  els.sessionDetailPanel.innerHTML = `
+    <section class="review-shell roadmap-shell">
+      <header class="review-header">
+        <div>
+          <p class="eyebrow">Review</p>
+          <h2>Daily Review</h2>
+          <p>${hasReview ? `${dueCount} phrase${pluralize(dueCount)} due.` : "No review due right now."}</p>
+        </div>
+      </header>
+      <article class="home-action-card">
+        <div>
+          <span class="home-action-icon green" aria-hidden="true">▣</span>
+          <h2>${hasReview ? "Short review" : "You're caught up"}</h2>
+          <p>${hasReview ? `${questions.length} question${pluralize(questions.length)} ready.` : escapeHtml(review.message || "No review due right now.")}</p>
+          ${hasReview ? `<small>+${xpAvailable} XP available</small>` : ""}
+        </div>
+        ${
+          hasReview
+            ? `<button id="startDailyReviewButton" class="home-secondary-button" type="button">Start Review</button>`
+            : `<button id="practiceRoadmapButton" class="home-secondary-button" type="button">Practice Roadmap</button>`
+        }
+      </article>
+    </section>
+  `;
+  document.getElementById("startDailyReviewButton")?.addEventListener("click", beginDailyReview);
+  document.getElementById("practiceRoadmapButton")?.addEventListener("click", openRoadmapOverviewScreen);
+}
+
+async function beginDailyReview() {
+  state.learnView = "review";
+  state.quiz = createEmptyQuizState();
+  const existingReview = state.dailyReview;
+  const useExisting = existingReview && Array.isArray(existingReview.questions);
+  renderQuizLoading("Loading daily review");
+  try {
+    const review = useExisting ? existingReview : await startDailyReviewData();
+    state.dailyReview = review;
+    if (!Array.isArray(review.questions) || !review.questions.length) {
+      renderDailyReviewLanding();
+      showToast(review.message || "No review due right now.");
+      return;
+    }
+    state.quiz = {
+      ...createEmptyQuizState(),
+      mode: "daily_review",
+      questions: review.questions,
+      started: false,
+    };
+    renderQuizIntro("Daily Review");
+  } catch (error) {
+    state.quiz.error = error.message;
+    renderQuizError(error.message || "Unable to start daily review.");
+  }
+}
+
+async function beginRoadmapPractice(skillKey, skillName = "Roadmap Practice") {
+  state.learnView = "roadmap";
+  state.quiz = createEmptyQuizState();
+  renderQuizLoading(`Loading ${skillName}`);
+  try {
+    const mission = await startRoadmapPracticeData(skillKey);
+    state.quiz = {
+      ...createEmptyQuizState(),
+      mode: "roadmap_practice",
+      missionId: mission.missionId,
+      skillKey: mission.skillKey || skillKey,
+      skillName: mission.skillName || skillName,
+      questions: mission.questions || [],
+      started: false,
+    };
+    renderQuizIntro(`${state.quiz.skillName} Practice`);
+  } catch (error) {
+    state.quiz.error = error.message;
+    renderQuizError(error.message || "Unable to start roadmap practice.");
+  }
+}
+
+function firstUserName(value) {
+  const name = cleanUiText(value) || "Learner";
+  return name.split(/\s+/)[0] || "Learner";
+}
+
+function homeGreeting() {
+  const hour = new Date().getHours();
+  if (hour < 12) return "Good morning";
+  if (hour < 18) return "Good afternoon";
+  return "Good evening";
+}
+
 function renderLearnMode() {
   const showSession = state.learnView === "session" && Boolean(state.currentSession);
-  const showCompose = !showSession;
+  const showSessions = state.learnView === "sessions";
+  const showRoadmap = state.learnView === "roadmap";
+  const showReview = state.learnView === "review";
+  const showCompose = !showSession && !showSessions && !showRoadmap && !showReview;
+  const showHome = Boolean(state.user && showCompose);
+  const showMainTab = Boolean(state.user && (showHome || showSessions || showRoadmap || showReview));
 
   if (showCompose) {
     updateAppHeaderForStage(LEARNING_STAGES.UPLOAD_IMAGE);
   } else {
     document.querySelector(".app-topbar")?.classList.remove("upload-app-header");
   }
-  els.learnIntro.classList.toggle("hidden", !showCompose);
-  els.composePanel.classList.toggle("hidden", !showCompose);
-  els.sessionWorkspace.classList.toggle("hidden", !showSession);
+  document.body.classList.toggle("home-dashboard-active", showMainTab);
+  els.homeScreen?.classList.toggle("hidden", !showHome);
+  els.homeBottomNav?.classList.toggle("hidden", !showMainTab);
+  updateBottomNavActive();
+  if (showHome) {
+    renderHomeScreen();
+  }
+  els.learnIntro.classList.toggle("hidden", !showCompose || showHome);
+  els.composePanel.classList.toggle("hidden", !showCompose || showHome);
+  els.sessionWorkspace.classList.toggle("hidden", !showSession && !showSessions && !showRoadmap && !showReview);
   els.newSessionButton.classList.toggle("hidden", !state.user);
+  els.sessionsButton.classList.toggle("hidden", !state.user);
+}
+
+function updateBottomNavActive() {
+  const active = state.learnView === "sessions"
+    ? "sessions"
+    : state.learnView === "roadmap"
+    ? "roadmap"
+    : state.learnView === "review"
+    ? "review"
+    : "home";
+  els.homeBottomNav?.querySelectorAll("[data-home-nav]").forEach((button) => {
+    button.classList.toggle("active", button.dataset.homeNav === active);
+  });
 }
 
 function renderSessionLibrary() {
@@ -8191,6 +8894,1030 @@ function teardownSessionObserver() {
   }
   sessionListObserver.disconnect();
   sessionListObserver = null;
+}
+
+function renderSessionsReviewList() {
+  state.learnView = "sessions";
+  renderLearnMode();
+  setFocusedSessionLayout(true);
+  els.sessionDetailPanel.classList.remove("hidden");
+  els.sessionLibrarySection.classList.add("hidden");
+  const sessions = state.sessions || [];
+  els.sessionDetailPanel.innerHTML = `
+    <section class="review-shell">
+      <header class="review-header">
+        <div>
+          <p class="eyebrow">Past Sessions</p>
+          <h2>Your image sessions</h2>
+          <p>Open a session to remember what you learned or redo the image.</p>
+        </div>
+        <button id="reviewNewImageButton" class="primary-button compact-action-button" type="button">New Image</button>
+      </header>
+      ${
+        state.sessions.length
+          ? `
+            <div class="review-session-grid">
+              ${sessions.map(renderSessionReviewCard).join("")}
+            </div>
+          `
+          : `<div class="empty-copy review-empty">No sessions yet. Upload an image to start learning.</div>`
+      }
+    </section>
+  `;
+  document.getElementById("reviewNewImageButton")?.addEventListener("click", openNewSessionComposer);
+  els.sessionDetailPanel.querySelectorAll("[data-review-session-id]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      await openSessionReviewDetail(Number(button.dataset.reviewSessionId));
+    });
+  });
+  window.scrollTo({ top: 0, behavior: "smooth" });
+}
+
+function filteredReviewSessions() {
+  const filter = state.sessionReviewFilter || "all";
+  return (state.sessions || []).filter((session) => {
+    if (filter === "practice_due") return sessionStatus(session) === "Practice Due";
+    if (filter === "completed") return sessionStatus(session) !== "Practice Due";
+    return true;
+  });
+}
+
+function sessionStatus(session = {}) {
+  return cleanUiText(session.status) || (Number(session.practice_due_count || 0) > 0 ? "Practice Due" : "Completed");
+}
+
+function sessionIdValue(session = {}) {
+  return Number(session.id || session.sessionId || session.session_id || 0);
+}
+
+function sessionMasteryValue(session = {}) {
+  const raw = session.masteryScore ?? session.session_mastery_percent ?? session.mastery_percent;
+  const value = Number(raw);
+  return Number.isFinite(value) && value > 0 ? Math.round(value) : null;
+}
+
+function sessionPhraseCount(session = {}) {
+  const raw = session.phrasesLearnedCount ?? session.phrases_learned;
+  const value = Number(raw);
+  return Number.isFinite(value) && value > 0 ? value : null;
+}
+
+function sessionNewAssetCount(session = {}) {
+  const raw = session.newAssetCount ?? session.new_asset_count;
+  const value = Number(raw);
+  return Number.isFinite(value) && value > 0 ? value : null;
+}
+
+function sessionWeakAssetCount(session = {}) {
+  const raw = session.weakAssetCount ?? session.weak_asset_count;
+  const value = Number(raw);
+  return Number.isFinite(value) && value > 0 ? value : null;
+}
+
+function renderSessionReviewCard(session = {}) {
+  const sessionId = sessionIdValue(session);
+  const mastery = sessionMasteryValue(session);
+  const phraseCount = sessionPhraseCount(session);
+  const newCount = sessionNewAssetCount(session);
+  const weakCount = sessionWeakAssetCount(session);
+  const meta = [
+    phraseCount !== null ? `${phraseCount} phrase${pluralize(phraseCount)}` : "",
+    newCount !== null ? `${newCount} new` : "",
+    weakCount !== null ? `${weakCount} weak` : "",
+    mastery !== null ? `${mastery}% mastery` : "",
+  ].filter(Boolean);
+  const imageUrl = session.image_url || session.imageUrl || `/api/sessions/${sessionId}/image`;
+  return `
+    <button class="review-session-card" type="button" data-review-session-id="${escapeHtml(sessionId)}">
+      ${imageUrl ? `<img src="${escapeHtml(imageUrl)}" alt="${escapeHtml(session.image_name || session.imageName || "Session image")}">` : ""}
+      <strong>${escapeHtml(session.title || "Image session")}</strong>
+      <small>${escapeHtml(formatDate(session.created_at || session.createdAt))}</small>
+      ${meta.length ? `<div class="review-card-meta">${meta.map((item) => `<span>${escapeHtml(item)}</span>`).join("")}</div>` : ""}
+    </button>
+  `;
+}
+
+async function openSessionReviewDetail(sessionId) {
+  try {
+    const data = await api(`/api/sessions/${sessionId}`);
+    state.currentSession = data.session;
+    state.currentSessionId = data.session.id;
+    state.learnView = "sessions";
+    updateSessionUrl(sessionId);
+    renderSessionReviewDetail(data.session);
+  } catch (error) {
+    showToast(error.message, true);
+  }
+}
+
+function renderSessionReviewDetail(session = {}) {
+  renderLearnMode();
+  setFocusedSessionLayout(true);
+  const sessionId = sessionIdValue(session);
+  const assets = Array.isArray(session.learned_language_assets) ? session.learned_language_assets : [];
+  const mastery = Math.round(Number(session.session_mastery_percent || session.mastery_percent || 0));
+  const phraseCount = Number(session.phrases_learned || assets.length || 0);
+  const accuracy = Math.round(Number(session.accuracy_percent || 0));
+  const stats = [
+    phraseCount > 0 ? ["▣", phraseCount, "Phrases Learned"] : null,
+    mastery > 0 ? ["★", `${mastery}%`, "Mastery"] : null,
+  ].filter(Boolean);
+  els.sessionDetailPanel.classList.remove("hidden");
+  els.sessionDetailPanel.innerHTML = `
+    <section class="review-shell session-review-detail session-review-simple">
+      <header class="past-session-topbar">
+        <button id="backToSessionsButton" class="past-session-back-button" type="button" aria-label="Back to sessions">←</button>
+        <div>
+          <h2>${escapeHtml(session.title || "Image session")}</h2>
+          ${session.created_at ? `<p>${escapeHtml(formatDate(session.created_at))}</p>` : ""}
+        </div>
+        <button class="past-session-menu-button" type="button" aria-label="More options">•••</button>
+      </header>
+
+      ${
+        session.image_url
+          ? `<img class="review-detail-image past-session-image" src="${escapeHtml(session.image_url)}" alt="${escapeHtml(session.image_name || "Session image")}">`
+          : ""
+      }
+
+      ${
+        stats.length
+          ? `<section class="past-session-stats">${stats
+              .map(
+                ([icon, value, label]) => `
+                  <div>
+                    <span aria-hidden="true">${escapeHtml(icon)}</span>
+                    <strong>${escapeHtml(value)}</strong>
+                    <small>${escapeHtml(label)}</small>
+                  </div>
+                `
+              )
+              .join("")}</section>`
+          : ""
+      }
+
+      <section class="past-session-choice-heading">
+        <h2>What would you like to do?</h2>
+        <p>Review what you learned here, or redo the image from the beginning.</p>
+      </section>
+
+      <section class="past-session-action-stack">
+        <article class="past-session-action-card session-again">
+          <div class="past-session-action-icon" aria-hidden="true">↻</div>
+          <div>
+            <h3>Redo Full Session</h3>
+            <p>Go through this image session from the beginning.</p>
+          </div>
+          <div class="past-session-mini-flow" aria-label="Session steps">
+            <span>Re-describe</span>
+            <i>›</i>
+            <span>AI Enhancement</span>
+            <i>›</i>
+            <span>Guided Coverage</span>
+          </div>
+          <button id="startSessionAgainButton" class="past-session-primary-button purple" type="button">
+            <strong>Redo Full Session</strong>
+            <span aria-hidden="true">›</span>
+          </button>
+        </article>
+
+        <article class="past-session-action-card weak-part">
+          <div class="past-session-action-icon" aria-hidden="true">◎</div>
+          <div>
+            <h3>Retry Weak Part</h3>
+            <p>Practice one part of the image that needed extra support.</p>
+          </div>
+          <button id="retryWeakPartButton" class="past-session-primary-button green" type="button">
+            <strong>Retry Weak Part</strong>
+            <span aria-hidden="true">›</span>
+          </button>
+        </article>
+
+        <article class="past-session-action-card describe-again">
+          <div class="past-session-action-icon" aria-hidden="true">✎</div>
+          <div>
+            <h3>Describe Again Using 3 Phrases</h3>
+            <p>Use 3 learned phrases to describe this image in your own words.</p>
+          </div>
+          <button id="describeAgainButton" class="past-session-primary-button teal" type="button">
+            <strong>Describe Again</strong>
+            <span aria-hidden="true">›</span>
+          </button>
+        </article>
+      </section>
+
+      ${renderPastSessionOptionalDetails({ session, assets, mastery, phraseCount, questionCount: 0, accuracy })}
+    </section>
+  `;
+  document.getElementById("backToSessionsButton")?.addEventListener("click", renderSessionsReviewList);
+  document.getElementById("describeAgainButton")?.addEventListener("click", () => openDescribeAgain(sessionId));
+  document.getElementById("retryWeakPartButton")?.addEventListener("click", () => openWeakPartRetry(sessionId));
+  document.getElementById("startSessionAgainButton")?.addEventListener("click", () => handleStartSessionAgain(sessionId));
+  window.scrollTo({ top: 0, behavior: "smooth" });
+}
+
+async function openDescribeAgain(sessionId) {
+  const button = document.getElementById("describeAgainButton");
+  setButtonBusy(button, true, "Loading...");
+  try {
+    const data = await startDescribeAgainData(sessionId, 3);
+    state.describeAgain = {
+      ...data,
+      sessionId,
+      description: "",
+      result: null,
+    };
+    renderDescribeAgainScreen();
+  } catch (error) {
+    showToast(error.message || "Unable to start Describe Again.", true);
+  } finally {
+    setButtonBusy(button, false, "Describe Again");
+  }
+}
+
+function renderDescribeAgainScreen() {
+  const attempt = state.describeAgain || {};
+  const phrases = Array.isArray(attempt.selectedPhrases) ? attempt.selectedPhrases : [];
+  els.sessionDetailPanel.classList.remove("hidden");
+  els.sessionDetailPanel.innerHTML = `
+    <section class="review-shell session-review-detail describe-again-shell">
+      <header class="past-session-topbar">
+        <button id="describeAgainBackButton" class="past-session-back-button" type="button" aria-label="Back">←</button>
+        <div>
+          <p class="eyebrow">Describe Again</p>
+          <h2>Use ${phrases.length || 3} Phrases</h2>
+        </div>
+      </header>
+      ${attempt.imageUrl ? `<img class="review-detail-image past-session-image" src="${escapeHtml(attempt.imageUrl)}" alt="Session image">` : ""}
+      <section class="focused-writing-card improve-action-card">
+        <p class="field-label">${escapeHtml(attempt.prompt || `Describe this image again using all ${phrases.length || 3} phrases.`)}</p>
+        <div class="mini-suggestion-row describe-again-phrase-row">
+          ${phrases.map((phrase) => `<span class="phrase-chip suggested">${escapeHtml(phrase.value || "")}</span>`).join("")}
+        </div>
+        <p class="describe-again-instruction">Write 2-4 sentences about this image using all ${phrases.length || 3} phrases.</p>
+        <textarea id="describeAgainInput" class="writing-textarea" rows="7" placeholder="Write your description...">${escapeHtml(attempt.description || "")}</textarea>
+        <div class="button-row">
+          <button id="describeAgainSubmitButton" class="primary-button journey-primary-button" type="button">
+            Check My Description
+            <span aria-hidden="true">➤</span>
+          </button>
+        </div>
+        ${attempt.result ? renderDescribeAgainResult(attempt.result) : ""}
+      </section>
+    </section>
+  `;
+  document.getElementById("describeAgainBackButton")?.addEventListener("click", () => openSessionReviewDetail(Number(attempt.sessionId)));
+  document.getElementById("describeAgainSubmitButton")?.addEventListener("click", submitDescribeAgainFromScreen);
+  document.getElementById("describeAgainResultBackButton")?.addEventListener("click", () => openSessionReviewDetail(Number(attempt.sessionId)));
+}
+
+function renderDescribeAgainResult(result = {}) {
+  const used = Array.isArray(result.usedPhrases) ? result.usedPhrases : [];
+  const missing = Array.isArray(result.missingPhrases) ? result.missingPhrases : [];
+  return `
+    <section class="simple-feedback-section phrase-usage-section describe-again-result">
+      <h4>${result.usedAllPhrases ? "All phrases used" : "Keep going"}</h4>
+      <p>${escapeHtml(result.feedback || "")}</p>
+      <div class="past-session-detail-grid">
+        <div><strong>${escapeHtml(String(result.score ?? 0))}</strong><small>Score</small></div>
+        <div><strong>${escapeHtml(String(result.xpEarned || 0))}</strong><small>XP</small></div>
+      </div>
+      ${used.length ? `<div class="mini-suggestion-row">${used.map((phrase) => `<span class="phrase-chip used">${escapeHtml(phrase)}</span>`).join("")}</div>` : ""}
+      ${missing.length ? `<div class="mini-suggestion-row">${missing.map((phrase) => `<span class="phrase-chip misused">${escapeHtml(phrase)}</span>`).join("")}</div>` : ""}
+      ${result.improvedDescription ? `<p><strong>Improved:</strong> ${escapeHtml(result.improvedDescription)}</p>` : ""}
+      <button id="describeAgainResultBackButton" class="primary-button journey-primary-button" type="button">Back to Session</button>
+    </section>
+  `;
+}
+
+async function submitDescribeAgainFromScreen() {
+  const attempt = state.describeAgain || {};
+  const input = document.getElementById("describeAgainInput");
+  const description = (input?.value || "").trim();
+  if (!description) {
+    showToast("Write a short description first.", true);
+    return;
+  }
+  const button = document.getElementById("describeAgainSubmitButton");
+  setButtonBusy(button, true, "Checking...");
+  try {
+    const result = await submitDescribeAgainAnswer(Number(attempt.sessionId), {
+      description,
+      selectedAssetIds: (attempt.selectedPhrases || []).map((phrase) => phrase.assetId),
+    });
+    state.describeAgain.description = description;
+    state.describeAgain.result = result;
+    if (result.progress) {
+      state.progress = result.progress;
+      renderProgressHeader();
+    }
+    renderDescribeAgainScreen();
+  } catch (error) {
+    showToast(error.message || "Unable to check your description.", true);
+  } finally {
+    setButtonBusy(button, false, "Check My Description");
+  }
+}
+
+async function openWeakPartRetry(sessionId) {
+  const button = document.getElementById("retryWeakPartButton");
+  setButtonBusy(button, true, "Loading...");
+  try {
+    const data = await getWeakPartRetryData(sessionId);
+    if (!data.hasWeakPart) {
+      state.weakPartRetry = {
+        ...data,
+        sessionId,
+      };
+      renderWeakPartRetryEmptyScreen();
+      return;
+    }
+    state.weakPartRetry = {
+      ...data,
+      sessionId,
+      supportLevel: 1,
+      answer: "",
+      result: null,
+    };
+    renderWeakPartRetryScreen();
+  } catch (error) {
+    showToast(error.message || "Unable to load weak part retry.", true);
+  } finally {
+    setButtonBusy(button, false, "Retry Weak Part");
+  }
+}
+
+function renderWeakPartRetryEmptyScreen() {
+  const retry = state.weakPartRetry || {};
+  els.sessionDetailPanel.classList.remove("hidden");
+  els.sessionDetailPanel.innerHTML = `
+    <section class="review-shell session-review-detail weak-part-retry-shell">
+      <header class="past-session-topbar">
+        <button id="weakPartEmptyBackButton" class="past-session-back-button" type="button" aria-label="Back">←</button>
+        <div>
+          <p class="eyebrow">Retry Weak Part</p>
+          <h2>No weak part found for this session.</h2>
+        </div>
+      </header>
+      <section class="focused-writing-card improve-action-card">
+        <p>${escapeHtml(retry.message || "No weak part found for this session.")}</p>
+        <button id="weakPartEmptySessionButton" class="primary-button journey-primary-button" type="button">Back to Session</button>
+      </section>
+    </section>
+  `;
+  document.getElementById("weakPartEmptyBackButton")?.addEventListener("click", () => openSessionReviewDetail(Number(retry.sessionId)));
+  document.getElementById("weakPartEmptySessionButton")?.addEventListener("click", () => openSessionReviewDetail(Number(retry.sessionId)));
+}
+
+function renderWeakPartRetryScreen() {
+  const retry = state.weakPartRetry || {};
+  const supportLevels = Array.isArray(retry.supportLevels) ? retry.supportLevels : [];
+  const level = Math.max(1, Math.min(3, Number(retry.supportLevel || 1)));
+  const support = supportLevels.find((item) => Number(item.level) === level) || supportLevels[0] || {};
+  const nextLabel = level <= 1 ? "Need help?" : "Need more help?";
+  els.sessionDetailPanel.classList.remove("hidden");
+  els.sessionDetailPanel.innerHTML = `
+    <section class="review-shell session-review-detail weak-part-retry-shell">
+      <header class="past-session-topbar">
+        <button id="weakPartBackButton" class="past-session-back-button" type="button" aria-label="Back">←</button>
+        <div>
+          <p class="eyebrow">Retry Weak Part</p>
+          <h2>${escapeHtml(retry.focusName || "Weak Part")}</h2>
+        </div>
+      </header>
+      ${retry.imageUrl ? `<img class="review-detail-image past-session-image" src="${escapeHtml(retry.imageUrl)}" alt="Session image">` : ""}
+      <section class="focused-writing-card improve-action-card">
+        <p class="field-label">Prompt</p>
+        <h3>${escapeHtml(support.prompt || retry.questionText || "Try this part again.")}</h3>
+        ${
+          level >= 3 && Array.isArray(support.hints) && support.hints.length
+            ? `<div class="mini-suggestion-row">${support.hints.map((hint) => `<button class="hint-chip-button" type="button" data-weak-hint="${escapeHtml(hint)}">${escapeHtml(hint)}</button>`).join("")}</div>`
+            : ""
+        }
+        <textarea id="weakPartAnswerInput" class="writing-textarea" rows="5" placeholder="Write one clear sentence...">${escapeHtml(retry.answer || "")}</textarea>
+        <div class="button-row">
+          ${
+            level < 3
+              ? `<button id="weakPartHelpButton" class="secondary-button" type="button">${escapeHtml(nextLabel)}</button>`
+              : ""
+          }
+          <button id="weakPartSubmitButton" class="primary-button journey-primary-button" type="button">
+            Submit
+            <span aria-hidden="true">➤</span>
+          </button>
+        </div>
+        ${retry.result ? renderWeakPartRetryResult(retry.result) : ""}
+      </section>
+    </section>
+  `;
+  document.getElementById("weakPartBackButton")?.addEventListener("click", () => openSessionReviewDetail(Number(retry.sessionId)));
+  document.getElementById("weakPartHelpButton")?.addEventListener("click", () => {
+    state.weakPartRetry.answer = document.getElementById("weakPartAnswerInput")?.value || "";
+    state.weakPartRetry.supportLevel = level + 1;
+    renderWeakPartRetryScreen();
+  });
+  els.sessionDetailPanel.querySelectorAll("[data-weak-hint]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const input = document.getElementById("weakPartAnswerInput");
+      if (input) {
+        input.value = `${input.value.trim()} ${button.dataset.weakHint || ""}`.trim();
+        input.focus();
+      }
+    });
+  });
+  document.getElementById("weakPartSubmitButton")?.addEventListener("click", submitWeakPartRetryFromScreen);
+}
+
+function renderWeakPartRetryResult(result = {}) {
+  return `
+    <section class="simple-feedback-section phrase-usage-section">
+      <h4>${result.success ? "Good retry" : "Try once more"}</h4>
+      <p>${escapeHtml(result.feedback || "")}</p>
+      ${result.improvedAnswer ? `<p><strong>Improved:</strong> ${escapeHtml(result.improvedAnswer)}</p>` : ""}
+      ${Array.isArray(result.usedAssets) && result.usedAssets.length ? `<div class="mini-suggestion-row">${result.usedAssets.map((asset) => `<span class="phrase-chip used">${escapeHtml(asset.value || "")}</span>`).join("")}</div>` : ""}
+    </section>
+  `;
+}
+
+async function submitWeakPartRetryFromScreen() {
+  const retry = state.weakPartRetry || {};
+  const input = document.getElementById("weakPartAnswerInput");
+  const answer = (input?.value || "").trim();
+  if (!answer) {
+    showToast("Write one sentence first.", true);
+    return;
+  }
+  const button = document.getElementById("weakPartSubmitButton");
+  setButtonBusy(button, true, "Checking...");
+  try {
+    const result = await submitWeakPartRetryAnswer(Number(retry.sessionId), {
+      focusName: retry.focusName,
+      answer,
+      usedSupportLevel: Number(retry.supportLevel || 1),
+      targetAssetIds: (retry.targetAssets || []).map((asset) => asset.id),
+    });
+    state.weakPartRetry.answer = answer;
+    state.weakPartRetry.result = result;
+    if (result.progress) {
+      state.progress = result.progress;
+      renderProgressHeader();
+    }
+    renderWeakPartRetryScreen();
+  } catch (error) {
+    showToast(error.message || "Unable to submit weak part retry.", true);
+  } finally {
+    setButtonBusy(button, false, "Submit");
+  }
+}
+
+async function handleStartSessionAgain(sessionId) {
+  const button = document.getElementById("startSessionAgainButton");
+  setButtonBusy(button, true, "Starting...");
+  try {
+    const data = await startSessionAgain(sessionId);
+    const session = data.session;
+    state.progress = data.progress || state.progress;
+    state.stats = data.stats || state.stats;
+    if (session) {
+      state.sessions = [
+        sessionSummaryFromDetail(session),
+        ...state.sessions.filter((item) => Number(item.id) !== Number(session.id)),
+      ];
+      state.visibleSessionCount = Math.min(Math.max(state.visibleSessionCount + 1, SESSION_CHUNK_SIZE), state.sessions.length);
+      renderProgressHeader();
+      renderDashboardContent();
+      renderSession(session, { restoreFlow: false });
+      showToast("Session restarted with the same image.");
+    }
+  } catch (error) {
+    showToast(error.message || "Unable to start this session again.", true);
+  } finally {
+    setButtonBusy(button, false, "Redo Full Session");
+  }
+}
+
+function handleStartNewQuiz(sessionId) {
+  beginPastSessionPractice(sessionId);
+}
+
+function sessionSummaryFromDetail(session = {}) {
+  return {
+    id: session.id,
+    title: session.title,
+    image_name: session.image_name,
+    difficulty_band: session.difficulty_band,
+    difficulty_label: session.difficulty_label,
+    source_mode: session.source_mode,
+    mastery_percent: session.mastery_percent,
+    image_url: session.image_url,
+    phrases_learned: session.phrases_learned || 0,
+    quiz_questions_available: session.quiz_questions_available || 0,
+    practice_due_count: session.practice_due_count || 0,
+    session_mastery_percent: session.session_mastery_percent || 0,
+    accuracy_percent: session.accuracy_percent || 0,
+    status: session.status || "Completed",
+    created_at: session.created_at,
+  };
+}
+
+function renderPastSessionOptionalDetails({ session, assets, mastery, phraseCount, questionCount, accuracy }) {
+  const performanceItems = [
+    mastery > 0 ? ["Mastery", `${mastery}%`] : null,
+    questionCount > 0 ? ["Questions", questionCount] : null,
+    phraseCount > 0 ? ["Phrases", phraseCount] : null,
+    accuracy > 0 ? ["Accuracy", `${accuracy}%`] : null,
+  ].filter(Boolean);
+  const hasDescription = cleanUiText(session.original_description) || cleanUiText(session.final_description);
+  const weakPoints = pastSessionWeakPoints(session, assets);
+  return `
+    <section class="past-session-secondary">
+      ${
+        performanceItems.length
+          ? `<details>
+              <summary><span aria-hidden="true">⌁</span><strong>Session Stats</strong><small>Tap to view details</small></summary>
+              <div class="past-session-detail-grid">
+                ${performanceItems
+                  .map(([label, value]) => `<div><strong>${escapeHtml(value)}</strong><small>${escapeHtml(label)}</small></div>`)
+                  .join("")}
+              </div>
+            </details>`
+          : ""
+      }
+      ${
+        hasDescription
+          ? `<details>
+              <summary><span aria-hidden="true">▤</span><strong>Original vs Final Description</strong><small>Tap to view</small></summary>
+              <div class="past-session-description">
+                ${session.original_description ? `<article><span>Original</span><p>${escapeHtml(session.original_description)}</p></article>` : ""}
+                ${session.final_description ? `<article><span>Final</span><p>${escapeHtml(session.final_description)}</p></article>` : ""}
+              </div>
+            </details>`
+          : ""
+      }
+      ${
+        weakPoints.length
+          ? `<details>
+              <summary><span aria-hidden="true">◎</span><strong>Weak Points</strong><small>Tap to view</small></summary>
+              <div class="past-session-language-list weak-points-list">
+                ${weakPoints.map((point) => `<span>${escapeHtml(point)}</span>`).join("")}
+              </div>
+            </details>`
+          : ""
+      }
+      ${
+        assets.length
+          ? `<details>
+              <summary><span aria-hidden="true">▣</span><strong>Language You Learned</strong><small>Tap to view</small></summary>
+              <div class="past-session-language-list">
+                ${assets
+                  .slice(0, 8)
+                  .map((asset) => `<span>${escapeHtml(asset.value || "Phrase")}</span>`)
+                  .join("")}
+              </div>
+            </details>`
+          : ""
+      }
+    </section>
+  `;
+}
+
+function pastSessionWeakPoints(session = {}, assets = []) {
+  const points = [];
+  assets.forEach((asset) => {
+    const mastery = Number(asset.masteryScore || 0);
+    const wrong = Number(asset.wrongCount || 0);
+    const correct = Number(asset.correctCount || 0);
+    if ((mastery > 0 && mastery <= 0.35) || wrong > correct) {
+      points.push(asset.value || "Phrase");
+    }
+  });
+  const focuses = session.analysis?.coverageFocuses || session.analysis?.coverage_focuses || [];
+  focuses.forEach((focus) => {
+    if (!focus || typeof focus !== "object") return;
+    const supportLevels = Array.isArray(focus.supportLevels || focus.support_levels)
+      ? focus.supportLevels || focus.support_levels
+      : [];
+    const usedLevelThree = supportLevels.some((level) => Number(level.level || 0) >= 3);
+    if (usedLevelThree && cleanUiText(focus.title)) {
+      points.push(focus.title);
+    }
+  });
+  return [...new Set(points.filter(Boolean))].slice(0, 8);
+}
+
+function renderReviewPhraseCard(asset = {}) {
+  const mastery = Math.round(Number(asset.masteryScore || 0) * 100);
+  return `
+    <article class="review-phrase-card">
+      <strong>${escapeHtml(asset.value || "Phrase")}</strong>
+      <p>${escapeHtml(asset.meaning || "Useful language from this image session.")}</p>
+      ${asset.exampleSentence ? `<small>${escapeHtml(asset.exampleSentence)}</small>` : ""}
+      <div class="phrase-mastery-line"><span style="width:${Math.max(4, Math.min(100, mastery))}%"></span></div>
+      <em>${mastery}% mastery</em>
+    </article>
+  `;
+}
+
+async function beginImmediateSessionQuiz(sessionId) {
+  await beginQuizFlow({
+    sessionId,
+    mode: "immediate_session_quiz",
+    loader: startImmediateQuiz,
+    title: "Practice what you learned",
+  });
+}
+
+async function beginPastSessionPractice(sessionId) {
+  await beginQuizFlow({
+    sessionId,
+    mode: "past_session_practice",
+    loader: startPastSessionPractice,
+    title: "Practice this session",
+  });
+}
+
+async function beginQuizFlow({ sessionId, mode, loader, title }) {
+  if (!sessionId) return;
+  state.quiz = {
+    ...createEmptyQuizState(),
+    mode,
+    sessionId,
+    loading: true,
+  };
+  renderQuizLoading(title || "Loading quiz");
+  try {
+    const data = await loader(sessionId);
+    const questions = Array.isArray(data.questions) ? data.questions : [];
+    state.quiz = {
+      ...createEmptyQuizState(),
+      mode,
+      sessionId: data.sessionId || sessionId,
+      questions,
+    };
+    renderQuizIntro(title);
+  } catch (error) {
+    state.quiz.error = error.message;
+    renderQuizError(error.message);
+  }
+}
+
+function renderQuizLoading(title = "Loading quiz") {
+  renderLearnMode();
+  setFocusedSessionLayout(true);
+  els.sessionDetailPanel.classList.remove("hidden");
+  els.sessionDetailPanel.innerHTML = `
+    <section class="quiz-shell">
+      <div class="quiz-loading-card">
+        <p class="eyebrow">Quiz</p>
+        <h2>${escapeHtml(title)}</h2>
+        <p>Preparing your questions...</p>
+      </div>
+    </section>
+  `;
+}
+
+function renderQuizError(message = "Quiz could not be loaded.") {
+  els.sessionDetailPanel.innerHTML = `
+    <section class="quiz-shell">
+      <div class="quiz-loading-card error">
+        <p class="eyebrow">Quiz</p>
+        <h2>No practice questions available yet.</h2>
+        <p>${escapeHtml(message)}</p>
+        <button id="quizBackToSessionButton" class="primary-button" type="button">Back</button>
+      </div>
+    </section>
+  `;
+  document.getElementById("quizBackToSessionButton")?.addEventListener("click", () => {
+    if (state.currentSession) renderSessionReviewDetail(state.currentSession);
+    else if (state.quiz.mode === "roadmap_practice") openRoadmapOverviewScreen();
+    else if (state.quiz.mode === "daily_review") openDailyReviewScreen();
+    else openSessionsReviewScreen();
+  });
+}
+
+function renderQuizIntro(title = "Practice what you learned") {
+  const questions = state.quiz.questions || [];
+  if (!questions.length) {
+    renderQuizError("No practice questions available yet.");
+    return;
+  }
+  const phraseCount = Number(state.currentSession?.phrases_learned || state.currentSession?.learned_language_assets?.length || 0);
+  const xpAvailable = questions.length * 5;
+  const introCopy = state.quiz.mode === "daily_review"
+    ? "Review due phrases from all your image sessions."
+    : state.quiz.mode === "roadmap_practice"
+    ? "Practice reusable phrases from this roadmap skill."
+    : "Answer a few quick questions from this image session.";
+  els.sessionDetailPanel.innerHTML = `
+    <section class="quiz-shell">
+      <div class="quiz-intro-card">
+        <p class="eyebrow">Quick practice</p>
+        <h2>${escapeHtml(title || "Practice what you learned")}</h2>
+        <p>${escapeHtml(introCopy)}</p>
+        <div class="quiz-summary-row">
+          <div><strong>${state.quiz.mode === "past_session_practice" ? phraseCount : questions.length}</strong><small>${state.quiz.mode === "past_session_practice" ? "New phrases" : "Practice items"}</small></div>
+          <div><strong>${questions.length}</strong><small>Questions</small></div>
+          <div><strong>${xpAvailable}</strong><small>XP available</small></div>
+        </div>
+        <button id="startQuizButton" class="primary-button journey-primary-button" type="button">Start Quiz</button>
+      </div>
+    </section>
+  `;
+  document.getElementById("startQuizButton")?.addEventListener("click", () => {
+    state.quiz.started = true;
+    renderQuizQuestion();
+  });
+}
+
+function renderQuizQuestion() {
+  const quiz = state.quiz;
+  const question = quiz.questions[quiz.currentIndex];
+  if (!question) {
+    renderQuizResult();
+    return;
+  }
+  const answered = Boolean(quiz.feedback);
+  const progressText = `Question ${quiz.currentIndex + 1} of ${quiz.questions.length}`;
+  els.sessionDetailPanel.innerHTML = `
+    <section class="quiz-shell">
+      <div class="quiz-question-card">
+        <header class="quiz-question-header">
+          <button id="quizBackButton" class="quiz-back-button" type="button">←</button>
+          <strong>${escapeHtml(progressText)}</strong>
+          <span>+${quiz.totalXpEarned} XP</span>
+        </header>
+        ${quiz.mode === "roadmap_practice" && quiz.skillName ? `<p class="quiz-skill-label">${escapeHtml(quiz.skillName)}</p>` : ""}
+        <div class="quiz-progress-bar"><span style="width:${((quiz.currentIndex + 1) / quiz.questions.length) * 100}%"></span></div>
+        <div class="quiz-question-body">
+          <p class="eyebrow">${escapeHtml(quizTypeLabel(question.type))}</p>
+          ${renderQuizQuestionBody(question)}
+        </div>
+        ${answered ? renderQuizFeedback(quiz.feedback) : ""}
+        <button id="quizPrimaryButton" class="primary-button journey-primary-button" type="button" ${quiz.isSubmitting ? "disabled" : ""}>
+          ${answered ? "Continue" : "Check"}
+        </button>
+      </div>
+    </section>
+  `;
+  bindQuizQuestionEvents(question);
+  document.getElementById("quizBackButton")?.addEventListener("click", () => {
+    if (quiz.mode === "past_session_practice" && state.currentSession) renderSessionReviewDetail(state.currentSession);
+    else if (quiz.mode === "roadmap_practice") renderRoadmapSkillDetail(state.roadmapSkillDetail || { skillKey: quiz.skillKey, skillName: quiz.skillName });
+    else if (quiz.mode === "daily_review") renderDailyReviewLanding();
+    else renderQuizIntro();
+  });
+  document.getElementById("quizPrimaryButton")?.addEventListener("click", () => {
+    if (state.quiz.feedback) {
+      continueQuiz();
+    } else {
+      checkCurrentQuizAnswer();
+    }
+  });
+}
+
+function renderQuizQuestionBody(question = {}) {
+  const text = question.questionText || question.prompt || "";
+  if (question.type === "sentence_builder") {
+    return `
+      <h2>${escapeHtml(question.prompt || "Build the sentence.")}</h2>
+      <div class="sentence-build-zone">
+        ${
+          state.quiz.builtSentenceWords.length
+            ? state.quiz.builtSentenceWords
+                .map((word, index) => `<button class="quiz-chip selected" type="button" data-remove-built-word="${index}">${escapeHtml(word)}</button>`)
+                .join("")
+            : `<span>Tap words below</span>`
+        }
+      </div>
+      <div class="quiz-word-bank">
+        ${(question.wordBank || [])
+          .map((word, index) => `<button class="quiz-chip" type="button" data-word-bank-index="${index}">${escapeHtml(word)}</button>`)
+          .join("")}
+      </div>
+    `;
+  }
+  if (question.type === "rewrite_challenge" || question.type === "production_challenge") {
+    return `
+      <h2>${escapeHtml(text)}</h2>
+      <textarea id="quizTextAnswer" class="quiz-textarea" rows="5" placeholder="Write your answer...">${escapeHtml(state.quiz.typedAnswer)}</textarea>
+    `;
+  }
+  if (question.type === "image_recall") {
+    return `
+      ${state.currentSession?.image_url ? `<img class="quiz-image-thumb" src="${escapeHtml(state.currentSession.image_url)}" alt="Session image">` : ""}
+      <h2>${escapeHtml(text)}</h2>
+      ${renderQuizAnswerControl(question)}
+    `;
+  }
+  return `
+    <h2>${escapeHtml(text)}</h2>
+    ${renderQuizAnswerControl(question)}
+  `;
+}
+
+function renderQuizAnswerControl(question = {}) {
+  const options = Array.isArray(question.options) ? question.options.filter(Boolean) : [];
+  if (options.length) {
+    return `
+      <div class="quiz-option-list">
+        ${options
+          .map(
+            (option) => `
+              <button class="quiz-option-card ${state.quiz.selectedAnswer === option ? "selected" : ""}" type="button" data-quiz-option="${escapeHtml(option)}">
+                ${escapeHtml(option)}
+              </button>
+            `
+          )
+          .join("")}
+      </div>
+    `;
+  }
+  return `<input id="quizTextAnswer" class="quiz-input" type="text" value="${escapeHtml(state.quiz.typedAnswer)}" placeholder="Type your answer">`;
+}
+
+function bindQuizQuestionEvents(question = {}) {
+  els.sessionDetailPanel.querySelectorAll("[data-quiz-option]").forEach((button) => {
+    button.addEventListener("click", () => {
+      if (state.quiz.feedback) return;
+      state.quiz.selectedAnswer = button.dataset.quizOption || "";
+      state.quiz.typedAnswer = state.quiz.selectedAnswer;
+      renderQuizQuestion();
+    });
+  });
+  document.getElementById("quizTextAnswer")?.addEventListener("input", (event) => {
+    state.quiz.typedAnswer = event.target.value;
+  });
+  els.sessionDetailPanel.querySelectorAll("[data-word-bank-index]").forEach((button) => {
+    button.addEventListener("click", () => {
+      if (state.quiz.feedback) return;
+      state.quiz.builtSentenceWords.push(button.textContent.trim());
+      renderQuizQuestion();
+    });
+  });
+  els.sessionDetailPanel.querySelectorAll("[data-remove-built-word]").forEach((button) => {
+    button.addEventListener("click", () => {
+      if (state.quiz.feedback) return;
+      state.quiz.builtSentenceWords.splice(Number(button.dataset.removeBuiltWord), 1);
+      renderQuizQuestion();
+    });
+  });
+}
+
+async function checkCurrentQuizAnswer() {
+  const question = state.quiz.questions[state.quiz.currentIndex];
+  const answer = quizCurrentAnswer(question);
+  if (!answer) {
+    showToast("Add your answer first.", true);
+    return;
+  }
+  state.quiz.isSubmitting = true;
+  renderQuizQuestion();
+  try {
+    const result = await submitQuizAnswerApi({
+      sessionId: state.quiz.sessionId,
+      quizQuestionId: question.id,
+      answer,
+      mode: state.quiz.mode,
+      missionId: state.quiz.missionId,
+    });
+    state.quiz.feedback = result;
+    state.quiz.results.push({ questionId: question.id, answer, ...result });
+    state.quiz.totalXpEarned += Number(result.xpEarned || 0);
+    if (Number(result.xpEarned || 0) && state.progress) {
+      state.progress = {
+        ...state.progress,
+        xp_points: Number(state.progress.xp_points || 0) + Number(result.xpEarned || 0),
+      };
+      renderProgressHeader();
+    }
+    state.quiz.isSubmitting = false;
+    renderQuizQuestion();
+  } catch (error) {
+    showToast(error.message, true);
+    state.quiz.isSubmitting = false;
+    renderQuizQuestion();
+  }
+}
+
+function quizCurrentAnswer(question = {}) {
+  if (question.type === "sentence_builder") {
+    return state.quiz.builtSentenceWords.join(" ");
+  }
+  return cleanUiText(state.quiz.selectedAnswer || state.quiz.typedAnswer);
+}
+
+function renderQuizFeedback(feedback = {}) {
+  const correct = Boolean(feedback.isCorrect);
+  return `
+    <div class="quiz-feedback ${correct ? "correct" : "incorrect"}">
+      <strong>${correct ? "Correct 🎉" : `Almost. Better answer: ${escapeHtml(feedback.correctAnswer || "")}`}</strong>
+      ${feedback.explanation ? `<p>${escapeHtml(feedback.explanation)}</p>` : ""}
+      ${Number(feedback.xpEarned || 0) ? `<small>+${Number(feedback.xpEarned || 0)} XP</small>` : ""}
+    </div>
+  `;
+}
+
+function continueQuiz() {
+  state.quiz.currentIndex += 1;
+  state.quiz.selectedAnswer = "";
+  state.quiz.typedAnswer = "";
+  state.quiz.builtSentenceWords = [];
+  state.quiz.feedback = null;
+  state.quiz.isSubmitting = false;
+  if (state.quiz.currentIndex >= state.quiz.questions.length) {
+    renderQuizResult();
+  } else {
+    renderQuizQuestion();
+  }
+}
+
+function renderQuizResult() {
+  const total = state.quiz.questions.length;
+  const correct = state.quiz.results.filter((item) => item.isCorrect).length;
+  const masteryUpdates = state.quiz.results.flatMap((item) => item.updatedAssets || item.updatedMastery || []);
+  const isRoadmapMission = state.quiz.mode === "roadmap_practice";
+  const isDailyReview = state.quiz.mode === "daily_review";
+  const resultTitle = isRoadmapMission ? "Mission Complete" : isDailyReview ? "Review Complete" : "Quiz completed";
+  const updateTitle = isDailyReview ? "Phrases strengthened" : "Assets improved";
+  els.sessionDetailPanel.innerHTML = `
+    <section class="quiz-shell">
+      <div class="quiz-result-card">
+        <p class="eyebrow">Done</p>
+        <h2>${resultTitle}</h2>
+        <div class="quiz-summary-row">
+          <div><strong>${correct}</strong><small>Correct</small></div>
+          <div><strong>${total}</strong><small>Questions</small></div>
+          <div><strong>${state.quiz.totalXpEarned}</strong><small>XP earned</small></div>
+        </div>
+        ${
+          masteryUpdates.length
+            ? `<section class="quiz-mastery-updates">
+                <h3>${escapeHtml(updateTitle)}</h3>
+                ${masteryUpdates.map((update) => renderQuizMasteryUpdate(update, { showStatus: isDailyReview })).join("")}
+              </section>`
+            : ""
+        }
+        <button id="finishQuizButton" class="primary-button journey-primary-button" type="button">${isRoadmapMission ? "Back to Roadmap" : "Finish"}</button>
+        ${isDailyReview ? "" : `<button id="practiceAgainFromResultButton" class="text-button" type="button">${isRoadmapMission ? "Practice More" : "Practice Again"}</button>`}
+      </div>
+    </section>
+  `;
+  document.getElementById("finishQuizButton")?.addEventListener("click", async () => {
+    await fetchSessions();
+    await fetchRoadmapOverview({ silent: true });
+    if (state.quiz.mode === "past_session_practice" && state.currentSession) {
+      await openSessionReviewDetail(state.quiz.sessionId);
+    } else if (state.quiz.mode === "roadmap_practice") {
+      await openRoadmapSkillDetail(state.quiz.skillKey);
+    } else if (state.quiz.mode === "daily_review") {
+      openDailyReviewScreen();
+    } else {
+      openNewSessionComposer();
+    }
+  });
+  document.getElementById("practiceAgainFromResultButton")?.addEventListener("click", () => {
+    if (state.quiz.mode === "roadmap_practice") beginRoadmapPractice(state.quiz.skillKey, state.quiz.skillName);
+    else if (state.quiz.mode === "daily_review") beginDailyReview();
+    else beginPastSessionPractice(state.quiz.sessionId);
+  });
+}
+
+function renderQuizMasteryUpdate(update = {}, options = {}) {
+  const value = update.value || update.assetValue || "Phrase";
+  const oldMastery = Number(update.oldMastery ?? update.oldMasteryScore ?? 0);
+  const newMastery = Number(update.newMastery ?? update.newMasteryScore ?? 0);
+  const oldStatus = masteryStatusLabel(oldMastery);
+  const newStatus = masteryStatusLabel(newMastery);
+  const statusText = oldStatus === newStatus ? newStatus : `${oldStatus} → ${newStatus}`;
+  return `
+    <article class="quiz-mastery-update-row">
+      <strong>${escapeHtml(value)}</strong>
+      <span>${options.showStatus ? escapeHtml(statusText) : `${Math.round(oldMastery)}% → ${Math.round(newMastery)}%`}</span>
+    </article>
+  `;
+}
+
+function masteryStatusLabel(score) {
+  const value = Number(score || 0);
+  if (value <= 25) return "New";
+  if (value <= 50) return "Learning";
+  if (value <= 70) return "Familiar";
+  if (value <= 90) return "Strong";
+  return "Mastered";
+}
+
+function quizTypeLabel(type = "") {
+  const labels = {
+    meaning_match: "Meaning",
+    fill_blank: "Fill blank",
+    multiple_choice: "Choose",
+    better_sentence: "Better sentence",
+    sentence_builder: "Sentence builder",
+    rewrite_challenge: "Rewrite",
+    production_challenge: "Describe",
+    image_recall: "Image recall",
+  };
+  return labels[type] || "Quiz";
 }
 
 async function onLogout() {

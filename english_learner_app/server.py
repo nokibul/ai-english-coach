@@ -13,9 +13,13 @@ from .ai_service import AIAnalyzer
 from .assessment import ONBOARDING_PROMPTS, evaluate_assessment
 from .config import AppConfig
 from .database import Database
+from .describe_again import startDescribeAgain, submitDescribeAgain
 from .learning import canonical_level, level_label
 from .mailer import Mailer
+from .past_sessions import getPastSessions
+from .post_session_quiz import PostSessionQuizService
 from .progress import level_from_xp, update_streak, xp_for_event
+from .progress_summary import getUserProgressSummary
 from .security import generate_otp, hash_password, hash_token, make_token, verify_password
 from .utils import (
     ALLOWED_IMAGE_MIME_TYPES,
@@ -28,6 +32,7 @@ from .utils import (
     to_iso,
     utc_now,
 )
+from .weak_part_retry import getWeakPartRetry, submitWeakPartRetry
 
 LEARNING_STAGES = {
     "upload_image",
@@ -75,10 +80,24 @@ def build_app(config: AppConfig | None = None) -> web.Application:
     app.router.add_get("/api/me", get_me)
     app.router.add_post("/api/analyze", analyze_image)
     app.router.add_post(r"/api/sessions/{session_id:\d+}/feedback", session_feedback)
+    app.router.add_post(r"/api/sessions/{session_id:\d+}/restart", restart_session)
+    app.router.add_get(r"/api/sessions/{session_id:\d+}/immediate-quiz", immediate_session_quiz)
+    app.router.add_get(r"/api/sessions/{session_id:\d+}/practice-quiz", past_session_practice_quiz)
+    app.router.add_get(r"/api/sessions/{session_id:\d+}/weak-part", weak_part_retry)
+    app.router.add_post(r"/api/sessions/{session_id:\d+}/weak-part", submit_weak_part_retry)
+    app.router.add_get(r"/api/sessions/{session_id:\d+}/describe-again/start", describe_again_start)
+    app.router.add_post(r"/api/sessions/{session_id:\d+}/describe-again", submit_describe_again)
     app.router.add_get(r"/api/sessions/{session_id:\d+}/image", session_image)
+    app.router.add_get("/api/sessions/past", past_sessions)
     app.router.add_get("/api/sessions", list_sessions)
     app.router.add_get(r"/api/sessions/{session_id:\d+}", get_session)
+    app.router.add_post("/api/quiz/answer", submit_quiz_answer)
+    app.router.add_get("/api/roadmap", roadmap_overview)
+    app.router.add_get(r"/api/roadmap/{skill_key:[a-zA-Z0-9_-]+}", roadmap_skill_detail)
+    app.router.add_post(r"/api/roadmap/{skill_key:[a-zA-Z0-9_-]+}/practice/start", start_roadmap_practice_mission)
+    app.router.add_get("/api/review/daily", daily_review)
     app.router.add_get("/api/progress/dashboard", progress_dashboard)
+    app.router.add_get("/api/progress/summary", progress_summary)
     return app
 
 
@@ -180,16 +199,28 @@ def public_user(user: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def serialize_session_summary(row: dict[str, Any]) -> dict[str, Any]:
+def serialize_session_summary(row: dict[str, Any], db: Database | None = None) -> dict[str, Any]:
+    learning_summary = (
+        db.session_learning_summary(user_id=int(row["user_id"]), session_id=int(row["id"]))
+        if db and row.get("user_id") is not None
+        else {}
+    )
     return {
         "id": row["id"],
         "title": row["title"],
         "image_name": row["image_name"],
+        "image_url": f"/api/sessions/{row['id']}/image",
         "difficulty_band": canonical_level(row["difficulty_band"]),
         "difficulty_label": level_label(row["difficulty_band"]),
         "source_mode": row["source_mode"],
         "mastery_percent": float(row.get("mastery_percent") or 0.0),
         "created_at": row["created_at"],
+        "phrases_learned": learning_summary.get("phrases_learned", 0),
+        "quiz_questions_available": learning_summary.get("quiz_questions_available", 0),
+        "practice_due_count": learning_summary.get("practice_due_count", 0),
+        "session_mastery_percent": learning_summary.get("mastery_percent", 0),
+        "accuracy_percent": learning_summary.get("accuracy_percent", 0),
+        "status": learning_summary.get("status", "Completed"),
     }
 
 
@@ -200,11 +231,21 @@ def _session_summary_json(row: dict[str, Any]) -> dict[str, Any]:
         return {}
 
 
-def serialize_session_detail(row: dict[str, Any]) -> dict[str, Any]:
+def serialize_session_detail(row: dict[str, Any], db: Database | None = None) -> dict[str, Any]:
     summary = _session_summary_json(row)
     starter_hints = summary.get("starterHints") or summary.get("starter_hints") or []
     sentence_starters = summary.get("sentenceStarters") or summary.get("sentence_starters") or []
     coverage_focuses = summary.get("coverageFocuses") or summary.get("coverage_focuses") or []
+    learning_summary = (
+        db.session_learning_summary(user_id=int(row["user_id"]), session_id=int(row["id"]))
+        if db
+        else {}
+    )
+    learned_assets = (
+        db.list_session_reusable_language_assets(user_id=int(row["user_id"]), session_id=int(row["id"]))
+        if db
+        else []
+    )
 
     return {
         "id": row["id"],
@@ -217,6 +258,28 @@ def serialize_session_detail(row: dict[str, Any]) -> dict[str, Any]:
         "learning_stage": "initial_attempt",
         "mastery_percent": float(row.get("mastery_percent") or 0.0),
         "image_url": f"/api/sessions/{row['id']}/image",
+        "original_description": row.get("simple_explanation") or "",
+        "final_description": row.get("natural_explanation") or row.get("narrative_text") or "",
+        "phrases_learned": learning_summary.get("phrases_learned", len(learned_assets)),
+        "quiz_questions_available": learning_summary.get("quiz_questions_available", 0),
+        "practice_due_count": learning_summary.get("practice_due_count", 0),
+        "session_mastery_percent": learning_summary.get("mastery_percent", 0),
+        "accuracy_percent": learning_summary.get("accuracy_percent", 0),
+        "status": learning_summary.get("status", "Completed"),
+        "learned_language_assets": [
+            {
+                "id": item.get("id"),
+                "value": item.get("value"),
+                "type": item.get("type"),
+                "meaning": item.get("meaning"),
+                "exampleSentence": item.get("example_sentence"),
+                "masteryScore": float(item.get("mastery_score") or 0.0),
+                "correctCount": int(item.get("correct_count") or 0),
+                "wrongCount": int(item.get("wrong_count") or 0),
+                "nextReviewAt": item.get("next_review_at"),
+            }
+            for item in learned_assets
+        ],
         "analysis": {
             "starterHints": starter_hints,
             "sentenceStarters": sentence_starters,
@@ -632,10 +695,12 @@ async def bootstrap(request: web.Request) -> web.Response:
     user = request.get("user")
     stats = None
     progress = None
+    progress_summary_data = None
     if user:
         now = utc_now()
         stats = request.app["db"].get_stats(user_id=user["id"], now_iso=to_iso(now))
         progress = request.app["db"].get_progress_dashboard(user_id=user["id"], now_iso=to_iso(now))
+        progress_summary_data = getUserProgressSummary(request.app["db"], user["id"])
 
     return web.json_response(
         {
@@ -646,6 +711,7 @@ async def bootstrap(request: web.Request) -> web.Response:
             "user": public_user(user) if user else None,
             "stats": stats,
             "progress": progress,
+            "progressSummary": progress_summary_data,
         }
     )
 
@@ -974,7 +1040,7 @@ async def analyze_image(request: web.Request) -> web.Response:
     session = db.get_session(user_id=user["id"], session_id=session_id)
     return web.json_response(
         {
-            "session": serialize_session_detail(session),
+            "session": serialize_session_detail(session, db),
             "stats": db.get_stats(user_id=user["id"], now_iso=created_at),
             "progress": progress,
         }
@@ -983,8 +1049,15 @@ async def analyze_image(request: web.Request) -> web.Response:
 
 async def list_sessions(request: web.Request) -> web.Response:
     user = current_user(request)
-    sessions = request.app["db"].list_sessions(user["id"])
-    return web.json_response({"sessions": [serialize_session_summary(item) for item in sessions]})
+    db: Database = request.app["db"]
+    sessions = db.list_sessions(user["id"])
+    return web.json_response({"sessions": [serialize_session_summary(item, db) for item in sessions]})
+
+
+async def past_sessions(request: web.Request) -> web.Response:
+    user = current_user(request)
+    db: Database = request.app["db"]
+    return web.json_response(getPastSessions(db, user["id"]))
 
 
 async def get_session(request: web.Request) -> web.Response:
@@ -994,7 +1067,53 @@ async def get_session(request: web.Request) -> web.Response:
     if not session:
         raise web.HTTPNotFound(reason="That learning session was not found.")
     return web.json_response(
-        {"session": serialize_session_detail(session)}
+        {"session": serialize_session_detail(session, request.app["db"])}
+    )
+
+
+async def restart_session(request: web.Request) -> web.Response:
+    user = current_user(request)
+    session_id = int(request.match_info["session_id"])
+    db: Database = request.app["db"]
+    source_session = db.get_session(user_id=user["id"], session_id=session_id)
+    if not source_session:
+        raise web.HTTPNotFound(reason="That learning session was not found.")
+
+    now = utc_now()
+    created_at = to_iso(now)
+    summary = _session_summary_json(source_session)
+    try:
+        raw_analysis = json.loads(source_session.get("raw_analysis_json") or "{}")
+    except json.JSONDecodeError:
+        raw_analysis = summary
+    new_session_id = db.create_analysis_session(
+        user_id=user["id"],
+        image_name=source_session.get("image_name") or "session-image",
+        image_path=source_session.get("image_path") or "",
+        title=source_session.get("title") or "Image articulation",
+        difficulty_band=source_session.get("difficulty_band") or user["difficulty_band"],
+        simple_explanation="",
+        natural_explanation="",
+        highlighted_html="",
+        summary=summary,
+        raw_analysis=raw_analysis,
+        source_mode=source_session.get("source_mode") or "local",
+        created_at=created_at,
+    )
+    progress, _ = apply_progress_event(
+        db,
+        user_id=user["id"],
+        now=now,
+        xp_delta=xp_for_event("session_created"),
+        sessions_delta=1,
+    )
+    new_session = db.get_session(user_id=user["id"], session_id=new_session_id)
+    return web.json_response(
+        {
+            "session": serialize_session_detail(new_session, db),
+            "stats": db.get_stats(user_id=user["id"], now_iso=created_at),
+            "progress": progress,
+        }
     )
 
 
@@ -1017,7 +1136,7 @@ async def session_feedback(request: web.Request) -> web.Response:
     if not session:
         raise web.HTTPNotFound(reason="That learning session was not found.")
 
-    session_detail = serialize_session_detail(session)
+    session_detail = serialize_session_detail(session, db)
     feedback = await request.app["analyzer"].feedback_on_explanation(
         learner_text=rewrite or explanation,
         original_text=explanation,
@@ -1083,6 +1202,161 @@ async def session_feedback(request: web.Request) -> web.Response:
     )
 
 
+async def immediate_session_quiz(request: web.Request) -> web.Response:
+    user = current_user(request)
+    session_id = int(request.match_info["session_id"])
+    db: Database = request.app["db"]
+    session = db.get_session(user_id=user["id"], session_id=session_id)
+    if not session:
+        raise web.HTTPNotFound(reason="That learning session was not found.")
+
+    service = PostSessionQuizService(db)
+    existing_questions = db.list_session_quiz_questions(user_id=user["id"], session_id=session_id)
+    if not existing_questions:
+        await service.generateQuizBankForSessionWithAI(
+            session_id,
+            analyzer=request.app["analyzer"],
+            userId=user["id"],
+        )
+    quiz = service.getImmediateQuizForSession(session_id, userId=user["id"])
+    quiz["roadmapUpdate"] = service.updateRoadmapFromSession(session_id, userId=user["id"])
+    return web.json_response(quiz)
+
+
+async def past_session_practice_quiz(request: web.Request) -> web.Response:
+    user = current_user(request)
+    session_id = int(request.match_info["session_id"])
+    db: Database = request.app["db"]
+    session = db.get_session(user_id=user["id"], session_id=session_id)
+    if not session:
+        raise web.HTTPNotFound(reason="That learning session was not found.")
+
+    service = PostSessionQuizService(db)
+    existing_questions = db.list_session_quiz_questions(user_id=user["id"], session_id=session_id)
+    if not existing_questions:
+        await service.generateQuizBankForSessionWithAI(
+            session_id,
+            analyzer=request.app["analyzer"],
+            userId=user["id"],
+        )
+    return web.json_response(service.getPracticeQuizForPastSession(session_id, userId=user["id"]))
+
+
+async def weak_part_retry(request: web.Request) -> web.Response:
+    user = current_user(request)
+    session_id = int(request.match_info["session_id"])
+    try:
+        result = getWeakPartRetry(request.app["db"], user["id"], session_id)
+    except ValueError as exc:
+        raise web.HTTPNotFound(reason=str(exc)) from exc
+    return web.json_response(result)
+
+
+async def submit_weak_part_retry(request: web.Request) -> web.Response:
+    user = current_user(request)
+    session_id = int(request.match_info["session_id"])
+    payload = await request.json()
+    payload["userId"] = user["id"]
+    payload["sessionId"] = session_id
+    try:
+        result = submitWeakPartRetry(request.app["db"], payload)
+    except ValueError as exc:
+        raise web.HTTPBadRequest(reason=str(exc)) from exc
+    xp_earned = int(result.get("xpEarned") or 0)
+    if xp_earned:
+        progress, _ = apply_progress_event(
+            request.app["db"],
+            user_id=user["id"],
+            now=utc_now(),
+            xp_delta=xp_earned,
+        )
+        result["progress"] = progress
+    return web.json_response(result)
+
+
+async def describe_again_start(request: web.Request) -> web.Response:
+    user = current_user(request)
+    session_id = int(request.match_info["session_id"])
+    phrase_count = int(request.query.get("count") or 3)
+    try:
+        result = startDescribeAgain(request.app["db"], user["id"], session_id, phrase_count)
+    except ValueError as exc:
+        raise web.HTTPBadRequest(reason=str(exc)) from exc
+    return web.json_response(result)
+
+
+async def submit_describe_again(request: web.Request) -> web.Response:
+    user = current_user(request)
+    session_id = int(request.match_info["session_id"])
+    payload = await request.json()
+    payload["userId"] = user["id"]
+    payload["sessionId"] = session_id
+    try:
+        result = submitDescribeAgain(request.app["db"], payload)
+    except ValueError as exc:
+        raise web.HTTPBadRequest(reason=str(exc)) from exc
+    xp_earned = int(result.get("xpEarned") or 0)
+    if xp_earned:
+        progress, _ = apply_progress_event(
+            request.app["db"],
+            user_id=user["id"],
+            now=utc_now(),
+            xp_delta=xp_earned,
+        )
+        result["progress"] = progress
+    return web.json_response(result)
+
+
+async def submit_quiz_answer(request: web.Request) -> web.Response:
+    user = current_user(request)
+    payload = await request.json()
+    payload["userId"] = user["id"]
+    if not payload.get("mode"):
+        raise web.HTTPBadRequest(reason="Quiz answer mode is required.")
+
+    service = PostSessionQuizService(request.app["db"])
+    try:
+        result = service.submitQuizAnswer(payload)
+    except ValueError as exc:
+        raise web.HTTPBadRequest(reason=str(exc)) from exc
+
+    xp_earned = int(result.get("xpEarned") or 0)
+    if xp_earned:
+        apply_progress_event(
+            request.app["db"],
+            user_id=user["id"],
+            now=utc_now(),
+            xp_delta=xp_earned,
+        )
+    return web.json_response(result)
+
+
+async def roadmap_skill_detail(request: web.Request) -> web.Response:
+    user = current_user(request)
+    skill_key = str(request.match_info["skill_key"] or "").strip()
+    service = PostSessionQuizService(request.app["db"])
+    return web.json_response(service.getRoadmapSkillDetail(userId=user["id"], skillKey=skill_key))
+
+
+async def roadmap_overview(request: web.Request) -> web.Response:
+    user = current_user(request)
+    service = PostSessionQuizService(request.app["db"])
+    return web.json_response(service.getRoadmapOverview(userId=user["id"]))
+
+
+async def start_roadmap_practice_mission(request: web.Request) -> web.Response:
+    user = current_user(request)
+    skill_key = str(request.match_info["skill_key"] or "").strip()
+    service = PostSessionQuizService(request.app["db"])
+    return web.json_response(service.startRoadmapPracticeMission(userId=user["id"], skillKey=skill_key))
+
+
+async def daily_review(request: web.Request) -> web.Response:
+    user = current_user(request)
+    service = PostSessionQuizService(request.app["db"])
+    return web.json_response(service.getDailyReview(userId=user["id"]))
+
+
 async def session_image(request: web.Request) -> web.StreamResponse:
     user = current_user(request)
     session_id = int(request.match_info["session_id"])
@@ -1111,6 +1385,11 @@ async def progress_dashboard(request: web.Request) -> web.Response:
             "stats": request.app["db"].get_stats(user_id=user["id"], now_iso=to_iso(now)),
         }
     )
+
+
+async def progress_summary(request: web.Request) -> web.Response:
+    user = current_user(request)
+    return web.json_response({"progressSummary": getUserProgressSummary(request.app["db"], user["id"])})
 
 
 def main() -> None:
