@@ -7689,6 +7689,73 @@ function showSessionThinkingState(title, steps) {
   els.sessionDetailPanel.innerHTML = renderAiThinkingState(title, steps);
 }
 
+function renderUploadAnalysisLoading(imageUrl = "") {
+  const safeImage = imageUrl ? escapeHtml(imageUrl) : "";
+  return `
+    <section class="upload-analysis-screen" aria-live="polite">
+      <header class="upload-analysis-head">
+        <h2>Analyzing your image...</h2>
+        <p>Finding focus areas</p>
+      </header>
+
+      <div class="upload-analysis-image-wrap">
+        <div class="upload-analysis-ring" aria-hidden="true"></div>
+        <div class="upload-analysis-image">
+          ${
+            safeImage
+              ? `<img src="${safeImage}" alt="Selected image being analyzed">`
+              : `<div class="upload-analysis-fallback" aria-hidden="true"></div>`
+          }
+        </div>
+      </div>
+
+      <ol class="upload-analysis-steps" aria-label="Image analysis progress">
+        <li class="complete">
+          <span class="step-node" aria-hidden="true"></span>
+          <strong>Detecting key elements</strong>
+          <i aria-hidden="true"></i>
+        </li>
+        <li class="complete">
+          <span class="step-node" aria-hidden="true"></span>
+          <strong>Understanding context</strong>
+          <i aria-hidden="true"></i>
+        </li>
+        <li class="active">
+          <span class="step-node" aria-hidden="true"></span>
+          <strong>Finding focus areas</strong>
+          <em aria-hidden="true"><b></b><b></b><b></b></em>
+        </li>
+        <li>
+          <span class="step-node" aria-hidden="true"></span>
+          <strong>Preparing guidance</strong>
+          <i aria-hidden="true"></i>
+        </li>
+      </ol>
+
+      <aside class="upload-analysis-note">
+        <span aria-hidden="true">✦</span>
+        <p>This helps us give you personalized feedback and guidance.</p>
+      </aside>
+    </section>
+  `;
+}
+
+function showUploadAnalysisLoading(imageUrl = "") {
+  document.body.classList.remove("home-dashboard-active", "upload-choice-active");
+  document.body.classList.add("upload-analysis-active");
+  els.homeScreen?.classList.add("hidden");
+  els.homeBottomNav?.classList.add("hidden");
+  document.querySelector(".app-topbar")?.classList.remove("upload-app-header");
+  els.learnIntro.classList.add("hidden");
+  els.composePanel.classList.add("hidden");
+  els.sessionWorkspace.classList.remove("hidden");
+  els.sessionWorkspace.classList.add("focused-session-layout");
+  els.sessionWorkspace.classList.remove("has-session-library");
+  els.sessionLibrarySection.classList.add("hidden");
+  els.sessionDetailPanel.classList.remove("hidden");
+  els.sessionDetailPanel.innerHTML = renderUploadAnalysisLoading(imageUrl);
+}
+
 function feedbackTotalScore(feedback) {
   if (Number.isFinite(Number(feedback?.score))) {
     return Math.max(1, Math.min(100, Math.round(Number(feedback.score))));
@@ -8030,11 +8097,7 @@ async function startImageAnalysis() {
 
   els.uploadProcessingLabel?.classList.remove("hidden");
   setButtonBusy(els.analyzeButton, true, "Preparing...");
-  showSessionThinkingState("Preparing guided writing...", [
-    "Reading the image",
-    "Preparing starter hints",
-    "Choosing coverage focuses",
-  ]);
+  showUploadAnalysisLoading(state.uploadPreviewUrl || "");
   try {
     const uploadFile = await prepareImageForUpload(imageFile);
     if (uploadFile.size !== imageFile.size) {
@@ -8089,7 +8152,7 @@ async function startImageAnalysis() {
     if (state.currentSession) {
       renderSession(state.currentSession);
     } else {
-      state.learnView = "compose";
+      state.learnView = "upload";
       renderLearnPlaceholder();
     }
   } finally {
@@ -8937,6 +9000,7 @@ function renderLearnMode() {
   const showHome = Boolean(state.user && showCompose && !showUpload);
   const showMainTab = Boolean(state.user && (showHome || showSessions || showRoadmap || showReview));
 
+  document.body.classList.remove("upload-analysis-active");
   if (showCompose || showUpload) {
     updateAppHeaderForStage(LEARNING_STAGES.UPLOAD_IMAGE);
   } else {
