@@ -517,7 +517,47 @@ assert(state.currentLayer.mode === "polish_existing_detail", "the first already-
 assert(state.currentLayer.alreadyMentioned === true, "polish focus should remember that it was mentioned");
 assert(state.currentLayer.sourceText, "polish focus should keep a source phrase from the learner text");
 assert(state.currentLayer.supportLevels[0].prompt.includes("You mentioned"), "polish prompt should acknowledge the learner's existing phrase");
+assert(!state.currentLayer.supportLevels[0].prompt.includes("Can you make that part clearer?"), "polish prompt should not use generic wording");
+assert(/vines|greenery|position|action|feeling|setting|detail/i.test(state.currentLayer.supportLevels[0].prompt), "polish prompt should name the focus");
 assert(state.layers.every((layer) => layer.mode === "polish_existing_detail"), "mentioned focuses should stay in the path as polish work");
+"""
+        result = subprocess.run(
+            ["node", "-e", script],
+            cwd=Path(__file__).resolve().parents[1],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    @unittest.skipIf(shutil.which("node") is None, "node is required for static coverage tests")
+    def test_generic_level_one_support_prompt_is_replaced_with_focus_specific_question(self) -> None:
+        script = r"""
+const fs = require("fs");
+const vm = require("vm");
+const code = fs.readFileSync("english_learner_app/static/app.js", "utf8");
+const context = {
+  document: { addEventListener() {}, getElementById() { return null; }, querySelectorAll() { return []; } },
+  window: { setTimeout() {}, clearTimeout() {} },
+  console,
+};
+vm.createContext(context);
+vm.runInContext(code, context);
+
+function assert(condition, message) {
+  if (!condition) throw new Error(message);
+}
+
+const levels = context.normalizeCoverageSupportLevels(
+  [{ level: 1, prompt: "Can you make that part clearer?", hints: [] }],
+  "climbing vines on the building",
+  "polish_existing_detail",
+  "building with vines"
+);
+const prompt = levels[0].prompt;
+assert(!prompt.includes("Can you make that part clearer?"), "generic prompt should be replaced");
+assert(prompt.includes("You mentioned"), "polish prompt should acknowledge source text");
+assert(/vines|greenery/i.test(prompt), "replacement should be about the focus only: " + prompt);
 """
         result = subprocess.run(
             ["node", "-e", script],
@@ -1259,8 +1299,13 @@ assert(context.isExplanationReady(feedback, session) === true, "ready helper sho
 const completeHtml = context.renderCoverageCompleteStage(feedback, session, layers);
 assert(completeHtml.includes("Scene covered"), "coverage complete screen should announce scene coverage");
 assert(completeHtml.includes("You described the important parts of the image."), "coverage complete screen should explain the accomplishment");
-assert(completeHtml.includes("Upgrade My Articulation"), "coverage complete screen should transition into articulation polish");
+assert(completeHtml.includes("See Final Result"), "coverage complete screen should transition directly to the final reveal");
+assert(!completeHtml.includes("Upgrade My Articulation"), "coverage complete should not transition into articulation polish");
 assert(completeHtml.includes("Road") && completeHtml.includes("Buildings"), "coverage checklist should summarize covered visual areas");
+
+const noUpgradeHtml = context.renderCoverageCompleteStage(feedback, session, layers, false);
+assert(noUpgradeHtml.includes("See Final Result"), "coverage complete should skip polish wording when no upgrades exist");
+assert(!noUpgradeHtml.includes("Upgrade My Articulation"), "coverage complete should not promise upgrades when none exist");
 """
         result = subprocess.run(
             ["node", "-e", script],
@@ -1516,8 +1561,8 @@ const cards = context.buildInitialImprovementCards(original, {
   covered_enhancement: original,
 }, { better_version: original });
 assert(cards.length === 0, "frontend should not invent improvements when AI returns none");
-const done = context.renderInitialImprovementCompleteState("Let’s make this more expressive.");
-assert(done.includes("Let’s make this more expressive."), "empty state should avoid the old no-upgrade message");
+const source = fs.readFileSync("english_learner_app/static/app.js", "utf8");
+assert(source.includes("skipInitialEnhancementWhenNoUpgrades"), "frontend should have a no-upgrade skip path");
 """
         result = subprocess.run(
             ["node", "-e", script],

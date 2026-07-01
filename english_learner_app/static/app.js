@@ -168,7 +168,7 @@ function bindEvents() {
   els.takePhotoButton.addEventListener("click", () => openImagePicker("camera"));
   els.chooseGalleryButton.addEventListener("click", () => openImagePicker("gallery"));
   els.uploadBackButton.addEventListener("click", openNewSessionComposer);
-  els.newSessionButton.addEventListener("click", openNewSessionComposer);
+  els.newSessionButton.addEventListener("click", openUploadComposer);
   els.sessionsButton.addEventListener("click", openSessionsReviewScreen);
   els.dashboardButton.addEventListener("click", openDashboardModal);
   els.themeToggleButton.addEventListener("click", toggleTheme);
@@ -610,7 +610,7 @@ function inferLearningStage(step, flow, session) {
     return LEARNING_STAGES.FINAL_REVEAL;
   }
   if (current === LEARNING_STAGES.POLISH_STAGE) {
-    return LEARNING_STAGES.POLISH_STAGE;
+    return LEARNING_STAGES.FINAL_REVEAL;
   }
   if (step === "write" || !(flow?.attempts || []).length) {
     return LEARNING_STAGES.INITIAL_ATTEMPT;
@@ -1410,6 +1410,10 @@ function renderInitialAttemptFeedbackStep(session, feedback, initialFeedback) {
   const upgrades = storedUpgrades.length
     ? storedUpgrades
     : buildInitialImprovementCards(originalAttempt, initialFeedback, feedback);
+  if (!upgrades.length) {
+    skipInitialEnhancementWhenNoUpgrades(session, feedback, originalAttempt);
+    return;
+  }
   state.sessionFlow.initialImprovementCards = upgrades;
   state.sessionFlow.initialImprovementDraft = state.sessionFlow.initialImprovementDraft || originalAttempt;
   state.sessionFlow.initialAppliedImprovementIds = state.sessionFlow.initialAppliedImprovementIds || [];
@@ -1508,6 +1512,19 @@ function commitInitialImprovementDraft(finalText = "") {
   }
   persistCurrentSessionFlow();
   return text;
+}
+
+function skipInitialEnhancementWhenNoUpgrades(session, feedback, originalAttempt = "") {
+  const draft = cleanUiText(originalAttempt) || state.sessionFlow.explanation || "";
+  state.sessionFlow.initialImprovementCards = [];
+  state.sessionFlow.initialImprovementDraft = draft;
+  state.sessionFlow.initialAppliedImprovementIds = [];
+  state.sessionFlow.initialSkippedImprovementIds = [];
+  state.sessionFlow.initialEnhancementSkipped = true;
+  commitInitialImprovementDraft(draft);
+  renderSessionStep("improve", {
+    stage: enhancementContinuationStage(feedback),
+  });
 }
 
 function enhancementContinuationStage(feedback = {}) {
@@ -2616,10 +2633,14 @@ function renderImproveStep(session) {
     latestText,
     upgradeSuggestions
   );
-  state.sessionFlow.articulationUpgrade = upgradeState;
   const coverageAcknowledged = Boolean(state.sessionFlow.coverageCompleteAcknowledged);
+  if (coverageLayers.complete && coverageAcknowledged && !upgradeState.finalized) {
+    upgradeState.finalized = true;
+    upgradeState.answer = upgradeState.answer || latestText;
+    state.sessionFlow.finalPolishedText = upgradeState.answer || latestText;
+  }
+  state.sessionFlow.articulationUpgrade = upgradeState;
   const showCoverageComplete = coverageLayers.complete && !coverageAcknowledged && !upgradeState.finalized;
-  const showUpgrade = coverageLayers.complete && coverageAcknowledged && !upgradeState.finalized;
   const showMoveOption = coverageLayers.complete && upgradeState.finalized;
   const showEditor = !coverageLayers.complete;
   const ready = showMoveOption;
@@ -2640,30 +2661,22 @@ function renderImproveStep(session) {
   });
   const stage = showMoveOption
     ? LEARNING_STAGES.FINAL_REVEAL
-    : showUpgrade
-      ? LEARNING_STAGES.POLISH_STAGE
-      : coverageLayers.complete
-        ? LEARNING_STAGES.COVERAGE_COMPLETE
-        : state.sessionFlow.stage === LEARNING_STAGES.LAYER_SUCCESS
-          ? LEARNING_STAGES.LAYER_SUCCESS
+    : coverageLayers.complete
+      ? LEARNING_STAGES.COVERAGE_COMPLETE
+      : state.sessionFlow.stage === LEARNING_STAGES.LAYER_SUCCESS
+        ? LEARNING_STAGES.LAYER_SUCCESS
         : LEARNING_STAGES.COVERAGE_LAYERS;
   const currentLayerNumber = coverageLayers.currentIndex >= 0 ? coverageLayers.currentIndex + 1 : Math.max(1, attemptNumber);
   const layerTotal = Math.max(coverageLayers.layers?.length || 0, currentLayerNumber);
   const headerEyebrow = showMoveOption
     ? "Final reveal"
-    : showUpgrade
-      ? "Polish stage"
-      : stage === LEARNING_STAGES.LAYER_SUCCESS
-        ? "Layer success"
+    : stage === LEARNING_STAGES.LAYER_SUCCESS
+      ? "Layer success"
       : `Focus ${currentLayerNumber} of ${layerTotal}`;
   const headerTitle = showMoveOption
     ? "Look how far it improved"
-    : showUpgrade
-      ? "Upgrade your articulation"
-      : shortFocusPreview(coverageLayers.currentLayer) || "Explore one visual area";
-  const headerSupport = showUpgrade
-    ? "Scene covered. Now choose the wording upgrades you like."
-    : "";
+    : shortFocusPreview(coverageLayers.currentLayer) || "Explore one visual area";
+  const headerSupport = "";
   state.sessionFlow.stage = stage;
   if (state.currentSession) {
     state.currentSession.learning_stage = stage;
@@ -2676,11 +2689,10 @@ function renderImproveStep(session) {
 
   els.sessionDetailPanel.innerHTML = `
     <div class="journey-shell focused-step-shell ${showEditor || showCoverageComplete ? "coverage-layer-shell" : ""}">
-      ${showEditor || showCoverageComplete || showUpgrade || showMoveOption ? "" : renderStepProgress(stage)}
+      ${showEditor || showCoverageComplete || showMoveOption ? "" : renderStepProgress(stage)}
       <section class="focused-writing-card improve-action-card ${showEditor ? "coverage-layer-card" : ""}">
         ${showEditor ? renderImproveEditor({ rewriteDraft, currentFocus, hintGroups, articulation: coverageLayers, escalation, session, latestText, latestFeedback }) : ""}
         ${showCoverageComplete ? renderCoverageCompleteStage(latestFeedback, session, coverageLayers) : ""}
-        ${showUpgrade ? renderArticulationUpgradeStage(upgradeState, upgradeSuggestions) : ""}
         ${showMoveOption && upgradeState.finalized ? renderFinalPolishedReveal(upgradeState, upgradeSuggestions, latestFeedback, session) : ""}
         ${showEditor ? `
           <button id="submitImproveButton" class="primary-button journey-primary-button" type="button">
@@ -2727,9 +2739,6 @@ function renderImproveStep(session) {
   });
   document.getElementById("moveToNextCoverageLayerButton")?.addEventListener("click", () => {
     moveToNextCoverageLayer();
-  });
-  document.getElementById("finishArticulationUpgradeButton")?.addEventListener("click", () => {
-    finalizeArticulationUpgrade(upgradeState, upgradeSuggestions);
   });
   els.sessionDetailPanel.querySelectorAll("[data-apply-upgrade]").forEach((button) => {
     button.addEventListener("click", () => {
@@ -3559,11 +3568,11 @@ function renderCoverageCompleteStage(feedback = {}, session = {}, coverageLayers
 
       <section class="coverage-transition-card">
         <span aria-hidden="true">✦</span>
-        <p>Great job! Now let's make it <strong>sound more natural.</strong></p>
+        <p>Great job! Your description is ready for the final reveal.</p>
       </section>
 
       <button id="upgradeMyArticulationButton" class="primary-button journey-primary-button coverage-complete-cta" type="button">
-        ✦ Upgrade My Articulation
+        ✦ See Final Result
       </button>
     </section>
   `;
@@ -4462,7 +4471,7 @@ function normalizePlannedCoverageFocus(item = {}, index = 0) {
     mode,
     alreadyMentioned,
     sourceText: cleanUiText(item.sourceText || item.source_text || ""),
-    prompt: cleanUiText(item.prompt || coverageFocusModePrompt(item, mode, item.sourceText)),
+    prompt: coverageFocusModePrompt(item, mode, item.sourceText),
     expansionPrompt: cleanUiText(item.expansionPrompt || coverageFocusModeExpansionPrompt(item, mode)),
     supportLevels: normalizeCoverageSupportLevels(item.supportLevels || item.support_levels || [], title, mode, item.sourceText || ""),
   };
@@ -4472,10 +4481,11 @@ function coverageFocusModePrompt(target = {}, mode = "add_missing_detail", sourc
   const title = cleanFocusTitle(target.label || target.title || target.visualFocus || "this part");
   if (mode === "polish_existing_detail") {
     const source = cleanUiText(sourceText);
-    if (source) return `You mentioned "${source}". Can you make that part clearer?`;
-    return `You mentioned ${stripLeadingArticle(title)}. Can you make that part clearer?`;
+    return polishCoverageLevelOnePrompt(title, source);
   }
-  return cleanUiText(target.prompt) || `Add one clear detail about ${stripLeadingArticle(title)}.`;
+  const prompt = cleanUiText(target.prompt);
+  if (prompt && !isGenericCoverageLevelOnePrompt(prompt, title)) return prompt;
+  return coverageLevelOnePrompt(title);
 }
 
 function coverageFocusModeExpansionPrompt(target = {}, mode = "add_missing_detail") {
@@ -4982,7 +4992,7 @@ function normalizeCoverageSupportLevels(rawItems = [], title = "", mode = "add_m
     if (!item || typeof item !== "object") return;
     const level = clampFocusSupportLevel(item.level);
     let prompt = supportLevelPromptText(item);
-    if (!isCoverageSupportPrompt(prompt, level)) {
+    if (!isCoverageSupportPrompt(prompt, level, title)) {
       prompt = fallbackCoverageSupportPrompt(title, level, mode, sourceText);
     }
     const legacyHint = item.hint && !item.prompt ? [item.hint] : [];
@@ -5008,10 +5018,11 @@ function normalizeCoverageSupportLevels(rawItems = [], title = "", mode = "add_m
   return levels;
 }
 
-function isCoverageSupportPrompt(value = "", level = 1) {
+function isCoverageSupportPrompt(value = "", level = 1, title = "") {
   const text = cleanUiText(value);
   if (!text) return false;
   if (level >= 3) return text.includes("___");
+  if (level === 1 && isGenericCoverageLevelOnePrompt(text, title)) return false;
   return /\?$/.test(text) && !/^(what|where|who|which|can you|look|describe)\s*$/i.test(text);
 }
 
@@ -5019,16 +5030,84 @@ function fallbackCoverageSupportPrompt(title = "", level = 1, mode = "add_missin
   const lowerFocus = coverageSupportFocusPhrase(title);
   if (mode === "polish_existing_detail") {
     const source = cleanUiText(sourceText);
-    if (level <= 1) return source
-      ? `You mentioned "${source}". Can you make that part clearer?`
-      : `You mentioned ${lowerFocus}. Can you make that part clearer?`;
+    if (level <= 1) return polishCoverageLevelOnePrompt(title, source);
     if (level === 2) return `Can you describe ${lowerFocus} more vividly?`;
   }
-  if (level <= 1) return `What do you notice about ${lowerFocus}?`;
+  if (level <= 1) return coverageLevelOnePrompt(title);
   if (level === 2) return `Can you describe one specific detail about ${lowerFocus}?`;
   if (/^(how|the way)\b/i.test(lowerFocus)) return "It is ___.";
   if (/\b(and|or)\b/i.test(lowerFocus)) return "I can see ___.";
   return `${lowerFocus.charAt(0).toUpperCase()}${lowerFocus.slice(1)} is ___.`;
+}
+
+function isGenericCoverageLevelOnePrompt(prompt = "", title = "") {
+  const text = normalizeClientText(prompt);
+  const focus = normalizeClientText(title);
+  if (!text) return true;
+  if (/\bmake (that|this|it|the) part clearer\b/.test(text)) return true;
+  if (/\bcan you make\b.*\bclearer\b/.test(text)) return true;
+  if (/^(what do you notice|can you describe|tell me more)\??$/.test(text)) return true;
+  if (focus && /\b(this|that) part\b/.test(text) && !text.includes(focus.split(/\s+/)[0] || "")) return true;
+  return false;
+}
+
+function coverageLevelOnePrompt(title = "") {
+  const lowerFocus = coverageSupportFocusPhrase(title);
+  const key = normalizeClientText(title);
+  if (/\bvisible\b.*\bbackground\b|\bbackground\b.*\bvisible\b/.test(key)) {
+    return "What is visible in the background?";
+  }
+  if (/\bvisible\b.*\bforeground\b|\bforeground\b.*\bvisible\b/.test(key)) {
+    return "What is visible in the foreground?";
+  }
+  if (/\b(action|doing|movement|walking|running|holding|carrying|using|reaching|pointing)\b/.test(key)) {
+    return `What is happening with ${lowerFocus}?`;
+  }
+  if (/\b(position|positioning|behind|front|near|beside|next to|around|visible)\b/.test(key)) {
+    return `Where is ${lowerFocus} in the scene?`;
+  }
+  if (/\b(atmosphere|mood|feeling|calm|busy|quiet|lively|peaceful)\b/.test(key)) {
+    return "How does this part of the scene feel?";
+  }
+  if (/\b(greenery|vines|plants|trees|leaves|branches|bushes|shrubs)\b/.test(key)) {
+    return `What greenery do you notice around ${focusAnchorFromTitle(title) || "the main subject"}?`;
+  }
+  if (/\b(background|foreground|setting|surroundings|environment|place)\b/.test(key)) {
+    return `What is visible in ${lowerFocus}?`;
+  }
+  if (/\b(light|lighting|shadow|sky|weather|bright)\b/.test(key)) {
+    return "What do you notice about the light or weather?";
+  }
+  return `What specific detail do you notice about ${lowerFocus}?`;
+}
+
+function polishCoverageLevelOnePrompt(title = "", source = "") {
+  const key = normalizeClientText(`${title} ${source}`);
+  const prefix = source ? `You mentioned "${source}". ` : "";
+  if (/\b(vine|greenery|plant|tree|leaf|leaves|bush|shrub)\b/.test(key)) {
+    return `${prefix}How can you describe the greenery more clearly?`;
+  }
+  if (/\b(position|near|beside|behind|front|background|foreground|around|visible)\b/.test(key)) {
+    return `${prefix}How can you describe the position more clearly?`;
+  }
+  if (/\b(action|doing|walking|holding|carrying|using|reaching|pointing)\b/.test(key)) {
+    return `${prefix}How can you describe the action more clearly?`;
+  }
+  if (/\b(atmosphere|mood|feeling|calm|busy|quiet|peaceful)\b/.test(key)) {
+    return `${prefix}How can you describe the feeling more clearly?`;
+  }
+  if (/\b(background|foreground|setting|surroundings|environment|place)\b/.test(key)) {
+    return `${prefix}What extra detail can make the setting clearer?`;
+  }
+  return `${prefix}What specific detail can make ${coverageSupportFocusPhrase(title)} clearer?`;
+}
+
+function focusAnchorFromTitle(title = "") {
+  const key = normalizeClientText(title);
+  if (/\b(building|structure|wall|house|apartment)\b/.test(key)) return "the building";
+  if (/\b(person|people|man|woman|child)\b/.test(key)) return "the person";
+  if (/\b(road|street|path|sidewalk)\b/.test(key)) return "the road";
+  return "";
 }
 
 function coverageSupportFocusPhrase(title = "") {
@@ -7810,6 +7889,22 @@ function openNewSessionComposer(options = {}) {
   window.scrollTo({ top: 0, behavior: "smooth" });
 }
 
+function openUploadComposer(options = {}) {
+  state.learnView = "upload";
+  state.currentSession = null;
+  state.currentSessionId = null;
+  state.quiz = createEmptyQuizState();
+  setFocusedSessionLayout(false);
+  resetUploadPreview();
+  els.analyzeForm.reset();
+  els.analyzeButton.disabled = !state.user;
+  if (options.updateUrl !== false) {
+    updateHomeUrl({ replace: options.replaceUrl });
+  }
+  renderLearnPlaceholder();
+  window.scrollTo({ top: 0, behavior: "smooth" });
+}
+
 async function openSessionsReviewScreen() {
   if (!state.user) {
     showToast("Please log in first.", true);
@@ -8309,66 +8404,102 @@ function renderHomeScreen() {
   if (!els.homeScreen || !state.user) return;
   const progress = state.progress || {};
   const sessions = Array.isArray(state.sessions) ? state.sessions : [];
-  const recentSessions = sessions.slice(0, 3);
+  const recentSessions = sessions.slice(0, 2);
   const firstName = firstUserName(state.user.full_name);
   const roadmap = state.roadmapOverview || {};
   const recommendedSkill = roadmap.recommendedSkill || null;
   const dueCount = Number(roadmap.dueReviewCount || 0);
-  const recommendationText = recommendedSkill
-    ? roadmapSkillPracticeLabel(recommendedSkill)
-    : "Upload an image to unlock your first skill.";
+  const streakDays = Number(progress.streak_days || 0);
+  const xpPoints = Number(progress.xp_points || 0);
+  const skills = Array.isArray(roadmap.skills) ? roadmap.skills : [];
+  const phraseTotal = skills.reduce((sum, skill) => sum + Number(skill.totalAssetCount || 0), 0)
+    || Number(state.progressSummary?.phrasesLearned || 0)
+    || Number(progress.phrases_mastered || 0)
+    || sessions.reduce((sum, session) => sum + Number(sessionPhraseCount(session) || 0), 0);
+  const skillCount = skills.filter((skill) => Number(skill.totalAssetCount || 0) > 0).length || 4;
+  const focusTotal = 5;
+  const completedFocuses = Math.min(
+    focusTotal,
+    Math.max(0, Number(progress.sessions_completed || 0) || Math.min(2, sessions.length))
+  );
+  const avatarInitials = firstName.slice(0, 1).toUpperCase() || "N";
+  const roadmapProgress = Math.max(8, Math.min(92, Math.round((phraseTotal / Math.max(phraseTotal + 10, 16)) * 100)));
+  const reviewText = dueCount
+    ? `${dueCount} words and phrases due today`
+    : "No review due right now.";
 
   els.homeScreen.innerHTML = `
     <header class="home-hero-head">
-      <div>
-        <h1>${escapeHtml(homeGreeting())}, ${escapeHtml(firstName)}</h1>
-        <p>What should you do next?</p>
+      <div class="home-hero-copy">
+        <h1>${escapeHtml(homeGreeting())}, ${escapeHtml(firstName)} <span aria-hidden="true">👋</span></h1>
+        <p>Ready to describe something today?</p>
       </div>
-      <div class="home-stat-row" aria-label="Learning stats">
-        <article class="home-stat-card">
-          <span class="home-stat-icon flame" aria-hidden="true">◆</span>
-          <strong>${Number(progress.streak_days || 0)}</strong>
-          <small>Day Streak</small>
-        </article>
-        <article class="home-stat-card">
-          <span class="home-stat-icon xp" aria-hidden="true">★</span>
-          <strong>${Number(progress.xp_points || 0)}</strong>
-          <small>Total XP</small>
-        </article>
-        <button class="home-alert-button" type="button" data-home-profile aria-label="Open profile">
-          <span aria-hidden="true">♢</span>
-          <i></i>
-        </button>
+      <button class="home-profile-button" type="button" data-home-profile aria-label="Open profile">
+        <span class="home-avatar" aria-hidden="true">${escapeHtml(avatarInitials)}</span>
+        <strong>${Number(progress.learner_level || 12)}</strong>
+      </button>
+      <div class="home-stat-pill" aria-label="Learning stats">
+        <span aria-hidden="true">🔥</span>
+        <strong>${streakDays} day streak</strong>
+        <i aria-hidden="true"></i>
+        <span aria-hidden="true">⭐</span>
+        <strong>${xpPoints} XP</strong>
       </div>
     </header>
 
-    <section class="home-next-grid">
-      <article class="home-action-card primary">
-        <div>
-          <span class="home-action-icon" aria-hidden="true">＋</span>
-          <h2>Start New Session</h2>
-          <p>Upload an image and learn English from your own life.</p>
+    <section class="home-start-card">
+      <div class="home-start-copy">
+        <span class="home-sparkle" aria-hidden="true">✦</span>
+        <h2>Start New<br>Image Session</h2>
+        <p>Upload a photo and learn useful English from it.</p>
+        <button class="home-primary-button" type="button" data-home-start-session>
+          <span aria-hidden="true">＋</span>
+          <strong>Start Now</strong>
+        </button>
+      </div>
+      <div class="home-polaroid-stack" aria-hidden="true">
+        <div class="home-polaroid home-polaroid-back"></div>
+        <div class="home-polaroid home-polaroid-mid"></div>
+        <div class="home-polaroid home-polaroid-front">
+          <div class="home-image-fallback"></div>
         </div>
-        <button class="home-primary-button" type="button" data-home-start-session>Start</button>
+        <div class="home-upload-badge">⇧</div>
+      </div>
+    </section>
+
+    <section class="home-card-stack" aria-label="Next learning actions">
+      <article class="home-action-row continue">
+        <span class="home-row-icon orange" aria-hidden="true">◷</span>
+        <div>
+          <h2>Continue Your Session</h2>
+          <p>${completedFocuses} of ${focusTotal} focus areas completed</p>
+          <div class="home-progress-track"><span style="width: ${Math.round((completedFocuses / focusTotal) * 100)}%"></span></div>
+        </div>
+        <button class="home-row-arrow" type="button" data-home-roadmap aria-label="Continue roadmap">›</button>
       </article>
 
-      <article class="home-action-card">
+      <article class="home-action-row review">
+        <span class="home-row-icon green" aria-hidden="true">▣</span>
         <div>
-          <span class="home-action-icon purple" aria-hidden="true">◇</span>
-          <h2>Continue Roadmap</h2>
-          <p>${recommendedSkill ? escapeHtml(recommendedSkill.skillName || "Roadmap") : "No skill unlocked yet"}</p>
-          <small>${escapeHtml(recommendationText)}</small>
-        </div>
-        <button class="home-secondary-button" type="button" data-home-roadmap ${recommendedSkill ? "" : "disabled"}>Continue</button>
-      </article>
-
-      <article class="home-action-card">
-        <div>
-          <span class="home-action-icon green" aria-hidden="true">▣</span>
           <h2>Daily Review</h2>
-          <p>${dueCount ? `${dueCount} phrase${pluralize(dueCount)} due today` : "No review due right now."}</p>
+          <p>${escapeHtml(reviewText)}</p>
         </div>
-        <button class="home-secondary-button" type="button" data-home-daily-review ${dueCount ? "" : "disabled"}>Review</button>
+        <button class="home-review-button" type="button" data-home-daily-review ${dueCount ? "" : "disabled"}>
+          <strong>Review Now</strong>
+          <span aria-hidden="true">›</span>
+        </button>
+      </article>
+
+      <article class="home-action-row roadmap">
+        <span class="home-row-icon purple" aria-hidden="true">▮</span>
+        <div>
+          <h2>Your Roadmap</h2>
+          <p>${phraseTotal || 16} phrases learned across ${skillCount} skills</p>
+          <div class="home-roadmap-bars" style="--roadmap-progress: ${roadmapProgress}%">
+            <span class="purple"></span><span class="blue"></span><span class="green"></span><span class="orange"></span><span class="rest"></span>
+          </div>
+        </div>
+        <button class="home-row-arrow" type="button" data-home-roadmap aria-label="Open roadmap">›</button>
       </article>
     </section>
 
@@ -8388,9 +8519,15 @@ function renderHomeScreen() {
     </section>
   `;
 
-  els.homeScreen.querySelector("[data-home-start-session]")?.addEventListener("click", () => openImagePicker("gallery"));
-  els.homeScreen.querySelector("[data-home-roadmap]")?.addEventListener("click", () => {
-    if (recommendedSkill) openRoadmapSkillDetail(recommendedSkill.skillKey);
+  els.homeScreen.querySelector("[data-home-start-session]")?.addEventListener("click", openUploadComposer);
+  els.homeScreen.querySelectorAll("[data-home-roadmap]").forEach((button) => {
+    button.addEventListener("click", () => {
+      if (recommendedSkill) {
+        openRoadmapSkillDetail(recommendedSkill.skillKey);
+      } else {
+        openRoadmapOverviewScreen();
+      }
+    });
   });
   els.homeScreen.querySelector("[data-home-daily-review]")?.addEventListener("click", openDailyReviewScreen);
   els.homeScreen.querySelector("[data-home-see-all]")?.addEventListener("click", openSessionsReviewScreen);
@@ -8405,27 +8542,42 @@ function renderHomeScreen() {
 
 function renderHomePracticeCard(session = {}) {
   const sessionId = sessionIdValue(session);
-  const mastery = sessionMasteryValue(session);
   const phraseCount = sessionPhraseCount(session);
   const imageUrl = session.image_url || session.imageUrl || `/api/sessions/${sessionId}/image`;
+  const title = session.title || "Image session";
+  const createdAt = formatRecentSessionDate(session.created_at || session.createdAt);
   return `
     <article class="home-practice-card">
       <button class="home-practice-image-button" type="button" data-home-open-session="${escapeHtml(sessionId)}" aria-label="Open ${escapeHtml(session.title || "session")}">
         <img src="${escapeHtml(imageUrl)}" alt="${escapeHtml(session.image_name || session.title || "Session image")}">
-        <span class="home-image-chip" aria-hidden="true">▧</span>
-        <span class="home-card-menu" aria-hidden="true">⋮</span>
       </button>
       <div class="home-practice-body">
-        <h3>${escapeHtml(session.title || "Image session")}</h3>
-        ${mastery !== null ? `<p><span aria-hidden="true">★</span>${mastery}% Mastery</p>` : ""}
-        ${phraseCount !== null ? `<p>${phraseCount} phrase${pluralize(phraseCount)} learned</p>` : ""}
-        <button class="home-practice-button" type="button" data-home-open-session="${escapeHtml(sessionId)}">
-          <strong>Open Session</strong>
-          <span aria-hidden="true">›</span>
-        </button>
+        <h3>${escapeHtml(title)}</h3>
+        <p class="home-phrase-line">${phraseCount || 0} phrases learned</p>
+        <p class="home-date-line"><span aria-hidden="true">▣</span>${escapeHtml(createdAt)}</p>
       </div>
+      <button class="home-practice-button" type="button" data-home-open-session="${escapeHtml(sessionId)}" aria-label="Open ${escapeHtml(title)}">
+        <span aria-hidden="true">›</span>
+      </button>
     </article>
   `;
+}
+
+function formatRecentSessionDate(value) {
+  if (!value) return "Today";
+  try {
+    const date = new Date(value);
+    const now = new Date();
+    const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    const startOfDate = new Date(date.getFullYear(), date.getMonth(), date.getDate());
+    const dayDiff = Math.round((startOfToday - startOfDate) / 86400000);
+    const time = date.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+    if (dayDiff === 0) return `Today, ${time}`;
+    if (dayDiff === 1) return `Yesterday, ${time}`;
+    return date.toLocaleDateString([], { month: "short", day: "numeric" });
+  } catch (error) {
+    return String(value);
+  }
 }
 
 function roadmapSkillPracticeLabel(skill = {}) {
@@ -8776,20 +8928,22 @@ function homeGreeting() {
 }
 
 function renderLearnMode() {
+  const showUpload = state.learnView === "upload";
   const showSession = state.learnView === "session" && Boolean(state.currentSession);
   const showSessions = state.learnView === "sessions";
   const showRoadmap = state.learnView === "roadmap";
   const showReview = state.learnView === "review";
-  const showCompose = !showSession && !showSessions && !showRoadmap && !showReview;
-  const showHome = Boolean(state.user && showCompose);
+  const showCompose = showUpload || (!showSession && !showSessions && !showRoadmap && !showReview);
+  const showHome = Boolean(state.user && showCompose && !showUpload);
   const showMainTab = Boolean(state.user && (showHome || showSessions || showRoadmap || showReview));
 
-  if (showCompose) {
+  if (showCompose || showUpload) {
     updateAppHeaderForStage(LEARNING_STAGES.UPLOAD_IMAGE);
   } else {
     document.querySelector(".app-topbar")?.classList.remove("upload-app-header");
   }
   document.body.classList.toggle("home-dashboard-active", showMainTab);
+  document.body.classList.toggle("upload-choice-active", Boolean(state.user && showUpload));
   els.homeScreen?.classList.toggle("hidden", !showHome);
   els.homeBottomNav?.classList.toggle("hidden", !showMainTab);
   updateBottomNavActive();

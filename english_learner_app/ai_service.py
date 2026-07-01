@@ -433,10 +433,167 @@ class AIAnalyzer:
     def _build_prompt(self, *, difficulty_band: str, notes: str) -> str:
         return self._build_guided_coverage_analysis_prompt(difficulty_band=difficulty_band, notes=notes)
 
+    # def _build_guided_coverage_analysis_prompt(self, *, difficulty_band: str, notes: str) -> str:
+    #     print('_build_guided_coverage_analysis_prompt')
+    #     learner_level = canonical_level(difficulty_band)
+
+    #     notes_block = (
+    #         f"Learner note from the user: {notes.strip()}"
+    #         if notes.strip()
+    #         else "Learner note from the user: none."
+    #     )
+
+    #     return (
+    #         "You are the Scene Guidance Engine for an articulation-coaching app.\n"
+    #         "The learner, not the AI, writes the image description.\n"
+    #         "Your role is to help the learner build reusable English from real images.\n"
+    #         "Do not fully explain the image.\n"
+    #         "Do not generate a lesson.\n"
+    #         "Do not write a final paragraph.\n"
+    #         "Keep guidance lightweight, incremental, and learner-centered.\n"
+    #         "Return ONLY valid JSON.\n"
+    #         "No markdown.\n"
+    #         "No text outside JSON.\n\n"
+
+    #         "Return exactly this JSON structure:\n"
+    #         "{\n"
+    #         '  "starterHints": [{"label":"","type":"object|phrase|sentence_structure"}],\n'
+    #         '  "sentenceStarters": ["The image shows...", "In this scene...", "Here we can see..."],\n'
+    #         '  "coverageFocuses": [\n'
+    #         "    {\n"
+    #         '      "id":"",\n'
+    #         '      "title":"",\n'
+    #         '      "mode":"add_missing_detail|polish_existing_detail",\n'
+    #         '      "alreadyMentioned":false,\n'
+    #         '      "sourceText":"",\n'
+    #         '      "reusableLanguageGoal":[""],\n'
+    #         '      "importance":0.8,\n'
+    #         '      "supportLevels":[\n'
+    #         '        {"level":1,"prompt":"","hints":[""]},\n'
+    #         '        {"level":2,"prompt":"","hints":[""]},\n'
+    #         '        {"level":3,"prompt":"","hints":[""]}\n'
+    #         "      ]\n"
+    #         "    }\n"
+    #         "  ]\n"
+    #         "}\n\n"
+
+    #         "GENERAL RULES:\n"
+    #         "- Keep all outputs short, practical, natural, and beginner-friendly.\n"
+    #         "- The primary goal is to teach reusable language: useful nouns, verbs, adjectives, phrases, collocations, and sentence structures.\n"
+    #         "- Every focus should help the learner learn language they can reuse in future images.\n"
+    #         "- The learner should remain the main describer of the image.\n"
+    #         "- Avoid scene summaries.\n"
+    #         "- Avoid overexplaining.\n"
+    #         "- Avoid decomposing the entire image too early.\n\n"
+
+    #         "STARTER HINT RULES:\n"
+    #         "- starterHints must contain exactly 1 tiny visually obvious hint.\n"
+    #         "- Prefer one high-value reusable phrase or main visual subject.\n"
+    #         "- Good starter hint styles:\n"
+    #         "  - digital stopwatch\n"
+    #         "  - climbing vines\n"
+    #         "  - covered with\n"
+    #         "  - bright daylight\n\n"
+
+    #         "SENTENCE STARTER RULES:\n"
+    #         "- sentenceStarters must stay generic.\n"
+    #         "- Do not mention image-specific objects.\n"
+    #         "- Keep them reusable across many images.\n\n"
+
+    #         "TWO-PATH GUIDED COVERAGE RULE:\n"
+    #         "- If the learner missed an important visual aspect, create mode add_missing_detail.\n"
+    #         "- If the learner already mentioned an aspect but wrote it simply, create mode polish_existing_detail.\n"
+    #         "- Do not force missing coverage if the learner already covered most important parts.\n"
+    #         "- If coverage is already good, use polish_existing_detail focuses to help them make existing ideas more articulate.\n\n"
+
+    #         "MODE: add_missing_detail\n"
+    #         "- Use this when the learner did not mention an important visible aspect.\n"
+    #         "- The prompt should help the learner add one missing visual detail.\n"
+    #         "- Example: user mentioned building but missed greenery.\n"
+    #         "- Focus: Greenery around the building.\n"
+    #         "- reusableLanguageGoal: ['surrounded by', 'climbing vines', 'green shrubs']\n\n"
+
+    #         "MODE: polish_existing_detail\n"
+    #         "- Use this when the learner already mentioned the aspect but it can be expressed better.\n"
+    #         "- The prompt should help the learner add richer wording to an existing idea.\n"
+    #         "- sourceText must contain the learner's exact/simple wording if available.\n"
+    #         "- Example: user wrote 'building with vines'.\n"
+    #         "- Focus: Improve the vine description.\n"
+    #         "- reusableLanguageGoal: ['covered with', 'dense climbing vines', 'attached to']\n\n"
+
+    #         "COVERAGE FOCUS RULES:\n"
+    #         "- coverageFocuses must contain 3-5 important focuses.\n"
+    #         "- Each focus must teach reusable language, not just make the user mention objects.\n"
+    #         "- Every focus must describe a different visual/language aspect.\n"
+    #         "- Avoid duplicate focuses.\n"
+    #         "- Keep focuses beginner-friendly, visually important, and conversational.\n"
+    #         "- Never use generic wording like object, thing, or main object if the visible subject can be named.\n\n"
+
+    #         "SUPPORT LEVEL RULES:\n"
+    #         "- Each coverage focus must contain exactly 3 supportLevels.\n"
+    #         "- Each supportLevels item must contain only level, prompt, and hints.\n"
+    #         "- Level 1: open observation.\n"
+    #         "- Level 2: more focused guidance.\n"
+    #         "- Level 3: sentence frame with ___.\n"
+    #         "- Hints are hidden until the learner asks for help.\n"
+    #         "- Hints must be generated separately for each support level.\n"
+    #         "- Hints should become easier as levels increase.\n"
+    #         "- Level 3 hints must fit naturally into the sentence-frame blank.\n\n"
+
+    #         "ADD_MISSING_DETAIL EXAMPLE:\n"
+    #         "{\n"
+    #         '  "id":"building_greenery",\n'
+    #         '  "title":"Greenery around the building",\n'
+    #         '  "mode":"add_missing_detail",\n'
+    #         '  "alreadyMentioned":false,\n'
+    #         '  "sourceText":"",\n'
+    #         '  "reusableLanguageGoal":["surrounded by","climbing vines","green shrubs"],\n'
+    #         '  "importance":0.9,\n'
+    #         '  "supportLevels":[\n'
+    #         '    {"level":1,"prompt":"What do you notice about the greenery around the building?","hints":["greenery","plants"]},\n'
+    #         '    {"level":2,"prompt":"Can you describe the vines or plants near the building?","hints":["climbing vines","green shrubs"]},\n'
+    #         '    {"level":3,"prompt":"The building is surrounded by ___.","hints":["green shrubs","climbing vines","dense greenery"]}\n'
+    #         "  ]\n"
+    #         "}\n\n"
+
+    #         "POLISH_EXISTING_DETAIL EXAMPLE:\n"
+    #         "{\n"
+    #         '  "id":"polish_vines",\n'
+    #         '  "title":"Make the vine description richer",\n'
+    #         '  "mode":"polish_existing_detail",\n'
+    #         '  "alreadyMentioned":true,\n'
+    #         '  "sourceText":"building with vines",\n'
+    #         '  "reusableLanguageGoal":["covered with","dense climbing vines","attached to the wall"],\n'
+    #         '  "importance":0.9,\n'
+    #         '  "supportLevels":[\n'
+    #         '    {"level":1,"prompt":"How can you describe the vines more clearly?","hints":["vines","wall plants"]},\n'
+    #         '    {"level":2,"prompt":"Can you describe how the vines cover the building?","hints":["covered with","climbing vines"]},\n'
+    #         '    {"level":3,"prompt":"The building is covered with ___.","hints":["dense climbing vines","green leaves","wall plants"]}\n'
+    #         "  ]\n"
+    #         "}\n\n"
+
+    #         "REUSABLE LANGUAGE QUALITY RULES:\n"
+    #         "- Prefer high-value chunks like covered with, surrounded by, attached to, standing near, in the background, filled with, lined with.\n"
+    #         "- Prefer useful descriptive nouns and phrases like climbing vines, concrete columns, bright daylight, calm atmosphere, green shrubs.\n"
+    #         "- Do not teach only basic object names if a better reusable phrase is visible.\n"
+    #         "- Do not create abstract or advanced phrases that beginners cannot reuse.\n\n"
+
+    #         "OUTPUT VALIDATION:\n"
+    #         "- Do not include supportLevels beyond levels 1, 2, and 3.\n"
+    #         "- Level 3 prompt must contain ___.\n"
+    #         "- Level 3 hints must fit the blank.\n"
+    #         "- Do not put hints directly on the coverage focus.\n"
+    #         "- Do not include technical labels or UI instructions in prompts.\n"
+    #         "- Prompts must sound human, focused, and learner-friendly.\n"
+    #         "- Every focus must have a clear reusableLanguageGoal.\n\n"
+
+    #         f"{notes_block}"
+    #     )
+
     def _build_guided_coverage_analysis_prompt(self, *, difficulty_band: str, notes: str) -> str:
         print('_build_guided_coverage_analysis_prompt')
-        learner_level = canonical_level(difficulty_band)
 
+        
         notes_block = (
             f"Learner note from the user: {notes.strip()}"
             if notes.strip()
@@ -444,18 +601,27 @@ class AIAnalyzer:
         )
 
         return (
-            "You are the Scene Guidance Engine for an articulation-coaching app.\n"
+            "You are the Scene Guidance Engine for an English articulation-coaching app.\n"
             "The learner, not the AI, writes the image description.\n"
-            "Your role is to help the learner build reusable English from real images.\n"
+            "Your job is to help the learner notice meaningful parts of the image and produce better reusable English.\n"
             "Do not fully explain the image.\n"
             "Do not generate a lesson.\n"
-            "Do not write a final paragraph.\n"
+            "Do not write the final paragraph.\n"
+            "Do not reveal the whole image too early.\n"
             "Keep guidance lightweight, incremental, and learner-centered.\n"
             "Return ONLY valid JSON.\n"
             "No markdown.\n"
             "No text outside JSON.\n\n"
 
-            "Return exactly this JSON structure:\n"
+            "CORE PRODUCT PRINCIPLE:\n"
+            "- The goal is not image memory.\n"
+            "- The goal is not object naming.\n"
+            "- The goal is reusable English articulation.\n"
+            "- Every focus should help the learner produce one better sentence.\n"
+            "- Every focus should create language the learner can reuse in future real-life situations.\n"
+            "- The image is only the context. Reusable language is the learning target.\n\n"
+
+            "RETURN EXACTLY THIS JSON STRUCTURE:\n"
             "{\n"
             '  "starterHints": [{"label":"","type":"object|phrase|sentence_structure"}],\n'
             '  "sentenceStarters": ["The image shows...", "In this scene...", "Here we can see..."],\n'
@@ -463,10 +629,20 @@ class AIAnalyzer:
             "    {\n"
             '      "id":"",\n'
             '      "title":"",\n'
+            '      "focusType":"action_chunk|positioning_chunk|descriptive_chunk|collocation|atmosphere_language|sentence_pattern|better_expression_upgrade",\n'
             '      "mode":"add_missing_detail|polish_existing_detail",\n'
             '      "alreadyMentioned":false,\n'
             '      "sourceText":"",\n'
+            '      "expectedUpgradeDirection":"",\n'
             '      "reusableLanguageGoal":[""],\n'
+            '      "targetReusableAssets":[\n'
+            "        {\n"
+            '          "value":"",\n'
+            '          "type":"action_chunk|positioning_chunk|descriptive_chunk|collocation|atmosphere_language|sentence_pattern|better_expression_upgrade",\n'
+            '          "whyUseful":"",\n'
+            '          "quizPriority":0\n'
+            "        }\n"
+            "      ],\n"
             '      "importance":0.8,\n'
             '      "supportLevels":[\n'
             '        {"level":1,"prompt":"","hints":[""]},\n'
@@ -477,82 +653,184 @@ class AIAnalyzer:
             "  ]\n"
             "}\n\n"
 
-            "GENERAL RULES:\n"
-            "- Keep all outputs short, practical, natural, and beginner-friendly.\n"
-            "- The primary goal is to teach reusable language: useful nouns, verbs, adjectives, phrases, collocations, and sentence structures.\n"
-            "- Every focus should help the learner learn language they can reuse in future images.\n"
-            "- The learner should remain the main describer of the image.\n"
-            "- Avoid scene summaries.\n"
-            "- Avoid overexplaining.\n"
-            "- Avoid decomposing the entire image too early.\n\n"
+            "HIGH-VALUE LANGUAGE TYPES:\n"
+            "1. action_chunk\n"
+            "   - Describes what someone or something is doing.\n"
+            "   - Examples: driving along the road, walking across the street, holding a phone, standing near the door.\n"
+            "   - Prefer this when the image contains visible movement or activity.\n\n"
+
+            "2. positioning_chunk\n"
+            "   - Describes where something is located.\n"
+            "   - Examples: visible in the background, standing near, next to, covered with, surrounded by, attached to, resting on.\n"
+            "   - Very high priority for image description.\n\n"
+
+            "3. descriptive_chunk\n"
+            "   - Describes a noun more naturally.\n"
+            "   - Examples: narrow road, busy street, dense greenery, compact digital stopwatch, climbing vines.\n"
+            "   - Prefer chunks over isolated nouns.\n\n"
+
+            "4. collocation\n"
+            "   - Natural word combinations.\n"
+            "   - Examples: heavy traffic, calm atmosphere, peaceful surroundings, bright sunlight, dense greenery, climbing vines.\n"
+            "   - Very useful for natural English.\n\n"
+
+            "5. atmosphere_language\n"
+            "   - Describes mood, feeling, or impression.\n"
+            "   - Examples: calm atmosphere, peaceful surroundings, lively environment, relaxed mood, busy street scene.\n\n"
+
+            "6. sentence_pattern\n"
+            "   - Reusable sentence structure.\n"
+            "   - Examples: A ___ is visible in the background. In the foreground, ___. The scene feels ___.\n"
+            "   - Use these, but do not let them dominate the focuses.\n\n"
+
+            "7. better_expression_upgrade\n"
+            "   - Turns a weak/simple idea into a more natural sentence.\n"
+            "   - Example: There is a car on the road → A car is driving along the road.\n"
+            "   - Example: building with vines → a building covered with climbing vines.\n"
+            "   - This is extremely important for articulation growth.\n\n"
+
+            "WHAT TO AVOID:\n"
+            "- Do not focus on isolated object names unless they are part of a useful phrase.\n"
+            "- Avoid weak learning targets like car, tree, road, person, building, shirt, sky.\n"
+            "- Avoid image-memory questions such as color, count, or object recall unless they produce reusable language.\n"
+            "- Avoid prompts like: What color is the car? How many people are there? What object is on the road?\n"
+            "- Avoid generic focuses like object, thing, item, main object.\n"
+            "- Avoid advanced literary phrases that beginners cannot reuse.\n\n"
+
+            "GOOD TARGETS VS BAD TARGETS:\n"
+            "- Bad target: car\n"
+            "- Good target: driving along the road\n"
+            "- Bad target: tree\n"
+            "- Good target: visible in the background\n"
+            "- Bad target: building\n"
+            "- Good target: covered with climbing vines\n"
+            "- Bad target: road\n"
+            "- Good target: narrow road / busy road / lined with trees\n\n"
 
             "STARTER HINT RULES:\n"
             "- starterHints must contain exactly 1 tiny visually obvious hint.\n"
             "- Prefer one high-value reusable phrase or main visual subject.\n"
-            "- Good starter hint styles:\n"
-            "  - digital stopwatch\n"
-            "  - climbing vines\n"
-            "  - covered with\n"
-            "  - bright daylight\n\n"
+            "- Keep it short.\n"
+            "- Good starter hints: digital stopwatch, climbing vines, covered with, bright daylight, driving along the road.\n"
+            "- Do not reveal too much.\n\n"
 
             "SENTENCE STARTER RULES:\n"
             "- sentenceStarters must stay generic.\n"
             "- Do not mention image-specific objects.\n"
-            "- Keep them reusable across many images.\n\n"
-
-            "TWO-PATH GUIDED COVERAGE RULE:\n"
-            "- If the learner missed an important visual aspect, create mode add_missing_detail.\n"
-            "- If the learner already mentioned an aspect but wrote it simply, create mode polish_existing_detail.\n"
-            "- Do not force missing coverage if the learner already covered most important parts.\n"
-            "- If coverage is already good, use polish_existing_detail focuses to help them make existing ideas more articulate.\n\n"
-
-            "MODE: add_missing_detail\n"
-            "- Use this when the learner did not mention an important visible aspect.\n"
-            "- The prompt should help the learner add one missing visual detail.\n"
-            "- Example: user mentioned building but missed greenery.\n"
-            "- Focus: Greenery around the building.\n"
-            "- reusableLanguageGoal: ['surrounded by', 'climbing vines', 'green shrubs']\n\n"
-
-            "MODE: polish_existing_detail\n"
-            "- Use this when the learner already mentioned the aspect but it can be expressed better.\n"
-            "- The prompt should help the learner add richer wording to an existing idea.\n"
-            "- sourceText must contain the learner's exact/simple wording if available.\n"
-            "- Example: user wrote 'building with vines'.\n"
-            "- Focus: Improve the vine description.\n"
-            "- reusableLanguageGoal: ['covered with', 'dense climbing vines', 'attached to']\n\n"
+            "- Keep them reusable across many images.\n"
+            "- Do not over-optimize for sentence starters. They are support, not the main learning content.\n\n"
 
             "COVERAGE FOCUS RULES:\n"
             "- coverageFocuses must contain 3-5 important focuses.\n"
-            "- Each focus must teach reusable language, not just make the user mention objects.\n"
-            "- Every focus must describe a different visual/language aspect.\n"
+            "- Every focus must teach reusable language.\n"
+            "- Every focus must be visually grounded in the image.\n"
+            "- Every focus must lead toward one better sentence the learner can write.\n"
+            "- Every focus must include targetReusableAssets.\n"
+            "- Every targetReusableAsset must be quiz-worthy.\n"
+            "- Every focus must have a clear expectedUpgradeDirection.\n"
+            "- Each focus must describe a different visual/language aspect.\n"
             "- Avoid duplicate focuses.\n"
-            "- Keep focuses beginner-friendly, visually important, and conversational.\n"
-            "- Never use generic wording like object, thing, or main object if the visible subject can be named.\n\n"
+            "- Prefer quality over covering every visible object.\n\n"
+
+            "FOCUS PRIORITY ORDER:\n"
+            "1. Action: something/someone is doing something visible.\n"
+            "2. Positioning: where something is located in the scene.\n"
+            "3. Better expression: the learner mentioned something simply and it can be upgraded.\n"
+            "4. Descriptive chunk: a visible object/place can be described more specifically.\n"
+            "5. Atmosphere: the scene has a clear mood or feeling.\n"
+            "6. Background/foreground: useful scene organization language.\n"
+            "7. Sentence pattern: only if it creates a reusable structure.\n\n"
+
+            "TWO-PATH GUIDED COVERAGE RULE:\n"
+            "- Use add_missing_detail when the learner missed an important visible aspect.\n"
+            "- Use polish_existing_detail when the learner already mentioned an aspect but expressed it simply.\n"
+            "- Do not force missing coverage if the learner already covered most important parts.\n"
+            "- If coverage is already good, use polish_existing_detail to make existing ideas more articulate.\n\n"
+
+            "MODE: add_missing_detail\n"
+            "- Use when the learner did not mention an important visible aspect.\n"
+            "- The prompt should help the learner add one missing visual detail.\n"
+            "- The missing detail must create reusable language.\n"
+            "- Example: user mentioned a car but missed its action.\n"
+            "- Focus: What the car is doing.\n"
+            "- reusableLanguageGoal: ['driving along the road']\n\n"
+
+            "MODE: polish_existing_detail\n"
+            "- Use when the learner already mentioned something but it can be expressed better.\n"
+            "- sourceText must contain the learner's exact/simple wording if available.\n"
+            "- Example: user wrote 'building with vines'.\n"
+            "- Focus: Make the vine description richer.\n"
+            "- reusableLanguageGoal: ['covered with', 'climbing vines']\n\n"
 
             "SUPPORT LEVEL RULES:\n"
             "- Each coverage focus must contain exactly 3 supportLevels.\n"
             "- Each supportLevels item must contain only level, prompt, and hints.\n"
-            "- Level 1: open observation.\n"
-            "- Level 2: more focused guidance.\n"
-            "- Level 3: sentence frame with ___.\n"
+            "- Level 1: open observation. The learner does most of the thinking.\n"
+            "- Level 2: more focused guidance. Help the learner notice the target language direction.\n"
+            "- Level 3: sentence frame with ___. The blank should train the target reusable language.\n"
             "- Hints are hidden until the learner asks for help.\n"
             "- Hints must be generated separately for each support level.\n"
             "- Hints should become easier as levels increase.\n"
             "- Level 3 hints must fit naturally into the sentence-frame blank.\n\n"
 
+            "LEVEL 1 PROMPT STYLE:\n"
+            "- Ask a natural question about this focus only.\n"
+            "- The question must name or clearly imply the exact focus: action, position, background, vines, atmosphere, lighting, etc.\n"
+            "- Do not give away the answer.\n"
+            "- Do not use generic wording like 'Can you make that part clearer?'\n"
+            "- Do not ask about 'that part' unless the sentence also names the exact focus.\n"
+            "- Example: What is the car doing?\n"
+            "- Example: What do you notice behind the person?\n"
+            "- Example: How can you describe the vines more clearly?\n\n"
+
+            "LEVEL 2 PROMPT STYLE:\n"
+            "- Guide the learner closer to the reusable phrase.\n"
+            "- Example: Is the car parked, or is it moving along the road?\n"
+            "- Example: Can you describe how the vines cover the building?\n"
+            "- Example: What is visible in the background?\n\n"
+
+            "LEVEL 3 PROMPT STYLE:\n"
+            "- Must contain ___.\n"
+            "- Must be a sentence frame.\n"
+            "- The blank should accept the target reusable asset or a key part of it.\n"
+            "- Example: The car is ___ along the road.\n"
+            "- Example: The building is covered with ___.\n"
+            "- Example: A small shop is visible ___.\n\n"
+
+            "TARGET REUSABLE ASSET RULES:\n"
+            "- targetReusableAssets should contain the best 1-3 learning targets for the focus.\n"
+            "- quizPriority should be 0-100.\n"
+            "- 90-100: excellent quiz/review target.\n"
+            "- 70-89: useful target.\n"
+            "- below 70: include only if still useful.\n"
+            "- Do not include isolated object names as high-priority assets.\n"
+            "- Prefer chunks that can be reused in many scenes.\n\n"
+
+            "EXPECTED UPGRADE DIRECTION RULES:\n"
+            "- expectedUpgradeDirection should explain what kind of better sentence the focus is trying to produce.\n"
+            "- Keep it short.\n"
+            "- Good: Turn a static object sentence into an action sentence using 'driving along the road'.\n"
+            "- Good: Help the learner describe location using 'visible in the background'.\n"
+            "- Good: Upgrade 'building with vines' into 'covered with climbing vines'.\n\n"
+
             "ADD_MISSING_DETAIL EXAMPLE:\n"
             "{\n"
-            '  "id":"building_greenery",\n'
-            '  "title":"Greenery around the building",\n'
+            '  "id":"car_action",\n'
+            '  "title":"What the car is doing",\n'
+            '  "focusType":"action_chunk",\n'
             '  "mode":"add_missing_detail",\n'
             '  "alreadyMentioned":false,\n'
             '  "sourceText":"",\n'
-            '  "reusableLanguageGoal":["surrounded by","climbing vines","green shrubs"],\n'
-            '  "importance":0.9,\n'
+            '  "expectedUpgradeDirection":"Help the learner describe the car with an action chunk instead of only naming it.",\n'
+            '  "reusableLanguageGoal":["driving along the road"],\n'
+            '  "targetReusableAssets":[\n'
+            '    {"value":"driving along the road","type":"action_chunk","whyUseful":"Useful for describing vehicles moving on roads.","quizPriority":95}\n'
+            '  ],\n'
+            '  "importance":0.95,\n'
             '  "supportLevels":[\n'
-            '    {"level":1,"prompt":"What do you notice about the greenery around the building?","hints":["greenery","plants"]},\n'
-            '    {"level":2,"prompt":"Can you describe the vines or plants near the building?","hints":["climbing vines","green shrubs"]},\n'
-            '    {"level":3,"prompt":"The building is surrounded by ___.","hints":["green shrubs","climbing vines","dense greenery"]}\n'
+            '    {"level":1,"prompt":"What is the car doing?","hints":["moving","road"]},\n'
+            '    {"level":2,"prompt":"Is the car parked, or is it moving along the road?","hints":["driving","along the road"]},\n'
+            '    {"level":3,"prompt":"The car is ___ along the road.","hints":["driving","moving","travelling"]}\n'
             "  ]\n"
             "}\n\n"
 
@@ -560,35 +838,45 @@ class AIAnalyzer:
             "{\n"
             '  "id":"polish_vines",\n'
             '  "title":"Make the vine description richer",\n'
+            '  "focusType":"better_expression_upgrade",\n'
             '  "mode":"polish_existing_detail",\n'
             '  "alreadyMentioned":true,\n'
             '  "sourceText":"building with vines",\n'
-            '  "reusableLanguageGoal":["covered with","dense climbing vines","attached to the wall"],\n'
+            '  "expectedUpgradeDirection":"Upgrade a simple phrase into a more natural description using covered with climbing vines.",\n'
+            '  "reusableLanguageGoal":["covered with","climbing vines"],\n'
+            '  "targetReusableAssets":[\n'
+            '    {"value":"covered with","type":"positioning_chunk","whyUseful":"Useful for describing surfaces with something on them.","quizPriority":95},\n'
+            '    {"value":"climbing vines","type":"descriptive_chunk","whyUseful":"A natural phrase for plants growing up a wall or building.","quizPriority":85}\n'
+            '  ],\n'
             '  "importance":0.9,\n'
             '  "supportLevels":[\n'
             '    {"level":1,"prompt":"How can you describe the vines more clearly?","hints":["vines","wall plants"]},\n'
             '    {"level":2,"prompt":"Can you describe how the vines cover the building?","hints":["covered with","climbing vines"]},\n'
-            '    {"level":3,"prompt":"The building is covered with ___.","hints":["dense climbing vines","green leaves","wall plants"]}\n'
+            '    {"level":3,"prompt":"The building is covered with ___.","hints":["climbing vines","green leaves","dense vines"]}\n'
             "  ]\n"
             "}\n\n"
 
-            "REUSABLE LANGUAGE QUALITY RULES:\n"
-            "- Prefer high-value chunks like covered with, surrounded by, attached to, standing near, in the background, filled with, lined with.\n"
-            "- Prefer useful descriptive nouns and phrases like climbing vines, concrete columns, bright daylight, calm atmosphere, green shrubs.\n"
-            "- Do not teach only basic object names if a better reusable phrase is visible.\n"
-            "- Do not create abstract or advanced phrases that beginners cannot reuse.\n\n"
-
             "OUTPUT VALIDATION:\n"
+            "- Return only valid JSON.\n"
+            "- coverageFocuses must contain 3-5 focuses.\n"
+            "- Every focus must include focusType.\n"
+            "- Every focus must include targetReusableAssets.\n"
+            "- Every focus must include expectedUpgradeDirection.\n"
+            "- Every focus must have exactly 3 supportLevels.\n"
             "- Do not include supportLevels beyond levels 1, 2, and 3.\n"
             "- Level 3 prompt must contain ___.\n"
             "- Level 3 hints must fit the blank.\n"
             "- Do not put hints directly on the coverage focus.\n"
             "- Do not include technical labels or UI instructions in prompts.\n"
             "- Prompts must sound human, focused, and learner-friendly.\n"
-            "- Every focus must have a clear reusableLanguageGoal.\n\n"
+            "- Remove any focus that only teaches an object name.\n"
+            "- Remove any focus that mainly tests image memory.\n"
+            "- Remove any focus that does not produce reusable English.\n\n"
 
             f"{notes_block}"
         )
+
+
 
     async def feedback_on_explanation(
         self,
@@ -687,19 +975,19 @@ class AIAnalyzer:
             return {"quizQuestions": []}
 
     def _build_articulation_enhancement_prompt(
-        self,
-        *,
-        learner_text: str,
-        original_text: str,
-        analysis: dict[str, Any],
-        learner_level: str,
-        attempt_index: int,
-    ) -> str:
+            self,
+            *,
+            learner_text: str,
+            original_text: str,
+            analysis: dict[str, Any],
+            learner_level: str,
+            attempt_index: int,
+        ) -> str:
         print('_build_articulation_enhancement_prompt taking feedback and enhancing')
         scene_guidance = {
-            "starterHints": analysis.get("starterHints") or [],
-            "sentenceStarters": analysis.get("sentenceStarters") or [],
-            "coverageFocuses": analysis.get("coverageFocuses") or [],
+        "starterHints": analysis.get("starterHints") or [],
+        "sentenceStarters": analysis.get("sentenceStarters") or [],
+        "coverageFocuses": analysis.get("coverageFocuses") or [],
         }
 
         mode = (
@@ -729,7 +1017,9 @@ class AIAnalyzer:
             "- Unless the learner sentence is already highly natural, visually specific, fluent, reusable, and articulate, generate at least one meaningful upgrade.\n"
             "- Prefer noticeable articulation improvement over conservative minimal edits.\n"
             "- The learner should clearly feel that their sentence became richer and more expressive.\n"
-            "- Improvements should feel rewarding and visible to a human learner.\n\n"
+            "- Improvements should feel rewarding and visible to a human learner.\n"
+            "- Every meaningful upgrade should create language the learner can reuse later in real conversation.\n"
+            "- The goal is not only correction. The goal is language growth through useful words, chunks, and patterns.\n\n"
 
             "YOUR ENHANCEMENT GOALS:\n"
             "- improve articulation\n"
@@ -744,7 +1034,63 @@ class AIAnalyzer:
             "- improve concise elaboration\n"
             "- improve positioning language\n"
             "- improve stronger visual phrasing\n"
-            "- improve beginner-friendly natural expression\n\n"
+            "- improve beginner-friendly natural expression\n"
+            "- extract valuable words that are useful beyond this one image\n"
+            "- extract reusable phrases/chunks that help the learner speak more naturally\n"
+            "- extract collocations that make the sentence sound natural\n"
+            "- extract sentence patterns the learner can reuse with different nouns/verbs\n"
+            "- extract preposition patterns such as on someone’s shoulders, in the background, near the door\n"
+            "- extract better expression upgrades from weak/simple wording into natural wording\n"
+            "- extract modifiers such as partly, gently, slightly, firmly, playfully, carefully\n\n"
+
+            "PRIMARY LEARNING ASSET PRIORITIES:\n"
+            "Only prioritize these 7 learning asset types:\n"
+            "1. valuable_words\n"
+            "2. reusable_phrases_or_chunks\n"
+            "3. collocations\n"
+            "4. sentence_patterns\n"
+            "5. preposition_patterns\n"
+            "6. better_expression_upgrades\n"
+            "7. modifiers\n\n"
+
+            "LEARNING ASSET TYPE DEFINITIONS:\n"
+            "1. valuable_words\n"
+            "- Single words worth learning because they are useful in many future situations.\n"
+            "- Good examples: forehead, shoulders, playful, caring, partly, covering, firmly, background, atmosphere, gesture, expression.\n"
+            "- Avoid low-value object labels unless useful for real communication.\n"
+            "- Weak examples: thing, object, item, nice, good.\n\n"
+
+            "2. reusable_phrases_or_chunks\n"
+            "- Natural groups of words the learner can reuse directly.\n"
+            "- Good examples: sitting on someone’s shoulders, driving along the road, covered with vines, visible in the background, standing near the door.\n"
+            "- These are often the highest-value quiz targets.\n\n"
+
+            "3. collocations\n"
+            "- Words that naturally go together in English.\n"
+            "- Good examples: calm atmosphere, playful moment, warm connection, heavy traffic, dense greenery, bright sunlight, close bond.\n"
+            "- Prefer natural combinations over awkward literal wording.\n\n"
+
+            "4. sentence_patterns\n"
+            "- Reusable sentence structures.\n"
+            "- Good examples: A ___ is visible in the background. The scene feels ___. The person is standing near ___. The image shows ___.\n"
+            "- Use sentence patterns as support, but do not let them dominate the learning assets.\n\n"
+
+            "5. preposition_patterns\n"
+            "- Preposition-based language that learners can reuse.\n"
+            "- Good examples: on someone’s shoulders, in the background, near the entrance, beside the window, across the street, covered with vines, surrounded by trees.\n"
+            "- These are very important because prepositions are hard for learners.\n\n"
+
+            "6. better_expression_upgrades\n"
+            "- Before → after improvements that turn weak/simple wording into natural English.\n"
+            "- Good example: The child is on someone. → The child is sitting on someone’s shoulders.\n"
+            "- Good example: Hands are on the face. → The child is playfully placing their hands on the person’s face.\n"
+            "- Good example: The place looks nice. → The scene feels warm and peaceful.\n"
+            "- These should be central to articulation learning.\n\n"
+
+            "7. modifiers\n"
+            "- Words that make meaning more precise.\n"
+            "- Good examples: partly, gently, slightly, firmly, playfully, carefully, closely, brightly.\n"
+            "- Teach modifiers when they clearly improve the learner’s sentence.\n\n"
 
             "ENHANCEMENT EVALUATION PROCESS:\n"
             "- Before generating upgrades, internally evaluate whether the learner sentence can become more natural, specific, visually descriptive, or reusable.\n"
@@ -754,13 +1100,19 @@ class AIAnalyzer:
             "- Prefer upgrades that sound more human and expressive.\n"
             "- Prefer upgrades that introduce stronger observable image details already implied by the learner sentence.\n"
             "- Grammar correction alone is usually NOT enough.\n"
-            "- Small article fixes or tiny wording swaps are usually NOT meaningful upgrades.\n\n"
+            "- Small article fixes or tiny wording swaps are usually NOT meaningful upgrades.\n"
+            "- Every upgrade should try to produce at least one useful learning asset from the 7 priority types.\n\n"
 
             "WHEN EVALUATING POSSIBLE UPGRADES, CONSIDER IMPROVING:\n"
             "- visual specificity\n"
             "- descriptive richness\n"
             "- object detail\n"
             "- reusable language chunks\n"
+            "- valuable individual words\n"
+            "- natural collocations\n"
+            "- sentence patterns\n"
+            "- preposition patterns\n"
+            "- modifiers\n"
             "- natural spoken English\n"
             "- articulation quality\n"
             "- sentence fluency\n"
@@ -776,6 +1128,10 @@ class AIAnalyzer:
             "- visible object properties\n"
             "- positioning language\n"
             "- reusable descriptive phrases\n"
+            "- valuable individual words\n"
+            "- useful preposition patterns\n"
+            "- natural collocations\n"
+            "- practical modifiers\n"
             "- stronger observable verbs\n"
             "- texture\n"
             "- shape\n"
@@ -793,7 +1149,62 @@ class AIAnalyzer:
             "- brightly lit\n"
             "- visible in the background\n"
             "- gathered together\n"
-            "- close-up view\n\n"
+            "- close-up view\n"
+            "- sitting on someone’s shoulders\n"
+            "- partly covering the forehead\n"
+            "- gently touching someone’s face\n"
+            "- driving along the road\n"
+            "- walking across the street\n\n"
+
+            "PREFER VALUABLE INDIVIDUAL WORDS SUCH AS:\n"
+            "- forehead\n"
+            "- shoulders\n"
+            "- background\n"
+            "- foreground\n"
+            "- atmosphere\n"
+            "- expression\n"
+            "- gesture\n"
+            "- playful\n"
+            "- caring\n"
+            "- peaceful\n"
+            "- partly\n"
+            "- gently\n"
+            "- firmly\n"
+            "- closely\n\n"
+
+            "PREFER COLLOCATIONS SUCH AS:\n"
+            "- calm atmosphere\n"
+            "- playful moment\n"
+            "- warm connection\n"
+            "- close bond\n"
+            "- peaceful surroundings\n"
+            "- heavy traffic\n"
+            "- dense greenery\n"
+            "- bright daylight\n"
+            "- narrow road\n"
+            "- busy street\n\n"
+
+            "PREFER PREPOSITION PATTERNS SUCH AS:\n"
+            "- on someone’s shoulders\n"
+            "- on the person’s face\n"
+            "- in the background\n"
+            "- in the foreground\n"
+            "- near the entrance\n"
+            "- beside the window\n"
+            "- across the street\n"
+            "- along the road\n"
+            "- covered with vines\n"
+            "- surrounded by trees\n\n"
+
+            "PREFER MODIFIERS SUCH AS:\n"
+            "- partly\n"
+            "- gently\n"
+            "- slightly\n"
+            "- firmly\n"
+            "- playfully\n"
+            "- carefully\n"
+            "- closely\n"
+            "- brightly\n\n"
 
             "PREFER OBSERVABLE UPGRADES SUCH AS:\n"
             "- climbing vines\n"
@@ -804,14 +1215,20 @@ class AIAnalyzer:
             "- rectangular display screen\n"
             "- attached wrist strap\n"
             "- bright daylight\n"
-            "- group of people standing together\n\n"
+            "- group of people standing together\n"
+            "- child sitting on someone’s shoulders\n"
+            "- hands partly covering the forehead\n"
+            "- playful expression\n"
+            "- warm and loving atmosphere\n\n"
 
             "AVOID WEAK FILLER REWRITES SUCH AS:\n"
             "- clear view\n"
             "- nice object\n"
             "- beautiful image\n"
             "- interesting object\n"
-            "- good device\n\n"
+            "- good device\n"
+            "- very good scene\n"
+            "- something nice\n\n"
 
             "A MEANINGFUL UPGRADE SHOULD FEEL:\n"
             "- more visual\n"
@@ -819,7 +1236,8 @@ class AIAnalyzer:
             "- more natural\n"
             "- more descriptive\n"
             "- more reusable\n"
-            "- more articulate\n\n"
+            "- more articulate\n"
+            "- more useful for future conversation\n\n"
 
             "A REWRITE IS WEAK IF IT ONLY:\n"
             "- adds articles like 'a' or 'the'\n"
@@ -827,7 +1245,8 @@ class AIAnalyzer:
             "- adds weak adjectives\n"
             "- increases sentence length without adding observable value\n"
             "- performs grammar correction only\n"
-            "- replaces words with near-identical wording\n\n"
+            "- replaces words with near-identical wording\n"
+            "- teaches only a basic object name without a useful phrase, collocation, pattern, or modifier\n\n"
 
             "GOOD ENHANCEMENT BEHAVIOR:\n"
             "- The image shows vines.\n"
@@ -854,6 +1273,18 @@ class AIAnalyzer:
             "- The scene create a calm feeling.\n"
             "→ The scene creates a calm and peaceful atmosphere.\n\n"
 
+            "- The child is on someone.\n"
+            "→ The child is sitting on someone’s shoulders.\n\n"
+
+            "- The hands are on the face.\n"
+            "→ The child is playfully placing their hands on the person’s face.\n\n"
+
+            "- The hands cover the head.\n"
+            "→ The hands are partly covering the person’s forehead.\n\n"
+
+            "- The scene looks nice.\n"
+            "→ The moment feels warm, playful, and caring.\n\n"
+
             "BAD ENHANCEMENT BEHAVIOR:\n"
             "- The image shows a digital stopwatch.\n"
             "→ The image shows a clear view of a digital stopwatch.\n\n"
@@ -863,6 +1294,12 @@ class AIAnalyzer:
 
             "- The image shows a building.\n"
             "→ The image shows a nice building.\n\n"
+
+            "- The child is on someone.\n"
+            "→ The child is located on a person.\n\n"
+
+            "- The scene looks nice.\n"
+            "→ The scene looks beautiful and interesting.\n\n"
 
             "ENHANCEMENT SCOPE RESTRICTION:\n"
             "- Stay strictly inside what the learner already described.\n"
@@ -898,6 +1335,26 @@ class AIAnalyzer:
             "- unrelated responses\n"
             "- off-task answers\n\n"
 
+            "LEARNING ASSET EXTRACTION RULES:\n"
+            "- Extract only useful learning assets from the 7 priority types.\n"
+            "- Do not extract every possible word.\n"
+            "- Prefer assets that are common, reusable, and useful in future real conversations.\n"
+            "- Prefer assets that can later become quiz, review, and roadmap content.\n"
+            "- Valuable words should be single words worth learning, not random object labels.\n"
+            "- Reusable chunks should be natural groups of words, not full long sentences unless the whole sentence pattern is useful.\n"
+            "- Collocations should sound natural in English.\n"
+            "- Sentence patterns should be reusable with different details.\n"
+            "- Preposition patterns should include the preposition and the phrase around it.\n"
+            "- Better expression upgrades should show the learner's simple wording and the improved wording.\n"
+            "- Modifiers should be words that make meaning more precise.\n\n"
+
+            "QUIZ-WORTHY ASSET RULES:\n"
+            "- A quiz-worthy asset should help the learner speak or write better later.\n"
+            "- Good quiz targets: partly, forehead, playful, sitting on someone’s shoulders, covered with vines, calm atmosphere, in the background.\n"
+            "- Weak quiz targets: car, tree, thing, object, nice, good, image.\n"
+            "- Do not prioritize image trivia.\n"
+            "- Do not make object recall the main learning target.\n\n"
+
             "Return valid JSON only with this exact structured shape:\n"
             "{\n"
             '  "score": 0,\n'
@@ -927,7 +1384,30 @@ class AIAnalyzer:
             '    "coveredEnhancement": "",\n'
             '    "enhancement": {"upgrades": [{"id": "u1", "targetText": "", "replacementText": "", "reason": "", "example": "", "category": "natural_phrasing"}]},\n'
             '    "message": "",\n'
-            '    "reusableLanguageFromEnhancement": {"nouns": [""], "verbs": [""], "phrases": [""], "collocations": [""], "sentenceStructures": [""], "positioningLanguage": [""], "atmosphereLanguage": [""]}\n'
+            '    "reusableLanguageFromEnhancement": {\n'
+            '      "nouns": [""],\n'
+            '      "verbs": [""],\n'
+            '      "phrases": [""],\n'
+            '      "collocations": [""],\n'
+            '      "sentenceStructures": [""],\n'
+            '      "positioningLanguage": [""],\n'
+            '      "atmosphereLanguage": [""],\n'
+            '      "valuableWords": [""],\n'
+            '      "reusablePhrasesOrChunks": [""],\n'
+            '      "sentencePatterns": [""],\n'
+            '      "prepositionPatterns": [""],\n'
+            '      "betterExpressionUpgrades": [{"from": "", "to": "", "why": ""}],\n'
+            '      "modifiers": [""]\n'
+            "    },\n"
+            '    "learningAssets": {\n'
+            '      "valuableWords": [{"value": "", "meaning": "", "example": "", "quizPriority": 0}],\n'
+            '      "reusablePhrasesOrChunks": [{"value": "", "meaning": "", "example": "", "quizPriority": 0}],\n'
+            '      "collocations": [{"value": "", "meaning": "", "example": "", "quizPriority": 0}],\n'
+            '      "sentencePatterns": [{"value": "", "meaning": "", "example": "", "quizPriority": 0}],\n'
+            '      "prepositionPatterns": [{"value": "", "meaning": "", "example": "", "quizPriority": 0}],\n'
+            '      "betterExpressionUpgrades": [{"from": "", "to": "", "why": "", "quizPriority": 0}],\n'
+            '      "modifiers": [{"value": "", "meaning": "", "example": "", "quizPriority": 0}]\n'
+            "    }\n"
             "  },\n"
             '  "improvedVersion": ""\n'
             "}\n\n"
@@ -944,7 +1424,14 @@ class AIAnalyzer:
             "- nextStepInstructions should contain only the next one or two useful guidance steps.\n"
             "- Mark readiness.ready true only when most important coverageFocuses are covered and the description is understandable.\n"
             "- initialAttemptFeedback.enhancement.upgrades should usually contain at least one upgrade unless the learner answer is already very articulate.\n"
-            "- inlineImprovements should mirror the same upgrade opportunities when possible.\n\n"
+            "- inlineImprovements should mirror the same upgrade opportunities when possible.\n"
+            "- initialAttemptFeedback.reusableLanguageFromEnhancement must prioritize the 7 learning asset types.\n"
+            "- initialAttemptFeedback.learningAssets must include only useful assets from the 7 priority types.\n"
+            "- Do not fill learningAssets with empty placeholder strings if no asset exists. Use empty arrays.\n"
+            "- Do not extract weak object labels as valuableWords unless they are genuinely useful for future conversation.\n"
+            "- Do not extract more than 3-5 items per asset type.\n"
+            "- betterExpressionUpgrades must connect directly to actual learner wording and the improved wording.\n"
+            "- quizPriority must be 0-100. Use 90-100 for the most reusable assets.\n\n"
 
             f"Scene guidance JSON:\n"
             f"{json.dumps(scene_guidance, ensure_ascii=True)}\n\n"
@@ -955,6 +1442,8 @@ class AIAnalyzer:
             f"Current learner explanation:\n"
             f"{self._short_text(learner_text, limit=520)}"
         )
+
+
 
     def _normalize_explanation_feedback(
         self,
@@ -4803,12 +5292,14 @@ class AIAnalyzer:
             return self._fallback_support_prompt(title, level)
         if level < 3 and not re.search(r"\?$", text):
             return self._fallback_support_prompt(title, level)
+        if level == 1 and self._is_generic_level_one_prompt(text, title):
+            return self._fallback_support_prompt(title, level)
         return text[:180]
 
     def _fallback_support_prompt(self, title: str, level: int) -> str:
         readable_focus = self._support_focus_phrase(title)
         if level == 1:
-            return f"What do you notice about {readable_focus}?"
+            return self._level_one_support_prompt(title)
         if level == 2:
             return f"Can you describe one specific detail about {readable_focus}?"
         if re.match(r"^(how|the way)\b", readable_focus, flags=re.I):
@@ -4816,6 +5307,45 @@ class AIAnalyzer:
         if re.search(r"\b(and|or)\b", readable_focus, flags=re.I):
             return "I can see ___."
         return f"{readable_focus[:1].upper()}{readable_focus[1:]} is ___."
+
+    def _is_generic_level_one_prompt(self, prompt: str, title: str) -> bool:
+        text = normalize_answer(prompt)
+        focus = normalize_answer(title)
+        if not text:
+            return True
+        if re.search(r"\bmake (that|this|it|the) part clearer\b", text):
+            return True
+        if re.search(r"\bcan you make\b.*\bclearer\b", text):
+            return True
+        if re.match(r"^(what do you notice|can you describe|tell me more)\??$", text):
+            return True
+        if focus and re.search(r"\b(this|that) part\b", text):
+            first_focus_word = next((word for word in focus.split() if len(word) >= 4), "")
+            if first_focus_word and first_focus_word not in text:
+                return True
+        return False
+
+    def _level_one_support_prompt(self, title: str) -> str:
+        readable_focus = self._support_focus_phrase(title)
+        key = normalize_answer(title)
+        if re.search(r"\bvisible\b.*\bbackground\b|\bbackground\b.*\bvisible\b", key):
+            return "What is visible in the background?"
+        if re.search(r"\bvisible\b.*\bforeground\b|\bforeground\b.*\bvisible\b", key):
+            return "What is visible in the foreground?"
+        if re.search(r"\b(action|doing|movement|walking|running|holding|carrying|using|reaching|pointing)\b", key):
+            return f"What is happening with {readable_focus}?"
+        if re.search(r"\b(position|positioning|behind|front|near|beside|next to|around|visible)\b", key):
+            return f"Where is {readable_focus} in the scene?"
+        if re.search(r"\b(atmosphere|mood|feeling|calm|busy|quiet|lively|peaceful)\b", key):
+            return "How does this part of the scene feel?"
+        if re.search(r"\b(greenery|vines|plants|trees|leaves|branches|bushes|shrubs)\b", key):
+            anchor = "the building" if re.search(r"\b(building|structure|wall|house|apartment)\b", key) else "the main subject"
+            return f"What greenery do you notice around {anchor}?"
+        if re.search(r"\b(background|foreground|setting|surroundings|environment|place)\b", key):
+            return f"What is visible in {readable_focus}?"
+        if re.search(r"\b(light|lighting|shadow|sky|weather|bright)\b", key):
+            return "What do you notice about the light or weather?"
+        return f"What specific detail do you notice about {readable_focus}?"
 
     def _support_focus_phrase(self, title: str) -> str:
         focus = self._clean_text_value(title).strip(" .") or "this part of the image"
